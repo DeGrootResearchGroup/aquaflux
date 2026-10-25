@@ -125,7 +125,11 @@ branches.
   program (2026-10-18)".
 - **Resident memory that is not a live array is mostly JAX's compiled-program cache** (2.1 GiB on bfs3d,
   1.1 on pitzDaily, 2026-10-24): read it as what `jax.clear_caches()` + `gc.collect()` + `malloc_trim(0)`
-  frees (`memory_residue.py`, `RESIDUE_CLEAR`); `RESIDUE_HLO` ranks the programs by HLO size, where an
+  frees (`memory_residue.py`, `RESIDUE_CLEAR`, which also counts executables and compilations at every
+  stage, so a mid-run clear's recompile cost shows); `RESIDUE_FUNCTIONS` counts the programs by jitted
+  function and `RESIDUE_DROP` clears chosen functions' caches only, which is how to test whether a program
+  is needed again (2026-10-25, log, "Which setup programs hold the reclaimable cache"). ⚠️ A function's
+  `_cache_size()` counts cache entries, several times its programs: count executables. `RESIDUE_HLO` ranks the programs by HLO size, where an
   array compiled in as a constant shows. ⚠️ **A reading taken after a solve returns also counts
   its session as cyclic garbage** (1.6 GiB of arrays on bfs3d) until a collection; collect first, and
   count what the harness itself keeps (captured step arguments) apart. Detail:
