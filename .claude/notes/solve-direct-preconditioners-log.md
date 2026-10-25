@@ -805,6 +805,49 @@
       whole adjoint on both arms (the probe's converged state, `state-00067`, is from a march that no
       longer exists, so it needs a fresh march and a `STATES` entry first).
 
+### What sets bfs3d's 2-step peak: re-fit #2's leading block re-fit, by owner (2026-10-25)
+
+      `memory_attribution.py` on `3efb56f6` (`main` `1bd8d292`, #824, plus the harness's stage-selective
+      census, peak-instant sampling and program ranking): 4-core Linux container, 15.7 GiB, no swap, glibc
+      2.39 defaults, jax 0.12.0.1, warm cache, shipped `case.yaml` (re-fit trim on, #818),
+      `BFS3D_MEMORY_STEPS=2`, census only at `block re-fit #3` and `re-fit #2`
+      (`BFS3D_MEMORY_CENSUS_STAGES`), `BFS3D_MEMORY_SAMPLE_DEVICE=1`, `BFS3D_MEMORY_PROGRAMS=1`, tracer on
+      (0.32 GiB). One run; measured before #825 (transposes packed only for an adjoint). GiB:
+
+      | stage | stage peak | live device at the peak | host traced at the peak |
+      |---|---|---|---|
+      | fit, block inverse build #1 | 5.21 | -- | -- |
+      | re-fit #1, leading block re-fit (`block re-fit #1`) | 5.90 | 2.25 | 0.50 |
+      | step 1's program, first call | 6.33 | 1.19 | 0.58 |
+      | **re-fit #2, leading block re-fit (`block re-fit #3`): the run's peak** | **6.80** | **2.26** | 0.63 |
+
+      - **The re-fit's peak is live arrays; the step program's is temporaries.** Against step 1's end
+        (resident 5.36, device 1.20, glibc free 1.07), the leading block re-fit adds +1.06 GiB of live
+        device arrays at its peak and only ~0.3 GiB of anything else. The step program's first call adds
+        nothing live (device 1.19) and ~1 GiB of temporaries.
+      - **What is live at `block re-fit #3`'s end (census; device 1.93, float64 0.13 → 0.41)**, over
+        step 1's end:
+        - the probe's result on the device, held through the block re-fits: `DeviceMatrix.values` 320 MiB
+          over 4 arrays (`float64(20981952,)` 160, `float64(10490976,)` 80, two `float32(10490976,)` 40
+          each), against 40 MiB at a step's end;
+        - two generations of the leading block's inverse: the new fine operator (`float32(92160, 252)`
+          × 2, 177 MiB) and levels (85 MiB) beside the old, and the SIMPLE pieces twice (Schur 96,
+          divergence 48, `dg` 48 MiB), held until `_release_superseded` runs;
+        - roughly half of the doubled operators are stored transposes, which #825 stops building at a
+          fit.
+      - **`fit_simple_level` holds 993 MiB of temporaries** (`BFS3D_MEMORY_PROGRAMS`), as much as the step
+        program's 1017; `fit_levels` 511, the batched probe 524 (per field), the split's
+        `compiled_apply` 296. Here the fit's temporaries were drawn largely from memory glibc had kept
+        (free 1.07 → 0.85, mapped 0.59 → 1.03), which is why they show as ~0.3 GiB above step 1's
+        baseline and not ~1.
+      - **Peak 6.80 GiB with the tracer**, against #822's 7.30 (mean of three, tracer on, before #819 and
+        #824): one run, so read as ~0.5 lower with the 0.4 GiB spread in mind.
+      - Proposals, each a library change (backlog §14f): release or narrow the probe's float64 result
+        before the block re-fits (~0.3 GiB at the peak); release the superseded leading inverse before
+        building the new (~0.45 GiB, about half of it removed by #825); bound `fit_simple_level`'s
+        temporaries (chunk the fit).
+      - Record: `memory_attribution.json` and `run-20261025-014717.log` (git-ignored), copied here.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the
