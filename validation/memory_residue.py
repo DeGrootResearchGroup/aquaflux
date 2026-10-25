@@ -24,6 +24,12 @@ and adds, at each stage's end, readings that split the remainder by what could h
   and the anonymous resident bytes before and after -- what glibc retains, separated from what it holds.
   It changes the run's later peaks (memory given back is not re-faulted from a retained arena).
 
+* **always**, a reading: the loaded executable count, and the compilations since the run started,
+  through JAX's monitoring events -- programs traced (count, seconds), lowered (seconds), handed to the
+  backend (count, seconds; a persistent-cache hit is one too, its retrieval inside the seconds) and
+  persistent-cache hits and misses. Read with ``RESIDUE_CLEAR`` at an earlier stage, the counts at the
+  later stages say what the clear made the run recompile, and the seconds what that cost.
+
 * **``RESIDUE_HLO=<stage label>;...``**, a reading: the live executables ranked by their serialized
   HLO module's size (a host array a jitted function closes over is compiled in as a constant, so a
   program carrying data is about the data's size), with the resident, live array and traced bytes.
@@ -297,6 +303,38 @@ def _executables_by_hlo(top: int = 15) -> dict:
     }
 
 
+#: JAX's monitoring events counted by :func:`_count_compilations`, by the name the record uses.
+_COMPILE_EVENTS = {
+    "/jax/core/compile/jaxpr_trace_duration": "trace",
+    "/jax/core/compile/jaxpr_to_mlir_module_duration": "lower",
+    "/jax/core/compile/backend_compile_duration": "backend",
+}
+_CACHE_EVENTS = {
+    "/jax/compilation_cache/cache_hits": "cache_hits",
+    "/jax/compilation_cache/cache_misses": "cache_misses",
+}
+_compilations: dict[str, float] = defaultdict(float)
+
+
+def _count_compilations() -> None:
+    """Count every trace, lowering and backend compilation (and its seconds) from here on."""
+    import jax
+
+    def on_duration(event: str, seconds: float, **_) -> None:
+        name = _COMPILE_EVENTS.get(event)
+        if name is not None:
+            _compilations[name] += 1
+            _compilations[f"{name}_seconds"] += seconds
+
+    def on_event(event: str, **_) -> None:
+        name = _CACHE_EVENTS.get(event)
+        if name is not None:
+            _compilations[name] += 1
+
+    jax.monitoring.register_event_duration_secs_listener(on_duration)
+    jax.monitoring.register_event_listener(on_event)
+
+
 def _trim() -> dict:
     before = _resident()
     _LIBC.malloc_trim(0)
@@ -361,7 +399,13 @@ def reading(row: dict) -> None:
     """The residue readings at one stage's end, added to its row and printed under it."""
     label = row["label"]
     t0 = time.perf_counter()
-    residue: dict = {"resident": _resident()}
+    import jax
+
+    residue: dict = {
+        "resident": _resident(),
+        "executable_count": len(jax.devices()[0].client.live_executables()),
+        "compilations": dict(_compilations),
+    }
     if READ:
         residue["smaps"] = _smaps_by_owner()
         residue["arenas"] = _arenas()
@@ -424,6 +468,15 @@ def _print(label: str, residue: dict) -> None:
         f" GiB, {resident['Threads']} threads, reading {residue['seconds']:.1f} s",
         flush=True,
     )
+    compiled = residue["compilations"]
+    print(
+        f"      executables {residue['executable_count']}; since the start: traced "
+        f"{compiled.get('trace', 0):.0f} ({compiled.get('trace_seconds', 0):.1f} s), lowered "
+        f"{compiled.get('lower_seconds', 0):.1f} s, backend {compiled.get('backend', 0):.0f} "
+        f"({compiled.get('backend_seconds', 0):.1f} s), persistent cache hits "
+        f"{compiled.get('cache_hits', 0):.0f} misses {compiled.get('cache_misses', 0):.0f}",
+        flush=True,
+    )
     if "smaps" in residue:
         _print_reading("", residue)
         executables = residue["executables"]
@@ -473,6 +526,7 @@ def _after_march(recorder) -> None:
 
 def main() -> None:
     attribution = _attribution()
+    _count_compilations()
     recorder = attribution.Recorder(record=RECORD)
     recorder.readings.append(reading)
     recorder.save_every_stage = True
