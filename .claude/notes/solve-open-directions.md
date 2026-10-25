@@ -791,6 +791,10 @@ on two meshes")**: JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 
 GiB is per-program runtime and compiler state over ~1300 executables; what doubles it between the meshes is
 not separated, so no 300k projection stands. Arrays XLA folded into every program holding the residual (14e)
 were 0.148 GiB of HLO on bfs3d but only ~0.05 GiB resident, measured on a march (2026-10-25).
+**Only the setup-only part of that cache can be given back (2026-10-25, same log, "How much of the
+compiled-program cache a mid-run clear gives back")**: a clear after `hybrid_initialize` frees 0.38 GiB on
+bfs3d (0.28 pitzDaily) for ~10–20 s of recompilation, and lowers the step-1 resident by ~0.37 GiB; the
+march recompiles and holds 1.4–1.5 GiB of it whatever is cleared. Proposal: 14f.
 
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
@@ -862,6 +866,23 @@ dim²); a broadcast is not folded. `validation/folded_constants.py` (on `50fe3be
 pitzDaily 1.87 → 0.01, residual bit-identical on both. **Measured gain on a bfs3d march is small**: all programs'
 HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the 1-step peak 6.25 → 6.43 (inside the
 0.4 GiB spread); one run per arm (log entry above). Kept because it costs nothing and removes a per-cell term.
+
+### 14f. Proposal (not built) — do not keep the setup's op-by-op programs through the march
+
+**Evidence** (`solve-direct-preconditioners-log.md`, "How much of the compiled-program cache a mid-run
+clear gives back", 2026-10-25, `main` `1bd8d292`, warm cache, 1 step, census off): of the 701 executables
+bfs3d's case build and `hybrid_initialize` leave, 267 never run again; dropping all 701 after
+`hybrid_initialize` frees 0.38 GiB (pitzDaily 0.28 of 685), the step-1 resident falls ~0.37 GiB (two runs
+per arm) and the peak 6.27 / 6.35 → 5.94 / 5.97 (inside the 0.4 GiB spread), for ~10–20 s of compilation.
+Clearing after the first fit too is dominated: +~200 s of re-tracing on bfs3d for ~0.1 GiB more.
+
+**Two library forms, neither measured:**
+- clear JAX's caches once the setup is done (in the case build's driver, before the first fit). Cheap,
+  but `jax.clear_caches()` is process-global: it also drops a caller's own compiled programs, so it
+  cannot sit inside the solver unasked;
+- compile the setup as fewer, larger programs (jit `hybrid_initialize`'s and the case build's array work
+  instead of running it op by op), which would shrink both the 701 programs and their compile time. This
+  is the one that scales: the reclaimable part is ~6 % of bfs3d's peak, not a lever for the 300k target.
 
 ## Smaller housekeeping
 

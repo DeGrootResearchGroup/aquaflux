@@ -751,24 +751,54 @@
         So bfs3d's 1-step peak on current `main` is ~6.3 ± 0.2 GiB, against 7.19 after #817 alone and
         8.07 on `7fe27d07`.
 
-### How much of the compiled-program cache a mid-run clear gives back, on bfs3d (2026-10-25)
+### How much of the compiled-program cache a mid-run clear gives back (2026-10-25)
 
-      IN PROGRESS -- interim readings, one run per arm, bfs3d, `memory_residue.py` on `f02c710d` (`main`
-      `1bd8d292` + compile counters in the harness), 4-core Linux container, 15.7 GiB, no swap, glibc 2.39
-      defaults, jax 0.12.0.1, `BFS3D_MEMORY_STEPS=1`, census off, tracer on.
-      - (a) control `RESIDUE_CLEAR=end`, cold cache (0 entries; on `1bd8d292`): peak 6.27, resident at step
-        1's end 5.32, the end clear frees 1.54 GiB (0.40 traced) of 1311 executables.
-      - (b) `RESIDUE_CLEAR="hybrid_initialize;end"`, warm cache (31 entries): the mid-run clear frees 0.38
-        GiB (0.03 traced) of 701 executables; peak 5.94, resident at step 1's end 4.96, 1044 executables
-        at the end, whose clear frees 1.52 (0.38 traced). A clear changes the rest of the run: an arm.
-      - (c) `RESIDUE_CLEAR="fit (first build);end"`, warm cache: the mid-run clear frees 1.39 GiB (0.32
-        traced) of 1287 executables; re-fit #1 then takes 196.8 s (its probe 148.6 s re-traces the batched
-        JVPs), peak 5.85, resident at step 1's end 4.85, 817 executables at the end whose clear frees 1.39.
-      - (a) control again, warm cache (31 entries, `5ba0652a`): peak 6.35, resident at step 1's end 5.37, march
-        522.3 s, 1311 executables at the end whose clear frees 1.88 GiB (0.40 traced).
-      - pitzDaily: (a) cold (9 misses) peak 3.09, resident 2.93, march 304.6 s, end clear 0.90 of 1126; (b)
-        mid clear 0.28 of 685, peak 2.77, resident 2.53, march 262.8 s; (c) mid clear 0.82 of 1102, re-fit #1
-        86.1 s, peak 2.73, resident 2.48, march 357.9 s, 715 executables at the end, end clear 0.77.
+      `validation/memory_residue.py` with `RESIDUE_CLEAR` (a `jax.clear_caches()` + `gc.collect()` +
+      `malloc_trim(0)` at the end of the named stages) and its per-stage executable and compilation
+      counters (JAX's monitoring events; added on this branch, `f02c710d`). Library `main` `1bd8d292`
+      throughout (the runs' commits differ only in `.claude/` notes); 4-core Linux container, 15.7 GiB, no
+      swap, glibc 2.39 defaults (no `MALLOC_*`), jax 0.12.0.1, shipped `case.yaml`s (re-fit trim on),
+      `BFS3D_MEMORY_STEPS=1`, census off, tracer on. Persistent compilation cache warm (the case's large
+      programs all hits) unless marked cold; default 2.0 s persistence floor, so the ~1000 small op-by-op
+      programs compile every run. **Each mid-run clear is an arm, not a reading: it changes what the rest
+      of the run compiles and holds.** GiB; "freed" is resident after a collection and a trim, less
+      resident after the clear and a trim; compile seconds are JAX's own (trace + lower + backend),
+      cumulative to the run's end.
+
+      | case, arm | mid-run clear frees (traced) of N executables | executables at end | end clear frees | resident at step 1's end | peak | march s | compile s (trace / lower / backend) |
+      |---|---|---|---|---|---|---|---|
+      | bfs3d (a) control, cold (`1bd8d292`, no counters) | -- | 1311 | 1.54 | 5.32 | 6.27 | 663.6 | -- |
+      | bfs3d (a) control | -- | 1311 | 1.88 | 5.37 | 6.35 | 522.3 | 182 / 62 / 55 |
+      | bfs3d (b) after `hybrid_initialize` | 0.38 (0.03) of 701 | 1044 | 1.52 | 4.96 | 5.94 | 550.4 | 188 / 64 / 68 |
+      | bfs3d (b) again | 0.38 (0.03) of 701 | 1044 | 1.53 | 4.99 | 5.97 | 509.4 | 177 / 61 / 63 |
+      | bfs3d (c) after `fit (first build)` | 1.39 (0.32) of 1287 | 817 | 1.39 | 4.85 | 5.85 | 749.7 | 312 / 89 / 96 |
+      | pitzDaily (a) control, cold (9 misses) | -- | 1126 | 0.90 | 2.93 | 3.09 | 304.6 | 95 / 40 / 99 |
+      | pitzDaily (a) control | -- | 1126 | 1.08 | 2.74 | 2.99 | 241.2 | 91 / 38 / 44 |
+      | pitzDaily (b) after `hybrid_initialize` | 0.28 (0.03) of 685 | 833 | 0.86 | 2.53 | 2.77 | 262.8 | 94 / 41 / 57 |
+      | pitzDaily (c) after `fit (first build)` | 0.82 (0.16) of 1102 | 715 | 0.77 | 2.48 | 2.73 | 357.9 | 148 / 54 / 77 |
+
+      - **Most of the cache belongs to programs the march runs again; only the setup-only part can be given
+        back.** Executable counts are deterministic (both (b) runs: 545 / 701 / 1004 / 1041 / 1044 by stage).
+        Of the 701 programs the case build and `hybrid_initialize` leave, 434 are compiled again by the fit
+        and the step (1044 = 1311 − 701 + 434); the other 267 never run again. A clear after the fit drops
+        494 programs for good (1311 → 817) but the next re-fit re-traces the probe's batched JVPs. After
+        either clear the end cache is still 1.39–1.53 GiB on bfs3d: what the march keeps compiled.
+      - **(b) lowers the step-1 resident by ~0.37 GiB on bfs3d (5.32 / 5.37 → 4.96 / 4.99, two runs per
+        arm) and ~0.21 on pitzDaily (one run per arm)**: about what the clear frees, so it persists through
+        the step. bfs3d's peak 6.27 / 6.35 → 5.94 / 5.97: four runs, every (b) below every control and the
+        earlier 6.25 / 6.43 readings, but the difference (~0.35) is inside the 0.4 GiB spread one
+        configuration shows, so it is suggestive, not established. pitzDaily's 0.22 is one run per arm.
+      - **(b) costs ~10–20 s of compilation**: ~430 small programs compiled again (backend +8 to +13 s on
+        bfs3d, +13 on pitzDaily; trace and lowering within run-to-run noise). The march's wall clock moves
+        −13 to +28 s on bfs3d, inside its noise; +22 s on pitzDaily, one run.
+      - **(c) is dominated by (b)**: ~0.1 GiB more off the step-1 resident on bfs3d for +130 s of tracing,
+        +27 lowering, +41 backend (re-fit #1 35 → 197 s, its probe 149 s) and +228 s of march; on pitzDaily
+        +106 compile s, +117 march s. The probe's programs persist from disk but re-trace every time.
+      - ⚠️ **The end clear's reading moved 0.34 GiB between the cold and the warm control** (1.54 against
+        1.88; resident before the clear 5.32 against 5.37), against 0.01 between the two (b) runs, both
+        warm. Whether an executable loaded from the persistent cache holds more than one compiled in
+        process is not separated (one run each); compare end-clear readings only at one cache state.
+      - Records: `memory_residue.<case>.json` and run logs (git-ignored), copied into this entry.
 
 ## Condensed out of the rule (2026-10-17)
 
