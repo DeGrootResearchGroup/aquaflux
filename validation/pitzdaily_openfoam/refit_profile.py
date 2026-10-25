@@ -169,7 +169,7 @@ def profile() -> None:
         blocks = _load(name)
         profiler = cProfile.Profile()
         profiler.enable()
-        split.refactor_blocks(blocks)
+        split.refactor_blocks(list(blocks))
         profiler.disable()
         stats = pstats.Stats(profiler, stream=io.StringIO())
         print(f"\n[{name}] cumulative seconds by part (nested parts overlap)")
@@ -188,7 +188,7 @@ def profile() -> None:
         samples = []
         for _ in range(REPEATS):
             started = time.perf_counter()
-            split.refactor_blocks(blocks)
+            split.refactor_blocks(list(blocks))
             samples.append(time.perf_counter() - started)
         print(
             f"[{name}] refactor_blocks: best {min(samples):.3f} s, "

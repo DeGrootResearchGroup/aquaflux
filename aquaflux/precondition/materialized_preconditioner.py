@@ -86,8 +86,12 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
             probe_batch_size=probe_batch_size,
         )
 
-    def _refactor_blocks(self, blocks: tuple[DeviceMatrix, ...]) -> None:
-        """Re-fit the inverse to an operator probed into its layout's blocks: the subclass's own."""
+    def _refactor_blocks(self, blocks: list[DeviceMatrix | None]) -> None:
+        """Re-fit the inverse to an operator probed into its layout's blocks: the subclass's own.
+
+        The list is the only reference the refresh keeps to the blocks, and the subclass empties it as it
+        uses them, so each block's values are freed once fitted rather than held through every fit.
+        """
         raise NotImplementedError
 
     @staticmethod
@@ -178,8 +182,9 @@ class MaterializedJacobianPreconditioner(HostPreconditioner):
                 self._fitted_shift(shift_diagonal, probed.diagonal, diagonal_correction)
             )
             # The blocks are slices of the values; the values are let go before the fit, so the two are
-            # never held through it together.
-            blocks = probed.blocks()
+            # never held through it together. The list is handed over and emptied by the fit, so each
+            # block is freed once used.
+            blocks = list(probed.blocks())
             del probed
             jax.block_until_ready([block.values for block in blocks])
             timer.lap("assemble")

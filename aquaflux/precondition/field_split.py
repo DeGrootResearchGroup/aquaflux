@@ -480,20 +480,26 @@ class FieldSplitInverse:
             If a block inverse offers no ``refactor_block`` (an injected inverse need not be refreshable
             at all). Both are checked before either is re-fitted, so a refusal leaves the split as it was.
         """
-        self.refactor_blocks(self._groups.blocks(block, self._maps))
+        self.refactor_blocks(list(self._groups.blocks(block, self._maps)))
 
-    def refactor_blocks(self, blocks: tuple[sp.csr_matrix | DeviceMatrix, ...]) -> None:
+    def refactor_blocks(self, blocks: list[sp.csr_matrix | DeviceMatrix | None]) -> None:
         """Re-fit to an operator already cut into this partition's blocks, IN PLACE.
 
         :meth:`refactor_block` cuts the whole operator and lands here; a probe laid out block by block
         (:func:`~aquaflux.precondition.sparse_jacobian.materialize_blocks`) hands its blocks straight in,
         on the device, so the whole operator is never formed and no value crosses to the host.
 
+        The list is emptied as its blocks are used, so a block the caller holds no other reference to is
+        freed as soon as it is: the trailing block is fitted and the coupling stored first, and only the
+        leading block -- the largest, whose fit is the largest transient of a refit -- is still held when
+        its own fit runs. The two block inverses are fitted independently, so the order changes no value.
+
         Parameters
         ----------
-        blocks : tuple of scipy.sparse.csr_matrix or DeviceMatrix
-            ``(A_ll, A_lt, A_tl, A_tt)`` as :meth:`FieldGroups.blocks` orders them, already shifted.
+        blocks : list of scipy.sparse.csr_matrix or DeviceMatrix
+            ``[A_ll, A_lt, A_tl, A_tt]`` as :meth:`FieldGroups.blocks` orders them, already shifted.
             ``A_lt`` is not read. The blocks may share memory with each other: the coupling is copied.
+            Every entry is ``None`` on return.
 
         Raises
         ------
@@ -502,11 +508,15 @@ class FieldSplitInverse:
         """
         leading = require_refactorable(self._leading, "this field split's leading block")
         trailing = require_refactorable(self._trailing, "this field split's trailing block")
-        leading.refactor_block(block_for(leading, blocks[0]))
+        blocks[1] = None
         trailing.refactor_block(block_for(trailing, blocks[3]))
+        blocks[3] = None
         # Solving the leading group first corrects the trailing equations: the block retained is
         # trailing-by-leading.
         self._set_coupling(blocks[2])
+        blocks[2] = None
+        whole_leading, blocks[0] = blocks[0], None
+        leading.refactor_block(block_for(leading, whole_leading))
 
     def destroy(self) -> None:
         """Release both block inverses' resources, if they hold any."""
@@ -674,8 +684,8 @@ class FieldSplitPreconditioner(MaterializedJacobianPreconditioner):
                 f"and this field split after {groups.n_leading_dofs}."
             )
 
-    def _refactor_blocks(self, blocks: tuple[DeviceMatrix, ...]) -> None:
-        """Re-fit the split to a probe's blocks (see the base's :meth:`refresh_in_place`)."""
+    def _refactor_blocks(self, blocks: list[DeviceMatrix | None]) -> None:
+        """Re-fit the split to a probe's blocks, emptying the list (see the base's :meth:`refresh_in_place`)."""
         self.inverse.refactor_blocks(blocks)
 
 

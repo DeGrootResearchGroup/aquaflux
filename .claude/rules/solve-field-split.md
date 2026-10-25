@@ -66,6 +66,14 @@ monolithic V-cycle while taking 11 % more cycles (log, 2026-08).
   (`FieldSplitInverse.padded_coupling()`); all bit-identical to slicing and `from_scipy`
   (`solve-amg-multigrid.md`, "entry maps"). Pinned by
   `test_a_block_layout_materializes_the_blocks_cut_from_the_whole_matrix`.
+  - **A refit hands its blocks over as a list the split empties, and fits the leading block last
+    (2026-10-25).** `refactor_blocks(blocks: list)` fits the trailing block, stores the coupling, then
+    fits the leading block with nothing else held, and sets every entry to `None` as it is used;
+    `refresh_in_place` keeps no other reference, so each block's values are freed once used (on bfs3d
+    the float64 coupling, 80 MiB, and trailing block, 40 MiB, no longer sit under the leading fit, a
+    refit's largest transient). The two block inverses are fitted independently, so the order moves no
+    value. Pinned by `test_a_refit_holds_no_other_block_while_the_leading_block_is_fitted`. A caller
+    re-fitting the same blocks twice passes `list(blocks)` each time.
 - **Transpose is closed-form** (reverse the block solves, use `Cᵀ`), so the adjoint is served. `Cᵀ` is
   formed on first use (`_transposed_coupling`) and dropped by `_set_coupling`, the one place a coupling is
   stored; do not re-derive it per apply (`A.T` on CSR is a CSC view that converts on every product).

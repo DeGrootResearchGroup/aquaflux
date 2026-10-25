@@ -678,7 +678,7 @@ def test_a_refit_probed_into_blocks_stays_on_the_device_and_fits_what_the_host_c
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(field_split, "as_scipy", no_host)
         patch.setattr(hierarchy_inverse, "as_scipy", no_host)
-        on_device.refactor_blocks(probed.blocks())
+        on_device.refactor_blocks(list(probed.blocks()))
     assert on_device._host_coupling is None
     on_host.refactor_block(developed + sp.diags(shift))
 
@@ -767,10 +767,54 @@ def test_a_refit_never_expands_the_probe_s_cell_level_block_patterns() -> None:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(KroneckerPattern, "dof_arrays", counted)
-        split.refactor_blocks(probed(1.5).blocks())
+        split.refactor_blocks(list(probed(1.5).blocks()))
     assert expanded == []
     # The spy sees an expansion when one happens: the first fit's host read-back forms them.
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(KroneckerPattern, "dof_arrays", counted)
         assert patterns[0].indices.size == patterns[0].nnz
     assert expanded == [patterns[0].shape]
+
+
+def test_a_refit_holds_no_other_block_while_the_leading_block_is_fitted() -> None:
+    """The leading block's fit is a refit's largest transient, so nothing else is held through it.
+
+    The refit empties the list it is handed: the trailing block is fitted and the coupling stored first,
+    and by the time the leading block is fitted the list holds no block at all, so a block the caller let
+    go of is already freed. A refit fitting the leading block first holds the coupling and the trailing
+    block through it.
+    """
+    n_cells = 60
+    groups = FieldGroups.by_counts(n_cells, n_leading_fields=2, n_trailing_fields=2)
+    coupling = sp.random(2 * n_cells, 2 * n_cells, density=0.05, random_state=2, format="csr")
+    operator = sp.csr_matrix(
+        sp.bmat([[_nodal_block(n_cells, seed=0), None], [coupling, _nodal_block(n_cells, seed=1)]])
+    )
+    leading, _, trailing_by_leading, trailing = groups.blocks(operator)
+    split = FieldSplitInverse(
+        JacobiSmoothedInverse(leading, 2),
+        JacobiSmoothedInverse(trailing, 2),
+        trailing_by_leading,
+        groups,
+    )
+    blocks = list(groups.blocks(1.5 * operator))
+    seen = []
+
+    def watching(fitted):
+        original = fitted.refactor_block
+
+        def refactor_block(block):
+            seen.append((fitted, [held is None for held in blocks]))
+            return original(block)
+
+        return refactor_block
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(split._leading, "refactor_block", watching(split._leading))
+        patch.setattr(split._trailing, "refactor_block", watching(split._trailing))
+        split.refactor_blocks(blocks)
+
+    assert [fitted for fitted, _ in seen] == [split._trailing, split._leading]
+    assert seen[1][1] == [True, True, True, True]
+    assert blocks == [None, None, None, None]
+    np.testing.assert_allclose(split.coupling.toarray(), 1.5 * trailing_by_leading.toarray())

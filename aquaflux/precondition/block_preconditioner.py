@@ -96,10 +96,12 @@ class MaterializedBlockPreconditioner(MaterializedJacobianPreconditioner):
                 f"{structure.layout.n_dofs} unknowns; one block inverse is fitted to the whole matrix."
             )
 
-    def _refactor_blocks(self, blocks: tuple[DeviceMatrix, ...]) -> None:
+    def _refactor_blocks(self, blocks: list[DeviceMatrix | None]) -> None:
         """Re-fit the inverse to the whole matrix, the one group's block, on the device where it can."""
         if blocks[3].shape != (0, 0):
             raise ValueError(
                 "the probe's blocks split the operator; one block inverse is fitted to the whole matrix."
             )
-        self.inverse.refactor_block(block_for(self.inverse, blocks[0]))
+        whole = blocks[0]
+        blocks[:] = [None] * len(blocks)
+        self.inverse.refactor_block(block_for(self.inverse, whole))
