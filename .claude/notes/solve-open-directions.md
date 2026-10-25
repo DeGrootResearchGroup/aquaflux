@@ -854,26 +854,32 @@ Jacobian and the peak does not fall.
 ### 14d. Arithmetic-preserving storage cuts
 
 None of these needs a convergence study:
-- do not store the fine Schur on its structural reach-6 pattern (133 MiB on bfs3d);
 - a cell-level pattern with the field implicit, in place of dof-level index arrays (2.19 GiB of int32 on
   the device at bfs3d's step 1, 2026-10-24; the 36.7M dof entries are ~1.0M cell pairs × 36).
 
 The cell-level pattern was worth up to ~2 GiB on bfs3d; it scales with the entry count, so it is the one of
 these that also bears on the 300k target. The stored transposes, a third such cut, are built (below).
 
+**The Schur is no longer stored (2026-10-25, branch `claude/schur-storage`):** the smoother applies
+`S = C − D (M G)` from its pieces and the fit forms only `S`'s diagonal and row norms, a chunk of rows at a
+time (`solve-flow-block.md`, "`S` is never held"). After the lazy transposes it holds ~28 MiB less on a
+bfs3d-sized fine level and its fit's transient ~131 MiB less (lattice). It is not bit-identical (the apply
+sums in another order), so it is not strictly one of these cuts; measurements in `solve-flow-block-log.md`,
+"The Schur applied from its pieces (2026-10-25)".
+
 **The cell-level pattern is built for the probe, the padded layouts, nodal Galerkin maps and the SIMPLE
 cuts (2026-10-24, branch `claude/cell-level-pattern`):** bfs3d device int32 2.19 → 0.40 GiB at step 1's
 end, step-1 peak 8.07 → 7.19 GiB, resident 7.13 → 6.11 (`solve-direct-preconditioners-log.md`, "Cell-level
 pattern (§14d), stages 1–3"). The probe's host block patterns (140 MiB on bfs3d) followed
 (`CellLevelPattern`, branch `claude/host-cell-patterns`). Still dof level: the diagonal and cell-block
-gathers (small), a non-nodal or diagonal-padded level, the 1×1 Schur, and the plan's own COO coordinates
+gathers (small), a non-nodal or diagonal-padded level, the 1×1 pressure block `C` and `S`'s row columns, and the plan's own COO coordinates
 (`ColumnProbePlan.pattern_rows`/`pattern_cols`/`in_reach`, ~18 MiB host on bfs3d).
 
 **The transposes are packed only for an adjoint (2026-10-24, branch `claude/lazy-transposes`):** bfs3d
 device at step 1's end 1.20 → 0.69 GiB, step-1 peak 6.49 → 6.13 GiB (census runs), every forward leaf's
 digest and step 1's rows unchanged; pitzDaily march identical, peak 3.085 → 2.900 GiB
 (`solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)"). Left in §14d: the fine Schur on its
-reach-6 pattern.
+reach-6 pattern (since built, above).
 
 ### 14e. BUILT (2026-10-24) — `BoundaryClosure.gradient_weight`'s unit tangents are broadcasts
 
@@ -892,19 +898,55 @@ HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the
 
 ### 14f. What the leading block re-fit holds at the march's peak (proposals, measured 2026-10-25)
 
-**Evidence.** A 2-step bfs3d march peaks in re-fit #2's leading block re-fit (6.80 GiB with the tracer, `main`
-`1bd8d292`): +1.06 GiB of live device arrays over step 1's end, the rest ~0.3 (log, "What sets bfs3d's 2-step
-peak"). Measured before #825, which stops storing the transposes (about half the doubled operators).
+**Evidence.** A 2-step bfs3d march peaks in re-fit #2's leading block re-fit: 6.80 GiB with the tracer on
+`1bd8d292`, +1.06 GiB of live device arrays over step 1's end (log, "What sets bfs3d's 2-step peak"); after
+#825, 5.82 GiB and +0.67 (log, "Fitting the leading block last"; one run each).
 
 **What.** Three library changes, each to be measured with `memory_attribution.py`
 (`BFS3D_MEMORY_CENSUS_STAGES="block re-fit #3"`, `BFS3D_MEMORY_SAMPLE_DEVICE=1`, two steps):
-- the probe's result is held on the device in float64 through the block re-fits (`DeviceMatrix.values`, 320
-  MiB against 40 at a step's end): release it, or keep only each block's float32 cut, before the re-fits;
-- the superseded leading inverse (fine operator 177 MiB, levels 85, SIMPLE pieces 192) lives beside the new
-  one until `_release_superseded`: release it before the new one is built, where the step does not still
-  hold it, or build in place;
+- CLOSED (2026-10-25): letting the probe's other float64 blocks go before the leading fit, by fitting it
+  last, measured no lower (ledger, "Fitting a refit's leading block last"); the leading block itself is its
+  fit's input, and the fit is computed in float64 by design;
+- the superseded leading inverse lives beside the new one until `_release_superseded` (after #825: fine
+  operator values 88 MiB, levels 42, SIMPLE pieces 96, the packed coupling 44); see the design below;
 - `fit_simple_level`'s 993 MiB of temporaries (as large as the step program's): fit per level or per row
   chunk.
+
+**Design for the superseded inverse (proposed 2026-10-25, for review; not built).**
+- *What holds the old arrays through the fit.* The host inverse lets go of its own hierarchy before the fit
+  (`HierarchyBlockInverse.refactor_block`: `self._hierarchy = None`) but keeps its SIMPLE pieces
+  (`_extras`) until `derive_extras` replaces them, after `fit_simple_level`, the largest program of a
+  re-fit. The traced form shares those arrays, and it is held by the session (`_form`), by its cached
+  stopping steps, and by every step the march and its callers hold (`staged_march` keeps the step it
+  passed `newton_march`; `newton_march` holds `strategy` and `active_step`). `_release_superseded` deletes
+  them only after the re-fit, so through the fit the old and new inverse are both alive.
+- *The change.* Release the outgoing form's value arrays at the start of a re-fit, before the probe, at
+  the hook point `BetaTrackingRefresh` already calls the allocator trim from (#818): the session hands the
+  hook a `before_refit` that deletes the leaves of `self._form` the re-fit will replace, then trims.
+  - Which leaves: a re-fit replaces each level's operator values, the SIMPLE pieces and the coupling,
+    and reuses a frozen coarsening's structural arrays and the prolongation values it reads back. So
+    each block inverse declares what a re-fit keeps (`refit_keeps() -> leaves`, beside
+    `traced_cycle()`), and everything else in the form is deleted. A dtype rule (integer kept, floating
+    replaced) is wrong: prolongation values are floating and kept.
+  - Drop `HierarchyBlockInverse._extras` before the fit as `_hierarchy` already is.
+  - `_release_superseded` stays, for whatever the early release keeps.
+- *Safety.* Between the hook's start and the update it returns nothing applies the preconditioner, so
+  deleting early changes no value; a step applied across a re-fit already raises (the 2026-10-18 release contract).
+  New failure mode: a re-fit that raises after the release leaves the session's form deleted. Guard it:
+  on an exception inside the re-fit, set `_form = None` and `_full_rebuild_pending`, so the next
+  `build` fits afresh rather than gluing deleted arrays (the Reynolds ladder's retreat catches only a
+  march's non-convergence, `EquinoxRuntimeError`, and rebuilds through the session).
+- *Not taken: the march hand-off ("option 3" in `solve.md`)* — a one-shot holder so `staged_march` keeps
+  no step. It would let the post-refit release become garbage collection, but it frees nothing before the
+  fit by itself: the session's `_form`, its stopping steps and the host inverse's `_extras` still hold the
+  old arrays. It is a cleanup, independent of this.
+- *Expected gain:* the old leading values, SIMPLE pieces and packed coupling, ~0.27 GiB at the re-fit peak
+  (~5 % of bfs3d's 5.82 GiB 2-step peak), estimated from the 2026-10-25 census shapes after #825.
+- *Measurement, pre-registered:* `memory_attribution.py`, 2 steps, census at the leading block re-fit of
+  re-fit #2, `BFS3D_MEMORY_SAMPLE_DEVICE=1 BFS3D_MEMORY_CHECKSUMS=1`, one run per arm: success is live device
+  at that peak at least 0.2 GiB below base with every split leaf digest identical. Tests: a re-fit after the
+  early release is bit-identical to one without (both precisions); a raising re-fit leaves the session to
+  re-fit, not to glue deleted arrays.
 
 ### 14g. Proposal (not built) — release `laplace_field`'s per-call programs when it returns
 
@@ -929,6 +971,22 @@ process. **Candidate forms, none measured:**
 
 Audit any other place a per-call closure reaches a module-level `eqx.filter_jit` (only this call site in
 `aquaflux/` on 2026-10-25). Worth ~0.2–0.35 GiB on bfs3d, ~5 % of its peak.
+
+### 14h. Two small allocator-side ideas (proposals, not built, 2026-10-25)
+
+- **Collect the march's cycles when a solve returns.** After `staged_march` returns, its session and splits
+  are cyclic garbage until Python's collector reaches them: 1.60 GiB of device arrays on bfs3d on
+  `13fa17d4` (before #817--#825), 0.16 GiB on `39786723` (after #817--#819), each read by
+  `memory_residue.py`'s `RESIDUE_CLEAR=end` as a `gc.collect()` + `malloc_trim(0)` before the cache clear
+  (log, "What the resident memory holds beyond live arrays, on two meshes"). The resident drop at that step
+  (1.0--1.3 GiB) includes the trim's and is not separated from the collection's. It costs what runs next in
+  the same process (the adjoint, a second solve), never the march's own peak. Candidate: one `gc.collect()`
+  at the end of `solve_coupled` / `solve_flow_march`, before `root_adjoint` is attached; measure the
+  adjoint's peak with and without.
+- **Trim after the step program's first call.** That call leaves 0.68 GiB (bfs3d) / 0.38 (pitzDaily) of freed
+  memory in glibc's arenas (`memory_residue.py`, `RESIDUE_TRIM`, `13fa17d4`). The session already trims before
+  every re-fit (#818), so this would not lower a march's peak, only what a march holds between its first
+  step and its next re-fit. Worth doing only if a case's peak is ever set there, which bfs3d's is not.
 
 ## Smaller housekeeping
 
