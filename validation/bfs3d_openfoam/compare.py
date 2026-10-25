@@ -112,6 +112,12 @@ FIGS = HERE / "figures"
 # The operating point (0.orig/ and constant/): U_in = 10 m/s, nu = 1e-5, h = 0.01 -> Re_h = 10000.
 # k_in = 0.375 (5% turbulence intensity), omega_in = 1600 (length scale 0.07 H1). rho = 1.
 RHO, NU = 1.0, 1e-5
+#: A relative perturbation of the molecular viscosity (`BFS3D_NU_PERTURBATION`, default 0): `NU` becomes
+#: `1e-5 * (1 + eps)`. It exists to draw a SPREAD of marches rather than one. A last-bit change like
+#: `eps = 1e-14` moves nothing physical, but this march's rounding-decided steps make one run a single
+#: draw, so an A/B between two settings is read over several draws per arm (`eps` in 0, +-1e-14, ...).
+NU_PERTURBATION = float(os.environ.get("BFS3D_NU_PERTURBATION", "0"))
+NU *= 1.0 + NU_PERTURBATION
 U_IN, K_IN, OMEGA_IN = 10.0, 0.375, 1600.0
 H = 0.01  # step height
 WALLS = ["upperWall", "lowerWall", "sideWalls"]
@@ -1345,6 +1351,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # Printed unconditionally, including at its default: a damping ratio is invisible in a march
         # log otherwise, and two differently-damped runs would produce identical banners.
         ("turbulence damping", f"{TURB_DAMPING:g}"),
+        # A perturbed draw's banner must say so: two draws are otherwise configured identically.
+        ("viscosity perturbation", f"{NU_PERTURBATION:g}"),
         # Both are swept, so both must be printed: without them two differently-configured runs produce
         # identical banners, which is the failure this table exists to prevent.
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL:g}"),
