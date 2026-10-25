@@ -42,8 +42,10 @@ There is no `StructuralPatterns`, `_structured`, `block_approximate_inverse` or 
   does and in its order, adds `C`, and reduces each chunk to its diagonal and squared norms before the
   next. **Why:** `S` reaches twice as far as the level operator, so on bfs3d's fine level it stores 7.1M
   entries in rows padded to ~377 against 9.2M for `C + D + M G`, which the smoother holds anyway but
-  for `C`; its values, transpose and transpose layout were ~165 MiB float32 on a 23040-cell reach-3 lattice,
-  and the whole-`S` float64 product a transient at every re-fit. An isolated product ties (22–27 ms both
+  for `C`. Its values (both ways) and transpose layout were ~132 MiB float32 on a 23040-cell reach-3
+  lattice against ~17 MiB for `C` (its row columns, 33 MiB, stay), and the whole-`S` float64 product was a
+  transient at every re-fit. bfs3d 1-step: device arrays at the step's end 1.20 -> 1.04 GiB, peak
+  6.50 -> 6.39 GiB (one run per arm), every shared split leaf bit-identical. An isolated product ties (22–27 ms both
   ways, same lattice). **Rejected:** row norms without `S`'s columns, by sorting each chunk's terms
   (exact to 2e-15, but 23.6 s against 6.3 s for the whole fit); a forward-only formed `S` (a fragment of
   §14d's first bullet, which wants every operator's transposes). ⚠️ Not bit-identical to the formed
