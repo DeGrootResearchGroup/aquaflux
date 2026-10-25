@@ -493,9 +493,9 @@
         **march step 974 MiB** of temporaries over 1373 MiB of arguments (the split's leaves and the
         state); batched JVP of 8 tangents **829 MiB** (arguments 98); single JVP 202; residual 106. So the
         probe's temporary is ~100 MiB a tangent plus ~30, as the 2026-10-18 census read it; a Krylov
-        application's JVP needs ~200 MiB and the residual ~100; and ~770 MiB of the step's temporary is
-        the split's padded products and the solve's own vectors, which is the 14a answer: the step's
-        temporaries follow the split's storage, not the residual's. (The harness armed the step's capture
+        application's JVP needs ~200 MiB and the residual ~100. What the step's temporary holds is
+        measured in "What the march step's temporary holds" (2026-10-25, below): chiefly hoisted int32
+        decoded columns, not padded products or the solve's vectors. (The harness armed the step's capture
         only after step `STEPS − 1`, so a 1-step run printed no step size; fixed the same day.) Two 1-step
         runs of one configuration spread 0.4 GiB in peak, so a bfs3d peak is not pinned closer than that.
       - Record: `validation/bfs3d_openfoam/memory_attribution.json` and the run log (both git-ignored),
@@ -798,6 +798,57 @@
         materialized too (one `f32[n_rows·width]` live at the peak, 10.5); the multiply and row sum are one
         kernel after it, so no `(n_rows, width)` product array exists.
       - Record: `validation/step_temporaries.pitzdaily.json` and `run-20261025-021615.log` (git-ignored).
+
+      **bfs3d** (23 040 cells, 138 240 dof; run on `a8ff053a`, `1bd8d292` plus the harness, no library
+      change; capture 229 s, compiles 53 / 42 s), MiB:
+
+      | | split arm | identity arm |
+      |---|---|---|
+      | temp (`memory_analysis`) / peak live in it | **1017.3** / 1001.7 | **392.9** / 391.1 |
+      | argument | 1010.2 | 98.8 |
+      | split: decoded padded columns `s32[n_rows, width]`, hoisted (70 slots: 35 operators × 2 call sites) | 497.1 | -- |
+      | split: decoded columns not hoisted (12) + cell gathers of the decode `s32[n·w]` (12) | 50.2 + 43.2 | -- |
+      | split: gathered `x[columns]`, `f32[23224320]` = 92160 × 252, hoisted (1) | 88.6 | -- |
+      | residual JVP: hoisted linearization (419 slots) | 124.2 | 124.2 |
+      | residual JVP: tangent working set | 83.8 | 166.5 |
+      | copies without metadata | 65.2 | 52.8 |
+      | hoisted state-independent residual pieces (line search) | 41.7 | 41.7 |
+      | Krylov vectors live at the peak (the basis, 16 × 138240 × 8 = 16.9, is not live there) | 3.9 | 3.9 |
+
+      - **The method reproduces the record**: the split arm's temp and arguments are the 2026-10-25 entry's
+        (1.02 / 1.01 GiB), and a standalone JVP / residual at this state 201.5 / 105.7 MiB (record 202 / 106).
+      - **The step's temporary is 61 % the split's (624.4 MiB = 1017.3 − 392.9; its peak slots sum to
+        680.8), and 590.5 MiB of that is int32 decoded columns**, not products or the solve's vectors. Each
+        operator's `x[rows.columns()]` decodes and normalizes its columns once per call site, XLA hoists the
+        result out of the Krylov / V-cycle loops, and the step holds it for all ~35 operators at once, twice
+        (`M v` in the Arnoldi loop and `x = M V y` at the restart boundary): the leading fine operator alone
+        is `s32[92160,252]` ×2 = 177 MiB. These are the dof-level forward columns #817 took out of the
+        arguments (`_PaddedLayout`, 591 MiB with the transposes and packing maps on `7fe27d07`),
+        recreated as temporaries, twice over.
+      - **The 2026-10-24 entry's "~770 MiB is the split's padded products and the solve's own vectors" was
+        wrong in kind**: no `(n_rows, width)` float product is materialized (the multiply and row sum are
+        one kernel; the gathered operand `x[columns]` is, one at a time, 88.6 MiB), and the solve's own
+        vectors at the peak are 4 MiB.
+      - **Without a split the step still holds 393 MiB, ~2× a JVP**: the JVP's working set plus 166 MiB XLA
+        hoisted out of the loops (the linearization at the fixed state, the line search's state-independent
+        residual pieces) and 53 MiB of loop-carried copies. That is the residual's share for §14a's
+        per-cell budget: 17 KB a cell, of which hoisting is 7.
+      - **Proposal, not built (no library change here)**: keep the decode inside the loop body, so one
+        operator's decoded columns are live at a time. `validation/padded_decode_hoisting.py` (compile only,
+        a stand-in `_padded_product` at the leading fine operator's shape, 10 applies in a `fori_loop`):
+        one operator 177.2 MiB plain, 177.2 with `mode="promise_in_bounds"` (the normalization is not the
+        cost; the decode is materialized regardless), 160.6 with the stored cells passed through
+        `lax.optimization_barrier` with the iterate each iteration; **four operators 443.3 plain against
+        160.9 with the barrier**. On the step that would bound the split's ~590 MiB of decoded columns near
+        the largest operator's 89 (+ the gathered operand), at the price of re-decoding every apply (the
+        counted decode measured +8 % on an isolated 4×4 apply, 2026-10-24 entry). Sharing one decode
+        between the two call sites is the smaller alternative (halves it). Neither is measured on the step.
+      - Does NOT distinguish: the arms are one state (the first step, anchor station); temporaries follow
+        shapes, so another state with the same coarsening gives the same buffers, but a re-fit that
+        re-coarsens would not. "Owner" is the innermost `aquaflux` frame of an instruction's metadata, so a
+        fused kernel mixing the split's and the residual's work is named by one of them; the copies carry no
+        metadata and are not attributed. The peak is XLA's static schedule, not a measured resident peak.
+      - Record: `validation/step_temporaries.bfs3d.json` and `run-20261025-023437.log` (git-ignored).
 
 ## Condensed out of the rule (2026-10-17)
 

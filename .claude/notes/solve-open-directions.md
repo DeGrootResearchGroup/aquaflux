@@ -798,8 +798,8 @@ were 0.148 GiB of HLO on bfs3d but only ~0.05 GiB resident, measured on a march 
 JVP, each compiled twice: with the shipped split and with an identity preconditioner. Compile only, no march.
 Optionally add one device-memory snapshot at the first re-fit's peak.
 
-**Why.** It splits the step's ~984 MiB of temporaries into the preconditioner's share and the residual
-JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_rows, width)` products.
+**Why.** It splits the step's ~1 GiB of temporaries into the preconditioner's share and the residual
+JVP's.
 - If the residual's share alone exceeds the per-cell budget once projected by face count, which is about
   2× on a polyhedral dual, the laptop target is closed whatever the preconditioner does.
 - If the padded products dominate, 14b–14d are worth doing.
@@ -808,6 +808,17 @@ JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_row
 face loop at its peak. Face-blocking it and the flux balance reaches ~440–472 MiB, no better than halving
 the batch, and is not built (`solve-refuted-directions.md`, "Assembling the residual's face sums in
 blocks").
+
+**The step half, 2026-10-25 (bfs3d, first step, `validation/step_temporaries.py`;
+`solve-direct-preconditioners-log.md`, "What the march step's temporary holds"):** the step's 1017 MiB of
+temporaries is 624 MiB the split's (the identity arm is 393), and 591 of that is int32 decoded padded
+columns, each operator's `s32[n_rows, width]` hoisted out of the loops and held for every operator at
+once, twice (two call sites of the split); no `(n_rows, width)` float product is materialized, and the
+solve's own vectors are 4 MiB. The residual's share without a split is ~2× a JVP (393 MiB, 17 KB a cell),
+7 KB a cell of it loop invariants XLA hoisted. So the split is the lever on the step's temporary, but
+through its decoded indices, not 14b–14c's values: keeping the decode inside the loop body
+(`validation/padded_decode_hoisting.py`: four operators 443 → 161 MiB) is the cut to measure on the step
+first, unbuilt.
 
 ### 14b. A consistent compact operator for the fit
 
