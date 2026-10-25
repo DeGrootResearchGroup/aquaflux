@@ -17,9 +17,9 @@ uniform-reach-3 march of either case, the two things that could separate them:
             to the anchor companion and built at the anchor's seed, then re-bound to the step's station
             and re-fitted at the checkpoint and the step's shift), once per probe arm: the step's own
             solver at the march's tolerance and again at ``REACH_FOLDING_TIGHT_RTOL``, with cycles, the
-            Euclidean and row-scaled linear residuals, the rows the pivot floor moved, and the step's
-            line-search ladder ``|G(phi + a d)| / |G(phi)|``. The operator is the exact Jacobian in every
-            arm; only the preconditioner differs.
+            Euclidean and row-scaled linear residuals (the latter also per row field), the rows the pivot
+            floor moved, and the step's line-search ladder ``|G(phi + a d)| / |G(phi)|``. The operator
+            is the exact Jacobian in every arm; only the preconditioner differs.
 
 Arms (``REACH_FOLDING_ARMS``, comma-separated, default ``3,2,each``): ``3`` probes every column at reach 3,
 ``2`` every column at reach 2, ``each`` adds one arm per field with only that column at reach 2 --
@@ -209,10 +209,16 @@ def solve_arm(rebuild, label, column_reach, names, tight_rtol):
             f"{float(jnp.linalg.norm(linear) / jnp.linalg.norm(g)):.2e}  row-scaled "
             f"{float(norm(linear) / norm(g)):.3e}  ({time.time() - t0:.0f} s)"
         )
+        # Which row fields the unsolved residual sits in, in the step's measure (each field's rows alone).
+        shares = [
+            float(norm(jnp.where(jnp.arange(linear.size) // n == f, linear, 0.0)) / norm(g))
+            for f in range(len(names))
+        ]
+        line += "\n              by row field " + " ".join(f"{names[f]} {shares[f]:.2e}" for f in range(len(names)))
         if tag == "march rtol":
             v = project(p, d) if project is not None else d
             ladder = [float(norm(G(p + a * v))) / float(norm(g)) for a in LADDER]
-            line += "  ladder " + " ".join(f"{r:.3f}" for r in ladder)
+            line += "\n              ladder " + " ".join(f"{r:.3f}" for r in ladder)
         print(line, flush=True)
     shift = np.asarray(shift)
     del active, session, preconditioner, apply_a, G
