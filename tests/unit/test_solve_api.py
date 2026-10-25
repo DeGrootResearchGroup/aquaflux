@@ -56,6 +56,8 @@ USER_IMPLEMENTS = frozenset(
         "MeasureBuilder",
         "NamedBlockMeasure",
         "OffersTracedCycle",
+        # An operator in a user's own preconditioner that packs its transpose only for an adjoint.
+        "PacksTranspose",
         "ReadableShift",
         "RefactorableInverse",
         "RefreshTrigger",

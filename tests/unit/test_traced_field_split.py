@@ -21,11 +21,15 @@ from aquaflux.precondition import (
     SimpleSmoothed,
     field_split_inverse,
 )
+from aquaflux.precondition.monolithic_policy import _TracedFormAdjoint
+from aquaflux.precondition.padded_rows import _PaddedRowOperator
 from aquaflux.precondition.traced_field_split import (
     TracedFieldSplit,
     contains_host_callback,
     traced_field_split,
 )
+from aquaflux.solve import with_transposes
+from aquaflux.solve.root_adjoint import _transposed_preconditioner
 
 N_CELLS, N_LEADING, N_TRAILING = 600, 4, 2
 
@@ -107,9 +111,68 @@ def test_the_transpose_comes_from_jax_and_matches_the_host_arrangement() -> None
     r = np.random.default_rng(11).normal(size=groups.n_dofs)
 
     expected = np.asarray(host.apply(r, transpose=True))
-    (got,) = jax.linear_transpose(traced.matvec(), jnp.zeros(groups.n_dofs))(jnp.asarray(r))
+    (got,) = jax.linear_transpose(with_transposes(traced).matvec(), jnp.zeros(groups.n_dofs))(
+        jnp.asarray(r)
+    )
 
     assert np.linalg.norm(np.asarray(got) - expected) / np.linalg.norm(expected) < 1e-13
+
+
+def _padded_operators(tree) -> list[_PaddedRowOperator]:
+    return [
+        leaf
+        for leaf in jax.tree.leaves(tree, is_leaf=lambda x: isinstance(x, _PaddedRowOperator))
+        if isinstance(leaf, _PaddedRowOperator)
+    ]
+
+
+@pytest.mark.parametrize("operator", [_operator, _grid_operator], ids=["held", "cell-level"])
+def test_a_fitted_split_holds_no_transposes_and_an_adjoint_packs_them_for_its_solve_only(
+    operator,
+) -> None:
+    """A forward solve never applies a transpose, so the split a step carries holds none.
+
+    Every padded-row operator in the split -- each level of both hierarchies, the SIMPLE pieces and the
+    coupling -- holds its rows alone. The adjoint's transpose solve packs the transposes into its own
+    copy (``root_adjoint`` asks the factory's operators through ``with_transposes``), which applies
+    ``Mᵀ`` exactly as the transpose the host arranges by hand, and leaves the step's split as it was.
+    Both the held form and the cell-level form of the operators' columns are fitted.
+    """
+    groups = _groups()
+    host = field_split_inverse(
+        operator(),
+        groups,
+        leading_inverse=SimpleSmoothed(strength_threshold=0.25, max_levels=4, max_coarse=200),
+        trailing_inverse=JacobiSmoothed(max_coarse=150),
+    )
+    traced = traced_field_split(host)
+    operators = _padded_operators(traced)
+    assert len(operators) > 6  # the coupling, the SIMPLE pieces, and every level's operator
+    assert all(op.transposed is None and op.t_values is None for op in operators)
+
+    r = jnp.asarray(np.random.default_rng(13).normal(size=groups.n_dofs))
+    factory = _TracedFormAdjoint(traced)
+    transposed = _transposed_preconditioner(factory, r, r)
+    expected = np.asarray(host.apply(np.asarray(r), transpose=True))
+    got = np.asarray(transposed(r))
+    assert np.linalg.norm(got - expected) / np.linalg.norm(expected) < 1e-13
+    # The copy belongs to the transpose solve; the factory the step carries still holds no transpose.
+    assert all(op.transposed is None for op in _padded_operators(factory))
+
+    packed = with_transposes(traced)
+    assert all(op.t_values is not None for op in _padded_operators(packed))
+    # Only the transposes were added: each operator's own arrays are the split's, not copies.
+    for before, after in zip(operators, _padded_operators(packed), strict=True):
+        assert after.values is before.values
+    (again,) = jax.linear_transpose(packed.matvec(), jnp.zeros(groups.n_dofs))(r)
+    np.testing.assert_array_equal(np.asarray(again), got)
+
+
+def test_transposing_a_fitted_split_without_its_transposes_raises_by_name() -> None:
+    """Never a silent fallback to the scatter-add transpose of every gather: the error names the fix."""
+    _, traced, groups = _pair()
+    with pytest.raises(RuntimeError, match="with_transposes"):
+        jax.linear_transpose(traced.matvec(), jnp.zeros(groups.n_dofs))(jnp.ones(groups.n_dofs))
 
 
 def test_the_traced_split_emits_no_host_callback() -> None:
@@ -319,7 +382,7 @@ def test_a_single_precision_split_runs_in_single_precision_and_returns_double() 
 def test_a_single_precision_split_transposes_to_its_adjoint() -> None:
     """``jax.linear_transpose`` still yields the adjoint, to single-precision rounding."""
     host, _, groups = _pair()
-    single = traced_field_split(host, "float32")
+    single = with_transposes(traced_field_split(host, "float32"))
     rng = np.random.default_rng(4)
     x = jnp.asarray(rng.normal(size=groups.n_dofs))
     y = jnp.asarray(rng.normal(size=groups.n_dofs))
@@ -400,7 +463,7 @@ def test_a_split_holding_its_coupling_in_single_precision_composes_the_same_sing
         assert np.array_equal(narrow.coupling.indices, wide.coupling.indices)
         assert narrow.coupling[tiny[0] - groups.n_leading_dofs, tiny[1]] == 0.0
         packed = narrow.padded_coupling()
-        assert packed.values.dtype == packed.t_values.dtype == jnp.float32
+        assert packed.values.dtype == packed.with_transpose().t_values.dtype == jnp.float32
         from_wide, from_narrow = (traced_field_split(split, "float32") for split in (wide, narrow))
         wide_leaves, narrow_leaves = jax.tree.leaves(from_wide), jax.tree.leaves(from_narrow)
         assert len(wide_leaves) == len(narrow_leaves)

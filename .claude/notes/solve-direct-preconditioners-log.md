@@ -751,6 +751,198 @@
         So bfs3d's 1-step peak on current `main` is ~6.3 ± 0.2 GiB, against 7.19 after #817 alone and
         8.07 on `7fe27d07`.
 
+### How much of the compiled-program cache a mid-run clear gives back (2026-10-25)
+
+      `validation/memory_residue.py` with `RESIDUE_CLEAR` (a `jax.clear_caches()` + `gc.collect()` +
+      `malloc_trim(0)` at the end of the named stages) and its per-stage executable and compilation
+      counters (JAX's monitoring events; added on this branch, `f02c710d`). Library `main` `1bd8d292`
+      throughout (the runs' commits differ only in `.claude/` notes); 4-core Linux container, 15.7 GiB, no
+      swap, glibc 2.39 defaults (no `MALLOC_*`), jax 0.12.0.1, shipped `case.yaml`s (re-fit trim on),
+      `BFS3D_MEMORY_STEPS=1`, census off, tracer on. Persistent compilation cache warm (the case's large
+      programs all hits) unless marked cold; default 2.0 s persistence floor, so the ~1000 small op-by-op
+      programs compile every run. **Each mid-run clear is an arm, not a reading: it changes what the rest
+      of the run compiles and holds.** GiB; "freed" is resident after a collection and a trim, less
+      resident after the clear and a trim; compile seconds are JAX's own (trace + lower + backend),
+      cumulative to the run's end.
+
+      | case, arm | mid-run clear frees (traced) of N executables | executables at end | end clear frees | resident at step 1's end | peak | march s | compile s (trace / lower / backend) |
+      |---|---|---|---|---|---|---|---|
+      | bfs3d (a) control, cold (`1bd8d292`, no counters) | -- | 1311 | 1.54 | 5.32 | 6.27 | 663.6 | -- |
+      | bfs3d (a) control | -- | 1311 | 1.88 | 5.37 | 6.35 | 522.3 | 182 / 62 / 55 |
+      | bfs3d (b) after `hybrid_initialize` | 0.38 (0.03) of 701 | 1044 | 1.52 | 4.96 | 5.94 | 550.4 | 188 / 64 / 68 |
+      | bfs3d (b) again | 0.38 (0.03) of 701 | 1044 | 1.53 | 4.99 | 5.97 | 509.4 | 177 / 61 / 63 |
+      | bfs3d (c) after `fit (first build)` | 1.39 (0.32) of 1287 | 817 | 1.39 | 4.85 | 5.85 | 749.7 | 312 / 89 / 96 |
+      | pitzDaily (a) control, cold (9 misses) | -- | 1126 | 0.90 | 2.93 | 3.09 | 304.6 | 95 / 40 / 99 |
+      | pitzDaily (a) control | -- | 1126 | 1.08 | 2.74 | 2.99 | 241.2 | 91 / 38 / 44 |
+      | pitzDaily (b) after `hybrid_initialize` | 0.28 (0.03) of 685 | 833 | 0.86 | 2.53 | 2.77 | 262.8 | 94 / 41 / 57 |
+      | pitzDaily (c) after `fit (first build)` | 0.82 (0.16) of 1102 | 715 | 0.77 | 2.48 | 2.73 | 357.9 | 148 / 54 / 77 |
+
+      - **Most of the cache belongs to programs the march runs again; only the setup-only part can be given
+        back.** Executable counts are deterministic (both (b) runs: 545 / 701 / 1004 / 1041 / 1044 by stage).
+        Of the 701 programs the case build and `hybrid_initialize` leave, 434 are compiled again by the fit
+        and the step (1044 = 1311 − 701 + 434); the other 267 never run again. A clear after the fit drops
+        494 programs for good (1311 → 817) but the next re-fit re-traces the probe's batched JVPs. After
+        either clear the end cache is still 1.39–1.53 GiB on bfs3d: what the march keeps compiled.
+      - **(b) lowers the step-1 resident by ~0.37 GiB on bfs3d (5.32 / 5.37 → 4.96 / 4.99, two runs per
+        arm) and ~0.21 on pitzDaily (one run per arm)**: about what the clear frees, so it persists through
+        the step. bfs3d's peak 6.27 / 6.35 → 5.94 / 5.97: four runs, every (b) below every control and the
+        earlier 6.25 / 6.43 readings, but the difference (~0.35) is inside the 0.4 GiB spread one
+        configuration shows, so it is suggestive, not established. pitzDaily's 0.22 is one run per arm.
+      - **(b) costs ~10–20 s of compilation**: ~430 small programs compiled again (backend +8 to +13 s on
+        bfs3d, +13 on pitzDaily; trace and lowering within run-to-run noise). The march's wall clock moves
+        −13 to +28 s on bfs3d, inside its noise; +22 s on pitzDaily, one run.
+      - **(c) is dominated by (b)**: ~0.1 GiB more off the step-1 resident on bfs3d for +130 s of tracing,
+        +27 lowering, +41 backend (re-fit #1 35 → 197 s, its probe 149 s) and +228 s of march; on pitzDaily
+        +106 compile s, +117 march s. The probe's programs persist from disk but re-trace every time.
+      - ⚠️ **The end clear's reading moved 0.34 GiB between the cold and the warm control** (1.54 against
+        1.88; resident before the clear 5.32 against 5.37), against 0.01 between the two (b) runs, both
+        warm. Whether an executable loaded from the persistent cache holds more than one compiled in
+        process is not separated (one run each); compare end-clear readings only at one cache state.
+      - Records: `memory_residue.<case>.json` and run logs (git-ignored), copied into this entry.
+
+### Which setup programs hold the reclaimable cache: three Laplace solves (2026-10-25)
+
+      `validation/memory_residue.py` with `RESIDUE_FUNCTIONS` (every live `jax.jit` / `eqx.filter_jit`
+      wrapper the collector reaches, with its cache's entries, by defining module; the live executables
+      by HLO module name) and `RESIDUE_DROP` (clear only the named functions' caches at a stage's end, then
+      collect and trim). Library `main` `d7f5bf28` (#825; the runs' commits differ only in the harness
+      and `.claude/`); same container, jax 0.12.0.1, glibc defaults, shipped `case.yaml`s,
+      `BFS3D_MEMORY_STEPS=1`, census off, tracer on, `RESIDUE_CLEAR=end`, warm cache except where a run
+      shows misses. One run per arm. Each drop is an arm. GiB:
+
+      | case, arm (drop at `hybrid_initialize`'s end) | programs dropped | executables 701 → | freed then | executables at end | resident at step 1's end | peak | march s |
+      |---|---|---|---|---|---|---|---|
+      | bfs3d (f) control | -- | -- | -- | 1311 | 4.60 | 5.59 | 488.0 |
+      | bfs3d (d) `jax` (the op-by-op programs) | 673 | 28 | 0.09 | 1064 | 4.56 | 5.53 | 534.0 (4 cache misses) |
+      | bfs3d (e) `aquaflux,other` | 11 | 690 | 0.20 | 1300 | 4.21 | 5.20 | 470.4 |
+      | bfs3d (g) `aquaflux.solve.newton.newton_step` | 3 | 698 | 0.19 | 1308 | 4.26 | 5.25 | 483.2 |
+      | pitzDaily (f) control | -- | -- | -- | 1126 | 2.62 | 2.86 | 228.6 |
+      | pitzDaily (e) `aquaflux,other` | 13 | 672 (of 685) | 0.08 | 1113 | 2.80 | 2.95 | 247.5 (3 misses) |
+
+      - **The 673 op-by-op programs are not where the memory is**: they free 0.09 GiB, and the run compiles
+        ~430 of them again (end 1064 = 1311 − 673 + 426). Every op-by-op program belongs to a jitted
+        library function (`jnp.multiply`, `jnp.less`, the `jit_broadcast_in_dim` / `jit_gather` dispatch
+        wrappers): the largest name counts at bfs3d's end are `jit_stage` 174, `jit_broadcast_in_dim` 168,
+        `jit_convert_element_type` 128.
+      - **The 11 aquaflux programs left at `hybrid_initialize` are setup-only and hold 0.20 GiB**, and
+        three of them hold 0.19: the `eqx.filter_jit(newton_step)` programs of `laplace_field`'s three
+        solves (`flow/initialization.py`: φ, then `k` and ω in `turbulence/initialization.py`). The
+        others are `_fused_geometry`, `fit_levels`, and 3 each of `compiled_apply` and
+        `_operator_spectral_estimate` at the Laplace hierarchy's shapes. None is compiled again (end 1300 /
+        1308 = 1311 − 11 / 3), so dropping them costs nothing.
+      - **Why they stay**: `laplace_field` passes per-call closures (`residual`, the preconditioner factory
+        over the Laplace hierarchy) to the module-level `eqx.filter_jit(newton_step)`. A closure is a static
+        argument, so each call compiles a program of its own with the closure's arrays compiled in (the 3 ×
+        ~16 MiB of HLO noted above), and the C++ cache key holding the closure keeps it alive for the
+        process. A standalone check (same container): `eqx.filter_jit` of a per-call function, a
+        module-level `eqx.filter_jit` given a per-call closure, and an `eqx.filter_jit(...).lower().compile()`
+        all keep their program after every reference is gone, the second also its closure's captured
+        array; `jax.jit` of a per-call function frees its program, cached or AOT, once the function is
+        gone.
+      - Step-1 resident and peak fall by ~0.35 GiB in (e) and (g) on bfs3d, more than the 0.19–0.20 freed at
+        the drop; whether the rest is noise (one run each) or memory released with the closures is not
+        separated. pitzDaily's 13-program drop frees 0.08, below its run-to-run spread; its (e) run read
+        higher than its control.
+      - Counts a function's cache reports (`_cache_size()`) exceed its programs (3002 entries for 701
+        executables at bfs3d's `hybrid_initialize`): count programs by executable, not by cache entry.
+
+### Lazy transposes (§14d) (2026-10-24)
+
+      Branch `claude/lazy-transposes` on `claude/cell-level-pattern` (#817; the branch was rebased onto `main` after #817 merged, so
+      `f235016a` below is the rebased commit "Pack the transposes where a caller transposes a
+      preconditioner itself", whose `aquaflux/precondition` and `aquaflux/solve` the rebase left as they
+      were measured, and base `02c3e7c4` has #817's `aquaflux/` as squashed into `0c76b4ec`): padded-row
+      operators hold
+      their rows alone; `solve.with_transposes` packs `Aᵀ` for an adjoint's transpose solve only
+      (`solve-amg-multigrid.md`, "The transpose is packed only for an adjoint"). Base `02c3e7c4`, branch
+      `f235016a`, each run once in its own worktree, one after the other on one otherwise idle 4-core
+      Xeon container (15.7 GiB, jax 0.12.0.1, glibc defaults, shipped `case.yaml`s, warm compilation
+      cache shared by both).
+
+      **bfs3d, `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=1
+      BFS3D_MEMORY_CHECKSUMS=1`.** GiB:
+
+      | stage | base `02c3e7c4` | branch `f235016a` |
+      |---|---|---|
+      | fit (first build): device | 1.09 | 0.64 |
+      | re-fit #1: stage peak | 6.17 | 5.52 |
+      | march step 1, first call: stage peak (= run peak) | 6.49 | 6.13 |
+      | step 1 end: device (float32 / int32) | 1.20 (0.66 / 0.40) | 0.69 (0.35 / 0.22) |
+      | step 1 end: resident | 5.51 | 5.14 |
+
+      - Both traced splits: 565 → 327 leaves; every one of the 327 kept has the base's digest; the 238
+        gone are 34 operators × 7 (`t_values` and the six arrays of a transposed `_KroneckerColumns`).
+        Step 1's inner rows identical.
+      - By owner at step 1's end (census): `_KroneckerColumns` 264.0 MiB / 41 → 93.0 / 15; the operators
+        under `_SimplePieces` 193.4 → 96.7, under the levels 177.2 + 165.5 → 88.6 + 82.7, the coupling
+        88.6 → 44.3. Device 0.51 GiB less, about the 0.6 the backlog estimated: the int32 half is smaller
+        than estimated because #817 had already moved the transposed columns to cell level.
+      - Census runs: peaks sit above census-free ones (stages 1–3's census-free step-1 peak was 7.19).
+
+      **pitzDaily `march_cost.py`** (shipped `case.yaml`): base 21 steps / 102 cycles / final R 5.736e-06 /
+      `x_r/h` 8.0686 / ν_t/ν peak 418.09, VmHWM 3.085 GiB, end 2.925; branch the same counts with all 21
+      step rows identical (every column but wall time), VmHWM 2.900 GiB, end 2.597. The base run
+      overlapped a 3-worker unit-test run, so its seconds (solve 337.7 s against 260.9) are void.
+
+      **Adjoint.** The finite-difference adjoint tests (`test_coupled_field_split.py`, both precisions,
+      the pivot-floored fit, refit every step) and the other gradient tests of the integration suite pass;
+      a transpose is packed by the operator's own slot rule at the widest column, so it equals what a
+      fit packed whenever no transpose budget applied (neither case sets `shape_headroom`). The adjoint
+      now pays one host read-back of every operator per transpose solve, timed below.
+
+      **What the packing costs an adjoint** (`adjoint_transpose_cost.py`, branch at "Time what packing the
+      transposes costs a bfs3d adjoint", same container, shipped `case.yaml`, the hybrid start, one run,
+      2026-10-25): `with_transposes` over the step's adjoint factory 22.9 s, resident high-water unchanged
+      at 4.43 GiB; the factory's widening to double 3.5 s (paid before too); one transposed application of
+      the widened split 1.13 s best / 1.19 s mean of 20, its first call (compile) 123 s. The packing is 19
+      mean applications: against the 1454–1575 a bfs3d adjoint was measured to spend
+      (`adjoint_probe.py`'s docstring), 1.2–1.3 % of the transpose solve's applications. Not measured: a
+      whole adjoint on both arms (the probe's converged state, `state-00067`, is from a march that no
+      longer exists, so it needs a fresh march and a `STATES` entry first).
+
+### What sets bfs3d's 2-step peak: re-fit #2's leading block re-fit, by owner (2026-10-25)
+
+      `memory_attribution.py` on `3efb56f6` (`main` `1bd8d292`, #824, plus the harness's stage-selective
+      census, peak-instant sampling and program ranking): 4-core Linux container, 15.7 GiB, no swap, glibc
+      2.39 defaults, jax 0.12.0.1, warm cache, shipped `case.yaml` (re-fit trim on, #818),
+      `BFS3D_MEMORY_STEPS=2`, census only at `block re-fit #3` and `re-fit #2`
+      (`BFS3D_MEMORY_CENSUS_STAGES`), `BFS3D_MEMORY_SAMPLE_DEVICE=1`, `BFS3D_MEMORY_PROGRAMS=1`, tracer on
+      (0.32 GiB). One run; measured before #825 (transposes packed only for an adjoint). GiB:
+
+      | stage | stage peak | live device at the peak | host traced at the peak |
+      |---|---|---|---|
+      | fit, block inverse build #1 | 5.21 | -- | -- |
+      | re-fit #1, leading block re-fit (`block re-fit #1`) | 5.90 | 2.25 | 0.50 |
+      | step 1's program, first call | 6.33 | 1.19 | 0.58 |
+      | **re-fit #2, leading block re-fit (`block re-fit #3`): the run's peak** | **6.80** | **2.26** | 0.63 |
+
+      - **The re-fit's peak is live arrays; the step program's is temporaries.** Against step 1's end
+        (resident 5.36, device 1.20, glibc free 1.07), the leading block re-fit adds +1.06 GiB of live
+        device arrays at its peak and only ~0.3 GiB of anything else. The step program's first call adds
+        nothing live (device 1.19) and ~1 GiB of temporaries.
+      - **What is live at `block re-fit #3`'s end (census; device 1.93, float64 0.13 → 0.41)**, over
+        step 1's end:
+        - the probe's result on the device, held through the block re-fits: `DeviceMatrix.values` 320 MiB
+          over 4 arrays (`float64(20981952,)` 160, `float64(10490976,)` 80, two `float32(10490976,)` 40
+          each), against 40 MiB at a step's end;
+        - two generations of the leading block's inverse: the new fine operator (`float32(92160, 252)`
+          × 2, 177 MiB) and levels (85 MiB) beside the old, and the SIMPLE pieces twice (Schur 96,
+          divergence 48, `dg` 48 MiB), held until `_release_superseded` runs;
+        - roughly half of the doubled operators are stored transposes, which #825 stops building at a
+          fit.
+      - **`fit_simple_level` holds 993 MiB of temporaries** (`BFS3D_MEMORY_PROGRAMS`), as much as the step
+        program's 1017; `fit_levels` 511, the batched probe 524 (per field), the split's
+        `compiled_apply` 296. Here the fit's temporaries were drawn largely from memory glibc had kept
+        (free 1.07 → 0.85, mapped 0.59 → 1.03), which is why they show as ~0.3 GiB above step 1's
+        baseline and not ~1.
+      - **Peak 6.80 GiB with the tracer**, against #822's 7.30 (mean of three, tracer on, before #819 and
+        #824): one run, so read as ~0.5 lower with the 0.4 GiB spread in mind.
+      - Proposals, each a library change (backlog §14f): release or narrow the probe's float64 result
+        before the block re-fits (~0.3 GiB at the peak); release the superseded leading inverse before
+        building the new (~0.45 GiB, about half of it removed by #825); bound `fit_simple_level`'s
+        temporaries (chunk the fit).
+      - Record: `memory_attribution.json` and `run-20261025-014717.log` (git-ignored), copied here.
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the

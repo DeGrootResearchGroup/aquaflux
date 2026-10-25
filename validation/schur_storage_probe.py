@@ -38,6 +38,7 @@ from aquaflux.precondition.padded_rows import _PaddedRowOperator  # noqa: E402
 from aquaflux.precondition.saddle_multigrid import _simple_pieces  # noqa: E402
 from aquaflux.precondition.simple_fit import fit_simple_level, simple_plan  # noqa: E402
 from aquaflux.precondition.traced_cycle import in_precision  # noqa: E402
+from aquaflux.solve import with_transposes  # noqa: E402
 
 SHAPE = tuple(int(v) for v in os.environ.get("PROBE_SCHUR_SHAPE", "40x24x24").split("x"))
 CALLS = int(os.environ.get("PROBE_SCHUR_CALLS", "50"))
@@ -89,8 +90,8 @@ def mean_ms(fn, *args) -> float:
 
 
 def mib(operator: _PaddedRowOperator) -> str:
-    """An operator's slot values both ways, in MiB."""
-    return f"{(operator.values.nbytes + operator.t_values.nbytes) / 2**20:.1f} MiB"
+    """An operator's slot values, in MiB (a transpose, packed only for an adjoint, doubles it)."""
+    return f"{operator.values.nbytes / 2**20:.1f} MiB"
 
 
 def sorted_row_statistics(n, divergence, correction, pressure):
@@ -165,13 +166,15 @@ def main() -> None:
         ("M G", pieces.dg),
     ):
         print(
-            f"  {name}: {operator.nnz / 1e6:.2f}M entries, width {operator.width} / "
-            f"{operator.transpose_width}, values both ways {mib(operator)}"
+            f"  {name}: {operator.nnz / 1e6:.2f}M entries, width {operator.width}, "
+            f"values {mib(operator)}"
         )
 
     x = jnp.asarray(np.random.default_rng(1).standard_normal(n), jnp.float32)
     forward_formed = jax.jit(lambda s, v: s.apply(v))
     forward_pieces = jax.jit(lambda p, v: p.schur_apply(v))
+    # A transpose is packed only for an adjoint, so each operator is given its own before it is timed.
+    formed_t, pieces_t = with_transposes(formed), with_transposes(pieces)
     transposed_formed = jax.jit(lambda s, v: jax.linear_transpose(s.apply, v)(v)[0])
     transposed_pieces = jax.jit(lambda p, v: jax.linear_transpose(p.schur_apply, v)(v)[0])
     one, other = forward_formed(formed, x), forward_pieces(pieces, x)
@@ -182,8 +185,8 @@ def main() -> None:
         print(
             f"  repeat {repeat}: formed {mean_ms(forward_formed, formed, x):.2f} ms, "
             f"pieces {mean_ms(forward_pieces, pieces, x):.2f} ms; transposed formed "
-            f"{mean_ms(transposed_formed, formed, x):.2f} ms, pieces "
-            f"{mean_ms(transposed_pieces, pieces, x):.2f} ms",
+            f"{mean_ms(transposed_formed, formed_t, x):.2f} ms, pieces "
+            f"{mean_ms(transposed_pieces, pieces_t, x):.2f} ms",
             flush=True,
         )
 
@@ -212,9 +215,9 @@ def main() -> None:
     start = time.perf_counter()
     values, _ = jax.block_until_ready(fit_simple_level(plan, slots))
     print(f"  whole level fit {time.perf_counter() - start:.2f} s")
-    divergence = plan.divergence_layout.with_values(*values.divergence)
-    correction = plan.correction_layout.with_values(*values.correction)
-    pressure = plan.pressure_layout.with_values(*values.pressure)
+    divergence = plan.divergence_layout.with_values(values.divergence)
+    correction = plan.correction_layout.with_values(values.correction)
+    pressure = plan.pressure_layout.with_values(values.pressure)
     by_sort = jax.jit(sorted_row_statistics, static_argnums=0)
     arguments = tuple(
         (op.columns, op.values, op.row_lengths) for op in (divergence, correction, pressure)

@@ -89,8 +89,9 @@ class _SimplePieces(eqx.Module):
     def schur_apply(self, p: jnp.ndarray) -> jnp.ndarray:
         """``S p = C p - D (M G p)``, shape ``(n_pressure,)``.
 
-        Linear, and transposed through each piece's stored transpose. It sums in another order than a
-        product with ``S`` formed, so the two differ in the last bits of the working precision.
+        Linear, and transposed through each piece's transpose once the pieces hold them
+        (:func:`~aquaflux.solve.with_transposes`). It sums in another order than a product with ``S``
+        formed, so the two differ in the last bits of the working precision.
         """
         return self.pressure.apply(p) - self.divergence.apply(self.dg.apply(p))
 
@@ -160,15 +161,15 @@ def _held_pieces(
         )
     block_inverse = None
     if values.block_inverse is not None:
-        block_inverse = plan.block_layout.with_values(*values.block_inverse)
+        block_inverse = plan.block_layout.with_values(values.block_inverse)
     return in_precision(
         _SimplePieces(
             f_block_inverse=block_inverse,
             n_velocity=plan.n_velocity,
             f_diagonal_inverse=values.velocity_inverse,
-            dg=plan.correction_layout.with_values(*values.correction),
-            divergence=plan.divergence_layout.with_values(*values.divergence),
-            pressure=plan.pressure_layout.with_values(*values.pressure),
+            dg=plan.correction_layout.with_values(values.correction),
+            divergence=plan.divergence_layout.with_values(values.divergence),
+            pressure=plan.pressure_layout.with_values(values.pressure),
             schur_diagonal_inverse=values.schur_inverse,
         ),
         precision,

@@ -56,6 +56,7 @@ from aquaflux.flow.block_preconditioner import (  # noqa: E402
     ConvectionTwoLevel,
 )
 from aquaflux.precondition import FieldSplitPreconditioner, field_split_inverse  # noqa: E402
+from aquaflux.solve import with_transposes  # noqa: E402
 from aquaflux.turbulence import ScalarTwoLevel  # noqa: E402
 
 compare = fsp.compare
@@ -94,13 +95,16 @@ def _block_simple_build(coupled, pc_state, pc_beta, trailing_inverse, compositio
     flow = flow_ref
     n_flow = int(flow.shape[0])
 
-    block = BlockPreconditioner.build(
-        momentum,
-        velocity=ConvectionTwoLevel(),
-        reference_state=flow,
-        schur_scaling="msimple",
-        composition=composition,
-        strength_threshold=0.25,
+    # The adapter transposes the block, so its hierarchies pack their transposes.
+    block = with_transposes(
+        BlockPreconditioner.build(
+            momentum,
+            velocity=ConvectionTwoLevel(),
+            reference_state=flow,
+            schur_scaling="msimple",
+            composition=composition,
+            strength_threshold=0.25,
+        )
     )
     a_p = jax.lax.stop_gradient(block.frozen_momentum_diagonal(flow) * (1.0 + pc_beta))
     matvec = jax.jit(block.apply_at(flow, a_p))

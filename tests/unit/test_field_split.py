@@ -312,7 +312,7 @@ class TestBlockTriangularAlgebra:
             split.refactor_block(matrix)
             packed = _PaddedRowOperator.from_scipy(groups.blocks(matrix)[2])
             coupling = split.padded_coupling()
-            for name in ("columns", "row_lengths", "values", "t_columns", "t_values"):
+            for name in ("columns", "row_lengths", "values"):
                 assert np.array_equal(
                     np.asarray(getattr(coupling, name)), np.asarray(getattr(packed, name))
                 )

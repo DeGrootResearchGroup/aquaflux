@@ -24,6 +24,12 @@ and adds, at each stage's end, readings that split the remainder by what could h
   and the anonymous resident bytes before and after -- what glibc retains, separated from what it holds.
   It changes the run's later peaks (memory given back is not re-faulted from a retained arena).
 
+* **always**, a reading: the loaded executable count, and the compilations since the run started,
+  through JAX's monitoring events -- programs traced (count, seconds), lowered (seconds), handed to the
+  backend (count, seconds; a persistent-cache hit is one too, its retrieval inside the seconds) and
+  persistent-cache hits and misses. Read with ``RESIDUE_CLEAR`` at an earlier stage, the counts at the
+  later stages say what the clear made the run recompile, and the seconds what that cost.
+
 * **``RESIDUE_HLO=<stage label>;...``**, a reading: the live executables ranked by their serialized
   HLO module's size (a host array a jitted function closes over is compiled in as a constant, so a
   program carrying data is about the data's size), with the resident, live array and traced bytes.
@@ -34,6 +40,24 @@ and adds, at each stage's end, readings that split the remainder by what could h
   ``malloc_trim(0)``, reading the resident set and the executable count after each. Dropping the
   executables mid-run makes the next call recompile; ``end`` changes nothing measured after it but the
   programs' memory analyses, which compile again from the persistent cache in either case.
+
+* **``RESIDUE_FUNCTIONS=<stage label>;...``**, a reading: every jitted function alive (each
+  ``jax.jit`` / ``eqx.filter_jit`` wrapper the collector can reach, including ``jax.numpy``'s own: an
+  operation run outside a jit on concrete arrays is a call of a jitted library function) with the number
+  of programs its cache holds, summed by the module that defined the function and grouped into ``jax``
+  (the library's own functions, the op-by-op programs), ``aquaflux`` and ``other`` (equinox, lineax,
+  the case scripts). A function's count is its cache's entries, which can exceed the programs it holds
+  (more entries than executables in every reading); the live executables are also counted by their HLO
+  module's name (``jit_<function>``), which catches programs no jitted function's cache holds.
+
+* **``RESIDUE_DROP=<stage label>=<group>[,<group>];...``**, an arm: at the end of the named stage, the
+  caches of every jitted function of the named groups (as ``RESIDUE_FUNCTIONS`` groups them; a token
+  holding a dot names one function instead, as ``<module>.<qualname>``, e.g.
+  ``aquaflux.solve.newton.newton_step``) are cleared
+  -- that function's programs only, nothing else of JAX's -- then a ``gc.collect()`` and a
+  ``malloc_trim(0)``, reading the resident set and the executables before and after. Read with
+  ``RESIDUE_FUNCTIONS`` at later stages, it says which of the dropped functions' programs the run compiles
+  again.
 
 Each row's readings are written into ``memory_attribution.py``'s record (``RESIDUE_RECORD`` names it,
 default ``memory_residue.<case>.json`` beside this file) under ``residue``, and printed under the
@@ -74,6 +98,18 @@ TRIM = os.environ.get("RESIDUE_TRIM", "0") == "1"
 CLEAR = {label.strip() for label in os.environ.get("RESIDUE_CLEAR", "").split(";") if label.strip()}
 #: Stage labels after which the live executables are ranked by HLO size, without clearing anything.
 HLO = {label.strip() for label in os.environ.get("RESIDUE_HLO", "").split(";") if label.strip()}
+#: Stage labels after which the live jitted functions are counted by module.
+FUNCTIONS = {
+    label.strip() for label in os.environ.get("RESIDUE_FUNCTIONS", "").split(";") if label.strip()
+}
+#: Stage label -> the function groups whose caches are dropped at its end.
+DROP = {
+    label.strip(): {group.strip() for group in groups.split(",") if group.strip()}
+    for label, _, groups in (
+        entry.rpartition("=") for entry in os.environ.get("RESIDUE_DROP", "").split(";")
+    )
+    if label.strip()
+}
 RECORD = Path(os.environ.get("RESIDUE_RECORD", HERE / f"memory_residue.{CASE}.json"))
 GIB = 2**30
 MIB = 2**20
@@ -297,6 +333,171 @@ def _executables_by_hlo(top: int = 15) -> dict:
     }
 
 
+#: JAX's monitoring events counted by :func:`_count_compilations`, by the name the record uses.
+_COMPILE_EVENTS = {
+    "/jax/core/compile/jaxpr_trace_duration": "trace",
+    "/jax/core/compile/jaxpr_to_mlir_module_duration": "lower",
+    "/jax/core/compile/backend_compile_duration": "backend",
+}
+_CACHE_EVENTS = {
+    "/jax/compilation_cache/cache_hits": "cache_hits",
+    "/jax/compilation_cache/cache_misses": "cache_misses",
+}
+_compilations: dict[str, float] = defaultdict(float)
+
+
+def _count_compilations() -> None:
+    """Count every trace, lowering and backend compilation (and its seconds) from here on."""
+    import jax
+
+    def on_duration(event: str, seconds: float, **_) -> None:
+        name = _COMPILE_EVENTS.get(event)
+        if name is not None:
+            _compilations[name] += 1
+            _compilations[f"{name}_seconds"] += seconds
+
+    def on_event(event: str, **_) -> None:
+        name = _CACHE_EVENTS.get(event)
+        if name is not None:
+            _compilations[name] += 1
+
+    jax.monitoring.register_event_duration_secs_listener(on_duration)
+    jax.monitoring.register_event_listener(on_event)
+
+
+def _modules_by_qualname() -> dict[str, str]:
+    """The defining module of every function and method of the loaded aquaflux modules, by qualname."""
+    import types
+
+    index: dict[str, str] = {}
+
+    def add(obj, module: str) -> None:
+        function = getattr(obj, "__func__", obj)
+        function = getattr(function, "fget", function)
+        if isinstance(function, types.FunctionType) and function.__module__ == module:
+            index.setdefault(function.__qualname__, module)
+
+    for module_name, module in list(sys.modules.items()):
+        if not module_name.startswith("aquaflux") or module is None:
+            continue
+        for value in list(vars(module).values()):
+            if isinstance(value, type) and value.__module__ == module_name:
+                for member in vars(value).values():
+                    add(member, module_name)
+            else:
+                add(value, module_name)
+    return index
+
+
+def _defining_module(qualname: str, index: dict[str, str]) -> str | None:
+    """The module defining ``qualname``, or the function it is a closure of."""
+    while qualname:
+        if qualname in index:
+            return index[qualname]
+        qualname = qualname.rpartition(".<locals>")[0]
+    return None
+
+
+def _jitted_functions() -> list[tuple[str, str, object]]:
+    """(group, defining module, the jit wrapper) for every jitted function the collector reaches.
+
+    An ``eqx.filter_jit`` wrapper's inner ``jax.jit`` wraps a function equinox defines, named after the
+    user's function but not carrying its module: that is read from a live ``filter_jit`` wrapper holding
+    it, or else looked up by qualname among the loaded aquaflux modules (closures by their enclosing
+    function); a function found in neither is grouped ``other`` under equinox.
+    """
+    index = _modules_by_qualname()
+    owners: dict[int, str] = {}
+    wrappers = []
+    for obj in gc.get_objects():
+        name = type(obj).__name__
+        if name == "PjitFunction":
+            wrappers.append(obj)
+        elif name == "_JitWrapper":
+            cached = getattr(obj, "_cached", None)
+            module = getattr(getattr(obj, "__wrapped__", None), "__module__", None)
+            if cached is not None and module:
+                owners[id(cached)] = module
+    rows = []
+    for wrapper in wrappers:
+        module = owners.get(id(wrapper)) or getattr(
+            getattr(wrapper, "__wrapped__", None), "__module__", None
+        )
+        if module == "equinox._jit":
+            module = _defining_module(getattr(wrapper, "__qualname__", ""), index) or module
+        module = module or getattr(wrapper, "__module__", None) or "?"
+        if module.startswith(("jax", "jaxlib")):
+            group = "jax"
+        elif module.startswith("aquaflux"):
+            group = "aquaflux"
+        else:
+            group = "other"
+        rows.append((group, module, wrapper))
+    return rows
+
+
+def _functions(top: int = 25) -> dict:
+    """The live jitted functions' cached programs, by group and by defining module and name."""
+    import jax
+
+    by_group: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    by_name: dict[tuple[str, str], int] = defaultdict(int)
+    held = 0
+    for group, module, wrapper in _jitted_functions():
+        size = wrapper._cache_size()
+        if not size:
+            continue
+        held += size
+        by_group[group][0] += 1
+        by_group[group][1] += size
+        name = getattr(wrapper, "__qualname__", None) or getattr(wrapper, "__name__", "?")
+        by_name[(f"{group}:{module}", name)] += size
+    live = jax.devices()[0].client.live_executables()
+    names: dict[str, int] = defaultdict(int)
+    for executable in live:
+        try:
+            names[executable.hlo_modules()[0].name] += 1
+        except Exception:
+            names["?"] += 1
+    return {
+        "executables": len(live),
+        "names": sorted(names.items(), key=lambda kv: -kv[1])[:top],
+        "held_by_functions": held,
+        "by_group": {g: {"functions": f, "programs": n} for g, (f, n) in by_group.items()},
+        "by_module": _summed_by_module(by_name),
+        "top": sorted(((m, n, s) for (m, n), s in by_name.items()), key=lambda r: -r[2])[:top],
+    }
+
+
+def _summed_by_module(by_name: dict[tuple[str, str], int]) -> dict[str, int]:
+    totals: dict[str, int] = defaultdict(int)
+    for (module, _), size in by_name.items():
+        totals[module] += size
+    return dict(sorted(totals.items(), key=lambda kv: -kv[1]))
+
+
+def _drop(groups: set[str]) -> dict:
+    """Clear the caches of the jitted functions in ``groups``, then collect and trim; read before and after."""
+    import jax
+
+    def count() -> int:
+        return len(jax.devices()[0].client.live_executables())
+
+    gc.collect()
+    _LIBC.malloc_trim(0)
+    before = {**_live(), "executables": count()}
+    dropped = 0
+    for group, module, wrapper in _jitted_functions():
+        name = f"{module}.{getattr(wrapper, '__qualname__', '')}"
+        if group in groups or name in groups:
+            dropped += wrapper._cache_size()
+            wrapper.clear_cache()
+    gc.collect()
+    _LIBC.malloc_trim(0)
+    after = {**_live(), "executables": count()}
+    return {"groups": sorted(groups), "programs_dropped": dropped, "before": before, "after": after}
+
+
 def _trim() -> dict:
     before = _resident()
     _LIBC.malloc_trim(0)
@@ -361,7 +562,13 @@ def reading(row: dict) -> None:
     """The residue readings at one stage's end, added to its row and printed under it."""
     label = row["label"]
     t0 = time.perf_counter()
-    residue: dict = {"resident": _resident()}
+    import jax
+
+    residue: dict = {
+        "resident": _resident(),
+        "executable_count": len(jax.devices()[0].client.live_executables()),
+        "compilations": dict(_compilations),
+    }
     if READ:
         residue["smaps"] = _smaps_by_owner()
         residue["arenas"] = _arenas()
@@ -371,6 +578,12 @@ def reading(row: dict) -> None:
         residue["trim"] = _trim()
     if label in HLO:
         residue["hlo"] = {"live": _live(), **_executables_by_hlo()}
+    if label in FUNCTIONS:
+        residue["functions"] = _functions()
+    if label in DROP:
+        residue["drop"] = _drop(DROP[label])
+        if label in FUNCTIONS:
+            residue["functions_after_drop"] = _functions()
     if label in CLEAR:
         residue["clear"] = _clear()
     residue["seconds"] = time.perf_counter() - t0
@@ -417,11 +630,38 @@ def _print_hlo(hlo: dict) -> None:
         print(f"          {size / MIB:9.1f} MiB  x{count:<4d} {name}", flush=True)
 
 
+def _print_functions(title: str, functions: dict) -> None:
+    groups = ", ".join(
+        f"{g} {e['programs']} in {e['functions']} functions"
+        for g, e in sorted(functions["by_group"].items())
+    )
+    print(
+        f"      {title}: {functions['executables']} executables, "
+        f"{functions['held_by_functions']} in jitted functions' caches ({groups})",
+        flush=True,
+    )
+    for module, size in list(functions["by_module"].items())[:12]:
+        print(f"        {size:5d}  {module}", flush=True)
+    for module, name, size in functions["top"][:12]:
+        print(f"        {size:5d}  {module}.{name}", flush=True)
+    names = ", ".join(f"{name} {count}" for name, count in functions["names"][:15])
+    print(f"        executables by name: {names}", flush=True)
+
+
 def _print(label: str, residue: dict) -> None:
     resident = residue["resident"]
     print(
         f"    residue {label}: VmRSS {resident['VmRSS'] / GIB:.2f}, anon {resident['RssAnon'] / GIB:.2f}"
         f" GiB, {resident['Threads']} threads, reading {residue['seconds']:.1f} s",
+        flush=True,
+    )
+    compiled = residue["compilations"]
+    print(
+        f"      executables {residue['executable_count']}; since the start: traced "
+        f"{compiled.get('trace', 0):.0f} ({compiled.get('trace_seconds', 0):.1f} s), lowered "
+        f"{compiled.get('lower_seconds', 0):.1f} s, backend {compiled.get('backend', 0):.0f} "
+        f"({compiled.get('backend_seconds', 0):.1f} s), persistent cache hits "
+        f"{compiled.get('cache_hits', 0):.0f} misses {compiled.get('cache_misses', 0):.0f}",
         flush=True,
     )
     if "smaps" in residue:
@@ -446,6 +686,19 @@ def _print(label: str, residue: dict) -> None:
             flush=True,
         )
         _print_hlo(residue["hlo"])
+    for key in ("functions", "functions_after_drop"):
+        if key in residue:
+            _print_functions(key.replace("_", " "), residue[key])
+    if "drop" in residue:
+        drop = residue["drop"]
+        before, after = drop["before"], drop["after"]
+        print(
+            f"      drop {','.join(drop['groups'])}: {drop['programs_dropped']} programs; executables "
+            f"{before['executables']} -> {after['executables']}; VmRSS {before['rss'] / GIB:.2f} -> "
+            f"{after['rss'] / GIB:.2f}, traced {before['traced'] / GIB:.2f} -> "
+            f"{after['traced'] / GIB:.2f} GiB (freed {(before['rss'] - after['rss']) / GIB:.2f})",
+            flush=True,
+        )
     if "clear" in residue:
         clear = residue["clear"]
         print(
@@ -473,6 +726,7 @@ def _after_march(recorder) -> None:
 
 def main() -> None:
     attribution = _attribution()
+    _count_compilations()
     recorder = attribution.Recorder(record=RECORD)
     recorder.readings.append(reading)
     recorder.save_every_stage = True
@@ -482,6 +736,8 @@ def main() -> None:
         "trim": TRIM,
         "clear": sorted(CLEAR),
         "hlo": sorted(HLO),
+        "functions": sorted(FUNCTIONS),
+        "drop": {label: sorted(groups) for label, groups in DROP.items()},
     }
     print(f"residue settings: {recorder.extra['residue_settings']}", flush=True)
     attribution.main(

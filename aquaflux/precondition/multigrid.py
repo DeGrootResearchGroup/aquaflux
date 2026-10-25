@@ -689,13 +689,11 @@ class ShapeBudget(NamedTuple):
         ``k + 1``-th level directly.
     operator_width : tuple of int
         Slots per row of each coarse level's operator (:class:`_PaddedRowOperator`), in the same order.
-    transpose_width : tuple of int
-        Slots per row of each coarse level's stored transpose, in the same order.
+        A transpose is packed only for an adjoint, once, and needs no budget.
     """
 
     coarse_cells: tuple[int, ...]
     operator_width: tuple[int, ...]
-    transpose_width: tuple[int, ...]
 
 
 class SmoothedHierarchy(eqx.Module):
@@ -756,12 +754,11 @@ class SmoothedHierarchy(eqx.Module):
         ShapeBudget
             Aggregate counts and operator entry counts for each coarse level, finest first.
         """
-        coarse_cells, operator_width, transpose_width = [], [], []
+        coarse_cells, operator_width = [], []
         for level in self.levels[1:]:
             coarse_cells.append(int(np.ceil(level.n // level.block_size * headroom)))
             operator_width.append(int(np.ceil(level.operator.width * headroom)))
-            transpose_width.append(int(np.ceil(level.operator.transpose_width * headroom)))
-        return ShapeBudget(tuple(coarse_cells), tuple(operator_width), tuple(transpose_width))
+        return ShapeBudget(tuple(coarse_cells), tuple(operator_width))
 
 
 class FrozenCoarsening:
@@ -860,7 +857,7 @@ def _fitted_level(plan: _LevelPlan, values) -> _SparseLevel:
     p_frow, p_ccol, p_val = plan.prolongation if plan.prolongation is not None else (None,) * 3
     return _SparseLevel(
         n=plan.n,
-        operator=plan.layout.with_values(values.slot_values, values.transposed_slot_values),
+        operator=plan.layout.with_values(values.slot_values),
         diagonal=values.diagonal,
         lam_max=values.lam_max,
         coarse_inv=values.coarse_inv,
@@ -1081,12 +1078,9 @@ def _build_aggregation_hierarchy(
     while True:
         depth = len(plans)
         widths = (
-            {"width": None, "transpose_width": None}
+            {"width": None}
             if depth == 0 or shape_budget is None
-            else {
-                "width": shape_budget.operator_width[depth - 1],
-                "transpose_width": shape_budget.transpose_width[depth - 1],
-            }
+            else {"width": shape_budget.operator_width[depth - 1]}
         )
         budgeted = (
             None
@@ -2573,11 +2567,11 @@ def _require_matching_structure(original, refreshed, where: str) -> None:
             "hierarchy was built from (same mesh graph)."
         )
     for i, (old, new) in enumerate(zip(original.levels, refreshed.levels, strict=True)):
-        old_shape = (old.n, old.n_coarse, old.operator.width, old.operator.transpose_width)
-        new_shape = (new.n, new.n_coarse, new.operator.width, new.operator.transpose_width)
+        old_shape = (old.n, old.n_coarse, old.operator.width)
+        new_shape = (new.n, new.n_coarse, new.operator.width)
         if old_shape != new_shape:
             raise ValueError(
-                f"{where}: level {i} changed shape — (n, n_coarse, width, transpose width) "
+                f"{where}: level {i} changed shape — (n, n_coarse, width) "
                 f"{old_shape} -> {new_shape}. The refreshed values would be a new "
                 "compilation signature, defeating the purpose; check that `a` has the same sparsity "
                 "pattern as the operator the hierarchy was built from."

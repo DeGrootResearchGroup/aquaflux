@@ -103,7 +103,13 @@ from .strategy import (
     StopsForRefresh,
     shift_of,
 )
-from .root_adjoint import TransposedPreconditioner, root_adjoint, stop_array_gradients
+from .root_adjoint import (
+    PacksTranspose,
+    TransposedPreconditioner,
+    root_adjoint,
+    stop_array_gradients,
+    with_transposes,
+)
 from .implicit import (
     DEFAULT_ROOT_SOLVE,
     DampedNewtonStep,
@@ -238,6 +244,7 @@ __all__ = [
     "MonotoneLineSearch",
     "NamedBlockMeasure",
     "NewtonStrategy",
+    "PacksTranspose",
     "PreconditionerSession",
     "PseudoTransientStep",
     "RampPosition",
@@ -313,4 +320,5 @@ __all__ = [
     "solve_linear",
     "staged_march",
     "stop_array_gradients",
+    "with_transposes",
 ]

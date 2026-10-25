@@ -25,7 +25,7 @@ from aquaflux.flow import (
 from aquaflux.mesh import permute_cells
 from aquaflux.properties import Constant, PropertyModel
 from aquaflux.schemes import CompactGreenGauss
-from aquaflux.solve import newton_step
+from aquaflux.solve import newton_step, with_transposes
 
 from tests.support.meshes import perturbed_grid_2d
 
@@ -199,7 +199,8 @@ def test_preconditioned_solve_is_differentiable() -> None:
 
     def mean_speed(mu):
         asm = _cavity(12, mu=mu)
-        precond = BlockPreconditioner.build(asm).factory()
+        # Reverse mode transposes the preconditioned solve, so the hierarchies pack their transposes.
+        precond = with_transposes(BlockPreconditioner.build(asm).factory())
         state = asm.initial_state()
         for _ in range(_NEWTON_STEPS):
             state = newton_step(asm.residual, state, preconditioner=precond)

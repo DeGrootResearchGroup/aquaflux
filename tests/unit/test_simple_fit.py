@@ -152,8 +152,8 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
     correction = (m @ g).toarray()
     schur = (c - d @ (m @ g)).toarray()
 
-    def dense(layout, pair):
-        return layout.with_values(*pair).to_scipy().toarray()
+    def dense(layout, values):
+        return layout.with_values(values).to_scipy().toarray()
 
     np.testing.assert_allclose(
         dense(plan.correction_layout, values.correction), correction, rtol=1e-12, atol=1e-14
@@ -176,7 +176,7 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
         (plan.pressure_layout, values.pressure, c),
         (plan.divergence_layout, values.divergence, d),
     ):
-        operator = layout.with_values(*pair)
+        operator = layout.with_values(pair).with_transpose()
         y = np.random.default_rng(5).standard_normal(matrix.shape[0])
         (transposed,) = jax.linear_transpose(operator.apply, np.zeros(matrix.shape[1]))(y)
         np.testing.assert_allclose(np.asarray(transposed), matrix.T @ y, rtol=1e-12, atol=1e-13)
@@ -274,7 +274,7 @@ def test_a_level_storing_no_velocity_pressure_coupling_has_the_pressure_block_as
         refuse_unusable(checks)
         c = _blocks(a)[3].toarray()
         np.testing.assert_array_equal(
-            plan.pressure_layout.with_values(*values.pressure).to_scipy().toarray(), c
+            plan.pressure_layout.with_values(values.pressure).to_scipy().toarray(), c
         )
         np.testing.assert_allclose(np.asarray(values.schur_inverse), 1.0 / np.diag(c), rtol=1e-14)
-        assert plan.correction_layout.with_values(*values.correction).to_scipy().nnz == 0
+        assert plan.correction_layout.with_values(values.correction).to_scipy().nnz == 0

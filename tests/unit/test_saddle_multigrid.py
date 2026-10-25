@@ -20,6 +20,7 @@ from aquaflux.precondition.saddle_multigrid import (
     _simple_pieces,
     _simple_smoothed_cycle,
 )
+from aquaflux.solve import with_transposes
 
 
 def _saddle(
@@ -152,7 +153,8 @@ def test_the_schur_is_applied_from_its_pieces_both_ways(block_splitting) -> None
     np.testing.assert_allclose(
         np.asarray(pieces.schur_apply(jnp.asarray(p))), schur @ p, rtol=1e-12, atol=1e-12
     )
-    (transposed,) = jax.linear_transpose(pieces.schur_apply, jnp.asarray(p))(jnp.asarray(y))
+    held = with_transposes(pieces)
+    (transposed,) = jax.linear_transpose(held.schur_apply, jnp.asarray(p))(jnp.asarray(y))
     np.testing.assert_allclose(np.asarray(transposed), schur.T @ y, rtol=1e-12, atol=1e-12)
     assert f.shape == (nv, nv)
 

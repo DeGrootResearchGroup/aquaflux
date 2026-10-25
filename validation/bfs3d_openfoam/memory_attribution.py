@@ -15,7 +15,14 @@ nested stages -- nothing they compute is changed -- and for each stage records:
 * for the stages marked with a census, every array of at least 1 MiB alive at its end -- numpy buffers
   (deduplicated through their ``base``), ``scipy.sparse`` arrays and JAX arrays -- named by the chain of
   objects (or the running function's local variable) that holds it, so a duplicated matrix shows as two
-  owners of one shape.
+  owners of one shape. ``BFS3D_MEMORY_CENSUS_STAGES`` names the stages that take one instead, so a
+  longer run can afford a census at the stage that sets its peak;
+* with ``BFS3D_MEMORY_SAMPLE_DEVICE=1``, the resident, live device and traced host bytes at the instant
+  of each stage's resident peak (from the sampler), so a peak is split into what was live then and what
+  was not -- the running programs' temporary buffers, the compiled-program cache, the allocator's
+  retention;
+* with ``BFS3D_MEMORY_PROGRAMS=1``, once the measured steps are done, the loaded programs ranked by
+  their temporary buffers.
 
 The march's own stages are the session's fit and re-fits, each split into its probe, its shift, the
 field split's block cut, each block's re-fit and the traced split, and the march step's first call (its
@@ -75,6 +82,20 @@ CENSUS = os.environ.get("BFS3D_MEMORY_CENSUS", "1") == "1"
 #: A class name whose live instances are traced back to their holders at each step's end (for a copy
 #: that should be gone, say), as referrer chains printed to the log; unset traces nothing.
 HOLDERS = os.environ.get("BFS3D_MEMORY_HOLDERS", "")
+#: Stage labels (as the table prints them, without indentation; separated by ``;``, since a label may
+#: hold a comma) whose end alone takes a census, in place of the stages the run marks; unset, the run's
+#: own. A census late in a run walks every Python object, so a 2-step run can afford one or two.
+CENSUS_STAGES = {
+    label.strip()
+    for label in os.environ.get("BFS3D_MEMORY_CENSUS_STAGES", "").split(";")
+    if label.strip()
+}
+#: ``1`` also samples the live device bytes every 10th resident sample (every 0.2 s), so each stage
+#: reports what the device held at its resident peak; the host bytes ``tracemalloc`` traces are sampled
+#: with every resident sample regardless.
+SAMPLE_DEVICE = os.environ.get("BFS3D_MEMORY_SAMPLE_DEVICE", "0") == "1"
+#: ``1`` prints the loaded programs ranked by their temporary buffers once the measured steps are done.
+PROGRAMS = os.environ.get("BFS3D_MEMORY_PROGRAMS", "0") == "1"
 #: ``1`` also times each entry map's build as a stage (a row per map: dozens per re-fit).
 MAPS = os.environ.get("BFS3D_MEMORY_MAPS", "0") == "1"
 RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.json"))
@@ -220,17 +241,34 @@ def _machine_memory() -> dict[str, int]:
 
 
 class _Sampler(threading.Thread):
-    """The resident set every 20 ms, kept as a series so any nested stage can read its own peak."""
+    """The resident set every 20 ms, kept as a series so any nested stage can read its own peak.
+
+    Each sample also keeps the host bytes ``tracemalloc`` traces then, and with ``SAMPLE_DEVICE`` every
+    10th keeps the live device bytes, so a stage can say what was live at the instant of its peak.
+    """
 
     def __init__(self) -> None:
         super().__init__(daemon=True)
         self.times: list[float] = []
         self.rss: list[int] = []
+        self.traced: list[int] = []
+        self.device_times: list[float] = []
+        self.device: list[int] = []
 
     def run(self) -> None:
+        count = 0
         while True:
             self.times.append(time.perf_counter())
             self.rss.append(_rss_bytes())
+            self.traced.append(tracemalloc.get_traced_memory()[0])
+            if SAMPLE_DEVICE and count % 10 == 0:
+                import jax
+
+                with contextlib.suppress(Exception):  # an array deleted while it is read
+                    device = sum(a.nbytes for a in jax.live_arrays())
+                    self.device_times.append(time.perf_counter())
+                    self.device.append(device)
+            count += 1
             time.sleep(0.02)
 
     def peak(self, start: float, stop: float) -> int:
@@ -239,6 +277,23 @@ class _Sampler(threading.Thread):
         lo = bisect.bisect_left(self.times, start)
         hi = bisect.bisect_right(self.times, stop)
         return max(self.rss[lo:hi], default=0)
+
+    def at_peak(self, start: float, stop: float) -> dict[str, int]:
+        """The resident, traced and (if sampled) device bytes at the stage's highest resident sample."""
+        import bisect
+
+        lo = bisect.bisect_left(self.times, start)
+        # The sampler appends a sample's time before its readings, so the newest time may not have them.
+        hi = min(bisect.bisect_right(self.times, stop), len(self.rss), len(self.traced))
+        if hi <= lo:
+            return {}
+        index = max(range(lo, hi), key=self.rss.__getitem__)
+        reading = {"rss": self.rss[index], "traced": self.traced[index]}
+        nearest = bisect.bisect_right(self.device_times, self.times[index]) - 1
+        if nearest >= 0 and self.device_times[nearest] >= start:
+            reading["device"] = self.device[nearest]
+            reading["device_age"] = self.times[index] - self.device_times[nearest]
+        return reading
 
 
 # --- the census ---------------------------------------------------------------------------------
@@ -443,7 +498,7 @@ class Recorder:
     def stage(self, label: str, *, census: bool = False):
         import jax
 
-        census = census and CENSUS
+        census = CENSUS and (label in CENSUS_STAGES if CENSUS_STAGES else census)
 
         if self._stack:  # hand the parent the peak so far before this stage resets it
             parent = self._stack[-1]
@@ -476,6 +531,7 @@ class Recorder:
                 "rss": rss,
                 "rss_delta": rss - frame["rss0"],
                 "stage_peak": max(self.sampler.peak(frame["t0"], t1), rss),
+                "at_peak": self.sampler.at_peak(frame["t0"], t1),
                 "hwm": _peak_bytes(),
                 "traced": traced,
                 "traced_delta": traced - frame["traced0"],
@@ -526,6 +582,14 @@ class Recorder:
             f"{row['malloc'].get('free_retained', 0) / GIB:.2f} | {row['tracer'] / GIB:.2f} |"
         )
         print(line, flush=True)
+        at_peak = row.get("at_peak", {})
+        if SAMPLE_DEVICE and "device" in at_peak:
+            print(
+                f"    at the stage peak: resident {at_peak['rss'] / GIB:.2f}, device "
+                f"{at_peak['device'] / GIB:.2f} (read {at_peak['device_age']:.2f} s before), host "
+                f"traced {at_peak['traced'] / GIB:.2f} GiB",
+                flush=True,
+            )
         collected = row.get("collected")
         if collected:
             print(
@@ -747,6 +811,35 @@ def _print_split_checksums(materialized_session) -> None:
     materialized_session.traced_field_split = checksummed
 
 
+def _programs_by_temporaries(top: int = 15) -> list[tuple[str, int, int, int]]:
+    """The loaded programs grouped by name: (name, count, largest temporary, its arguments), largest first.
+
+    A program's temporary buffers are allocated for each call and freed after it, so the largest one a
+    stage runs sits on that stage's resident baseline at its peak.
+    """
+    import jax
+
+    grouped: dict[str, list[int]] = {}
+    for executable in jax.devices()[0].client.live_executables():
+        try:
+            name = executable.hlo_modules()[0].name
+            stats = executable.get_compiled_memory_stats()
+        except Exception:  # a reading, not a gate
+            continue
+        entry = grouped.setdefault(name, [0, 0, 0])
+        entry[0] += 1
+        if stats.temp_size_in_bytes > entry[1]:
+            entry[1], entry[2] = stats.temp_size_in_bytes, stats.argument_size_in_bytes
+    ranked = sorted(grouped.items(), key=lambda item: -item[1][1])[:top]
+    for name, (count, temp, argument) in ranked:
+        print(
+            f"program {name} x{count}: temporaries {temp / 2**20:.1f} MiB, arguments "
+            f"{argument / 2**20:.1f} MiB",
+            flush=True,
+        )
+    return [(name, count, temp, argument) for name, (count, temp, argument) in ranked]
+
+
 def _program_sizes(captured: dict, case) -> dict[str, dict]:
     """Compile the step, the batched probe and the residual again and read their memory analyses."""
     import jax
@@ -937,6 +1030,8 @@ def main(
     )
 
     recorder.extra["peak"] = peak
+    if PROGRAMS:
+        recorder.extra["programs_by_temporaries"] = _programs_by_temporaries()
     recorder.save()
     if after_march is not None:
         after_march(recorder)

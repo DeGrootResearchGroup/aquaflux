@@ -127,16 +127,16 @@ class SimplePlan(eqx.Module):
 class SimpleValues(NamedTuple):
     """One level's SIMPLE pieces as values, double precision, as :func:`fit_simple_level` returns them.
 
-    Each operator comes as its padded-row slot values and those of its transpose (``(values,
-    t_values)``), to be held on its plan's layout: an array a compiled function returns is a new buffer,
-    so returning whole operators would copy the layouts' index arrays every refit.
+    Each operator comes as its padded-row slot values, to be held on its plan's layout: an array a
+    compiled function returns is a new buffer, so returning whole operators would copy the layouts' index
+    arrays every refit.
     """
 
     velocity_inverse: jnp.ndarray  # (n_velocity,) the diagonal approximate inverse of F
-    block_inverse: tuple[jnp.ndarray, jnp.ndarray] | None
-    correction: tuple[jnp.ndarray, jnp.ndarray]
-    divergence: tuple[jnp.ndarray, jnp.ndarray]
-    pressure: tuple[jnp.ndarray, jnp.ndarray]
+    block_inverse: jnp.ndarray | None
+    correction: jnp.ndarray
+    divergence: jnp.ndarray
+    pressure: jnp.ndarray
     schur_inverse: jnp.ndarray  # (n_pressure,) the approximate inverse of S's diagonal
 
 
@@ -269,12 +269,12 @@ def simple_plan(
         gradient=g_map,
         divergence=d_map,
         pressure=c_map,
-        velocity_layout=_PaddedLayout.of(f_pattern, transposed=False, fields=(fields, fields)),
-        gradient_layout=_PaddedLayout.of(g_pattern, transposed=False, fields=(fields, 1)),
+        velocity_layout=_PaddedLayout.of(f_pattern, fields=(fields, fields)),
+        gradient_layout=_PaddedLayout.of(g_pattern, fields=(fields, 1)),
         divergence_layout=_PaddedLayout.of(d_pattern, fields=(1, fields)),
         correction_layout=correction_layout,
         pressure_layout=_PaddedLayout.of(c_pattern, fields=(1, 1)),
-        schur_rows=_PaddedLayout.of(schur_pattern, transposed=False, fields=(1, 1)),
+        schur_rows=_PaddedLayout.of(schur_pattern, fields=(1, 1)),
         cells=cells,
         block_layout=block_layout,
         block_order=block_order,
@@ -351,7 +351,7 @@ def fit_simple_level(
         block_not_finite = jnp.sum(~jnp.isfinite(inverse))
         block_values = inverse.ravel()[plan.block_order]
         block = plan.block_layout.packed(block_values)
-        block_inverse = (block.values, block.t_values)
+        block_inverse = block.values
         left = _single_rows(block.columns, block.row_lengths, block_values)
     else:
         rows = jnp.arange(plan.n_velocity, dtype=jnp.int32)
@@ -398,9 +398,9 @@ def fit_simple_level(
     values = SimpleValues(
         velocity_inverse=velocity_inverse,
         block_inverse=block_inverse,
-        correction=(correction.values, correction.t_values),
-        divergence=(divergence.values, divergence.t_values),
-        pressure=(pressure.values, pressure.t_values),
+        correction=correction.values,
+        divergence=divergence.values,
+        pressure=pressure.values,
         schur_inverse=schur_inverse,
     )
     checks = SimpleChecks(
