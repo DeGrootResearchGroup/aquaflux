@@ -119,7 +119,7 @@ def main():
         np.savez(
             save,
             forward=np.asarray(forward(split, v)),
-            transposed=np.asarray(transposed(split, v)),
+            transposed=np.asarray(transposed(packed, v)),
             leading=leading,
             trailing=trailing,
         )
