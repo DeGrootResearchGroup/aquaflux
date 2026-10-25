@@ -34,7 +34,9 @@ Arms (``REACH_FOLDING_ARMS``, comma-separated, default ``3,2,each``): ``3`` prob
 which column's folding costs the solve -- and a field name (``p``) adds that one such arm. ``A/B`` builds
 the session under probe ``A`` and re-fits it under ``B`` (``3/p``): the leading hierarchy's coarsening is
 frozen at the build from the values it read then, so this separates a fold that moves the COARSENING from
-one that moves the fitted VALUES.
+one that moves the fitted VALUES. ``X*t`` builds under a uniform reach 3 and re-fits from
+``J3 + t (JX - J3)``, the fold of probe ``X`` scaled by ``t`` (``p*0.5``, ``2*4``): how close a case sits to
+the fold that breaks its solve. ``X*0`` must reproduce ``3`` and ``X*1`` must reproduce ``X``.
 
 Usage, one checkpoint per run (``state-<step-1>`` is the step's start, ``state-<step>`` gives its shift)::
 
@@ -82,12 +84,14 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
-from aquaflux.precondition import materialize_block_jacobian  # noqa: E402
+from aquaflux.precondition import FieldSplit, materialize_block_jacobian  # noqa: E402
+from aquaflux.precondition import sparse_jacobian as sparse_jacobian_module  # noqa: E402
 from aquaflux.precondition.materialized_session import (  # noqa: E402
     PROBE_BATCH_SIZE,
     batched_jacobian_matvec,
     jacobian_matvec,
 )
+from aquaflux.precondition.probe_layout import ProbedBlocks  # noqa: E402
 from aquaflux.precondition.sparse_jacobian import (  # noqa: E402
     ColumnProbePlan,
     block_stencil_colouring,
@@ -126,20 +130,64 @@ def probe_reach(token, n_fields, names):
 
 
 def arms(n_fields, names):
-    """``label -> (build column_reach, refit column_reach)`` for ``REACH_FOLDING_ARMS``."""
+    """``label -> (build column_reach, refit column_reach, fold scale)`` for ``REACH_FOLDING_ARMS``.
+
+    The fold scale is ``None`` except for an ``X*t`` arm, whose refit probe is ``X``'s, mixed with a
+    uniform reach-3 probe as ``J3 + t (JX - J3)``.
+    """
     out = {}
     for token in os.environ.get("REACH_FOLDING_ARMS", "3,2,each").split(","):
-        if token == "each":
+        if "*" in token:
+            name, scale = token.split("*")
+            label, reach = probe_reach(name, n_fields, names)
+            out[f"uniform 3 + {float(scale):g} x fold of {label}"] = (None, reach, float(scale))
+        elif token == "each":
             for name in names:
                 label, reach = probe_reach(name, n_fields, names)
-                out[label] = (reach, reach)
+                out[label] = (reach, reach, None)
         elif "/" in token:
             (built, build), (fitted, refit) = (probe_reach(t, n_fields, names) for t in token.split("/"))
-            out[f"coarsened {built}, re-fitted {fitted}"] = (build, refit)
+            out[f"coarsened {built}, re-fitted {fitted}"] = (build, refit, None)
         else:
             label, reach = probe_reach(token, n_fields, names)
-            out[label] = (reach, reach)
+            out[label] = (reach, reach, None)
     return out
+
+
+class ScaledFold:
+    """While active, every block materialize returns ``J3 + scale (JX - J3)`` instead of one probe's.
+
+    The field split materializes its blocks through ``sparse_jacobian.materialize_blocks``, imported at
+    the call, so replacing that module attribute reaches the re-fit without touching the library. Both
+    probes run on the re-fit's own ``matvec``; each uses its own colouring and gather structure, and
+    the two value arrays share the reach-3 pattern's block layout, which is checked.
+    """
+
+    def __init__(self, uniform, folded, scale):
+        self.uniform, self.folded, self.scale = uniform, folded, scale
+        self.original = sparse_jacobian_module.materialize_blocks
+
+    def materialize(self, matvec, plan, *, structure, batched_matvec=None, probe_batch_size=None):
+        def probed(probe):
+            return self.original(
+                matvec,
+                probe.plan,
+                structure=probe.structure,
+                batched_matvec=batched_matvec,
+                probe_batch_size=probe_batch_size,
+            )
+
+        uniform, folded = probed(self.uniform), probed(self.folded)
+        if uniform.data.shape != folded.data.shape:
+            raise RuntimeError("the two probes' block layouts differ; their values cannot be mixed")
+        return ProbedBlocks(uniform.data + self.scale * (folded.data - uniform.data), uniform.layout)
+
+    def __enter__(self):
+        sparse_jacobian_module.materialize_blocks = self.materialize
+        return self
+
+    def __exit__(self, *exc):
+        sparse_jacobian_module.materialize_blocks = self.original
 
 
 class StepRebuild:
@@ -166,13 +214,13 @@ class StepRebuild:
         self.station = min(step_number - 1, ramp.stations)
         self.assembler = assembler_for(self.station)
 
-    def fitted(self, build_reach, refit_reach):
+    def fitted(self, build_reach, refit_reach, scale=None):
         """The step's state after the re-fit, and its session.
 
         The session is built (which fixes the frozen coarsening) under a probe of ``build_reach`` and
-        re-fitted (which supplies every value) under one of ``refit_reach``. Swapping the probe between
-        the two reaches into the session's private spec and probe, which this harness may do and the
-        library never does.
+        re-fitted (which supplies every value) under one of ``refit_reach`` -- or, given ``scale``, from
+        ``J3 + scale (J_refit - J3)``. Swapping the probe between the two reaches into the session's
+        private spec and probe, which this harness may do and the library never does.
         """
         settings = self.spec.settings()
         file_pc = settings["preconditioner"]
@@ -185,14 +233,22 @@ class StepRebuild:
         session = open_session(with_reach(build_reach), self.coupled)
         session.rebind(self.anchor)
         base = session.build(self.seed, **march)
-        if refit_reach != build_reach:
+        if refit_reach != build_reach and scale is None:
             session._spec = with_reach(refit_reach)
             session._probe = None  # rebuilt from the swapped spec when the refresh hook is made
         session.rebind(self.assembler)
         active = eqx.tree_at(
             lambda s: s.relaxation_schedule, base, ConstantRelaxation(jnp.asarray(self.beta))
         )
-        update = session.refresh_preconditioner(active, self.phi, due=True)
+        if scale is None:
+            update = session.refresh_preconditioner(active, self.phi, due=True)
+        else:
+            problem = session._problem
+            groups = problem.groups() if isinstance(file_pc.inverse, FieldSplit) else None
+            uniform = problem.probe(with_reach(None).probe.settings(), groups)
+            folded = problem.probe(with_reach(refit_reach).probe.settings(), groups)
+            with ScaledFold(uniform, folded, scale):
+                update = session.refresh_preconditioner(active, self.phi, due=True)
         if update is not None:
             active = update(active)
         active = active.with_norm(coupled_scaled_norm(self.coupled, active.shift_policy, self.phi))
