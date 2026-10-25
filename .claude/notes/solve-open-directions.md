@@ -18,8 +18,8 @@ The recorded numbers (`solve-march.md`, `solve-march-log.md`, `solve-refuted-dir
 
 | case | cells | dofs | wall | compile | Krylov matvec |
 |---|---|---|---|---|---|
-| pitzDaily coupled RANS | 12 225 | ~73k | 363 s (ramp arm) | 396 s | 3.2–9.1 ms |
-| bfs3d coupled RANS | 23 040 | ~138k | ~50 min | — | 16.6–33.2 ms |
+| pitzDaily coupled RANS | 12 225 | 61 125 | 304 s cold (2026-10-25, below) | ~100 s cold | JVP 27–34 ms, split 78–86 ms (standalone, below) |
+| bfs3d coupled RANS | 23 040 | 138 240 | 1635 s warm, 1749 s cold (2026-10-25, below) | ~116 s warm | JVP 142–147 ms, split 525–576 ms (standalone, below) |
 
 The matvec actually run is `jax.jvp` through the full residual, which reconstructs nine gradients per
 evaluation on pitzDaily. Measured 2026-10-07 on pitzDaily (4-core Linux, jax 0.11.2): the jvp is 44 ms,
@@ -195,6 +195,65 @@ and unmeasured; the seam is `FieldwiseMatvec.seed_dtype`.
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
 the ~165 JVPs that compute the new VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 % on pitzDaily; on bfs3d on 4-core Linux with the pivot floor, where a re-fit costs ~2.5 steps, 4 took 0.59x the solve of 3 and 5 1.18x, one sample each, 2026-10-19).
+
+### bfs3d against pitzDaily on one machine (2026-10-25): what the extra time is
+
+Container: Linux x86_64, 4-core Xeon @ 2.1 GHz, 15 GB, no swap, L3 260 MiB; Python 3.13.17, jax/jaxlib
+0.12.0.1, numba 0.68.0, glibc defaults unless an arm says otherwise; `main` `d7f5bf28`; both shipped
+`case.yaml`s (float32 split, `PivotFloor(0.15)`, reach 3, bfs3d `refresh_on_cycles` 4); nothing else running.
+
+**The marches** (`validation/run_case.sh <case>/compare.py`; the seconds are the march log's own `t(s)`
+column and `pc` lines):
+
+| | pitzDaily (cold) | bfs3d (cold) | bfs3d (warm) | ratio (warm bfs3d / pitzDaily) |
+|---|---|---|---|---|
+| steps / cycles / re-fits | 21 / 102 / 21 | 17 / 147 / 14 | 17 / 147 / 14, identical table | |
+| set-up through step 1 | 137 s | 353 s | 239 s | 1.7× |
+| re-fits (probe / refactor) | 34 s (19 / 13) | 411 s (295 / 113) | 401 s (286 / 112) | 12× (18× per re-fit) |
+| steps 2–end, outside the re-fits | 112 s over 99 cycles | 960 s over 142 cycles | 970 s | 8.7× (6.0× per cycle) |
+| solve | 304 s | 1749 s | 1635 s | |
+
+bfs3d's final `R` 3.672e-06, `x_r/h` 8.36 mid-span. The warm run's JAX work (from `JAX_LOG_COMPILES=1`): 1319
+compilations and 14 cache reads summing 50 s, tracing 49 s, lowering 17 s, all before step 1 (the largest
+compilation `_march_step` 4.7 s). Under `py-spy --idle --threads --nonblocking` the cold run sorted (by
+`profile_buckets.py`) into step program 761 s, coloured probe 301 s, other re-fit build 147 s, compilation and
+tracing 180 s; ~250 s fell into `driver` under a stack (`clean_up`/`clear_backends`) the wall clock shows did
+not happen (the process exited 6 s after the march ended), so `--nonblocking` mis-reads stacks here: use the
+march log's columns, not the capture, for bfs3d's split.
+
+**So the excess over the unknowns' 2.26× is per-unit cost, not counts**: bfs3d takes fewer steps and re-fits
+than pitzDaily and 1.44× the cycles. Two per-unit costs carry it, each set by the stencil the reach-3
+pattern stores in 3D (63 cells on hexahedra against 25 in 2D; `solve-refuted-directions.md`, "TRUNCATING the Jacobian"):
+
+- **One Krylov application is 6.9× pitzDaily's** (`validation/application_scaling.py`, hybrid start, mean
+  of 30 standalone calls, glibc defaults, so each standalone figure carries page faults the step's loop does
+  not pay):
+
+  | piece | pitzDaily ms | bfs3d ms | ratio | bfs3d cores |
+  |---|---|---|---|---|
+  | residual | 11–12 | 72–78 | 6.5× | 2.7 |
+  | JVP | 27–34 | 142–147 | 4.8× | 3.0 |
+  | split apply | 78–86 | 525–576 | 6.7× | 2.3 |
+  | — leading `[u, v, w, p]` cycle | 57–59 | 343–365 | 6.1× | 2.2 |
+  | — trailing `[k, ω]` cycle | 20–21 | 143–148 | 7.0× | 2.5 |
+  | — coupling product | 5–6 | 34–35 | 6.2× | 2.9 |
+
+  The split is ~78 % of an application on bfs3d. Its cost follows the stored entries: the leading fine
+  level holds 21.0M entries (mean row 228, widest 252 = 63 cells × 4 fields) against 2.68M (mean 73) on
+  pitzDaily, 7.8×, and the leading cycle costs 16–21 ns per fine-level entry on both cases. The trailing
+  hierarchy is 12 levels on bfs3d (5.2M fine entries; its last five levels coarsen 288 → 178 dofs), 2 on
+  pitzDaily.
+- **One re-fit is 18× pitzDaily's**: the probe 20.4 s against 0.89 s, 576 colours against 100 (5.8×, reach 3
+  in 3D) times ~4× per colour; the refactor 8.0 s against 0.64 s.
+
+**Inside the split apply** (`fusion_profile.py`, `FUSION_PROGRAMS=split`, bfs3d hybrid start, best of 15
+untraced calls 478 ms on 4 cores, 989 ms on one, parallel efficiency 52 %): 59 % of the one-core time is
+gather fusions (`values * x[columns]` written out whole: the leading fine level's is `f32[23224320]`, 177 MiB,
+two per apply), 37 % the row-sum custom fusions that read it back (`ynn_fusion`, never partitioned), the rest
+negligible. One kernel is in flight for 74 % of the 4-core span: a V-cycle is a chain, and each memory-bound
+gather is split into at most `ceil(sqrt(4))` = 2–4 parts. `--xla_cpu_experimental_ynn_fusion_type=-reduce`
+on Linux: split 525 → 586 ms (leading 343 → 482, trailing 143 → 107), not a lever, as recorded for macOS.
+**Where this points: entry 15.**
 
 ## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
@@ -970,6 +1029,45 @@ Audit any other place a per-call closure reaches a module-level `eqx.filter_jit`
   memory in glibc's arenas (`memory_residue.py`, `RESIDUE_TRIM`, `13fa17d4`). The session already trims before
   every re-fit (#818), so this would not lower a march's peak, only what a march holds between its first
   step and its next re-fit. Worth doing only if a case's peak is ever set there, which bfs3d's is not.
+
+## 15. A fused level product for the traced hierarchies (registered 2026-10-25)
+
+**What.** Every level product of both hierarchies (and the coupling product) is XLA's two-kernel padded-row
+form: a gather fusion writing `values * x[columns]` out whole, then a single-threaded row-sum kernel reading it
+back (`solve-amg-multigrid.md`, `_PaddedRowOperator`). A fused loop over the same padded arrays (one pass,
+no intermediate, rows threaded over every core) does the same product in a fraction of the time.
+
+**Measured kernel bound** (`validation/spmv_kernel_probe.py`, the configuration above, hybrid start, mean of
+30 calls, float32, numba 0.68 on 4 threads; differences from the traced product ≤ 1.4e-7 of the largest
+result entry, float32 summation order):
+
+| operator | XLA padded, glibc | XLA, `glibc.malloc.hugetlb=1` | XLA, jemalloc (no faults) | numba fused ELL | numba fused CSR | scipy CSR (1 thread) |
+|---|---|---|---|---|---|---|
+| bfs3d leading fine (21.0M entries, width 252) | 52.6 ms | 43.9 | 33.9 | 11.5–15.2 | 15.3–19.1 | 33.4–39.8 |
+| bfs3d trailing fine (5.2M, width 126) | 15.9 | 15.7 | 9.0 | 1.9–2.4 | 3.2–4.4 | 5.3–8.7 |
+| pitzDaily leading fine (2.7M, width 75) | 6.9 | | | 0.8 | 1.6 | 2.0 |
+| pitzDaily trailing fine (1.2M, width 50) | 3.4 | | | 0.5 | 0.9 | 0.9 |
+
+Inside the step's loop the XLA product pays no faults, so compare against the jemalloc column: **2.2–3× on the
+leading fine level, ~4× on the trailing**, the fused loops at ~3.6–3.9 cores against XLA's ~2.8. Ranges are
+across three runs of the probe (one per allocator arm), which also moved the numba timings.
+
+**What is not known.** The numba kernels run on the host. Reaching them from inside the compiled step needs an
+XLA custom call on CPU (`jax.ffi` with a compiled target; numba threads started from an XLA worker thread, and
+two such calls in flight at once, need a thread-safe numba threading layer), with the transpose for the
+adjoint (`linear_call`'s transposed product) and the XLA form kept for any other backend. A `pure_callback`
+form would be simpler and pays a host crossing per product; neither is measured.
+
+**Expected size, as a bound only.** Products are ~96 % of the split's one-core kernel time; at 2.5× on every
+level the split falls ~525 → ~210–250 ms, an application ~720 → ~400 ms, and bfs3d's steps outside the re-fits
+~970 → ~550 s of a 1635 s march (−25 %), pitzDaily's proportionally. Not separated: how much of the leading
+cycle is fine-level products against SIMPLE pieces and coarse levels, whose rows are narrower.
+
+**Pre-registered measurement.** (1) A custom-call padded-row product in one standalone program against
+`_PaddedRowOperator.apply`, both fault-free: the split apply's mean over 30 calls on both cases. (2) If (1)
+holds ≥ 2× on bfs3d's split: both marches with it, identical step tables required (the summation order
+changes, so read them as `validation.md`'s FMA bullet says), wall from the march log, and the adjoint's
+transpose solve (`adjoint_transpose_cost.py`) unchanged or better. Pass bar: bfs3d march −15 % warm.
 
 ## Smaller housekeeping
 
