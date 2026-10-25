@@ -328,6 +328,18 @@ defect — fix it in the same change.
     a stale preconditioner — apply the update the hook returns (`MarchReplay.refit`,
     `endgame_shift_probe.py`'s `refreshed`). Pinned by
     `test_a_re_fit_releases_the_arrays_only_the_superseded_split_held` (both precisions).
+  - **…and frees most of it before the fit, not after (2026-10-25).** `BetaTrackingRefresh(before_refit=)`
+    is called before each re-fit's probe (ahead of the trim); the session passes `_release_outgoing_form`,
+    which deletes every leaf of `_form` the inverse does not name in `refit_keeps()` (a frozen coarsening's
+    plan, the SIMPLE plans, the coupling's packing layouts; `solve-amg-multigrid.md`), so the superseded
+    split is not alive beside the one being fitted. An inverse that re-coarsens, or a block without
+    `refit_keeps`, answers `None` and nothing is freed early. Nothing applies the preconditioner between
+    the start of a re-fit and the update it returns, so no value moves (pinned bit for bit,
+    `test_freeing_the_outgoing_split_early_changes_no_value_of_the_re_fit`, and the timing,
+    `test_a_re_fit_frees_the_outgoing_split_before_it_fits`). ⚠️ **A re-fit that raises after the release
+    leaves the session with no preconditioner, form or hook**, so the next `build` fits afresh rather than
+    gluing deleted arrays (`test_a_re_fit_that_fails_after_the_early_release_leaves_the_session_to_fit_afresh`).
+    `_release_superseded` still runs after the fit, for whatever was kept.
   - **Every session gives glibc's freed memory back before each re-fit (default, the owner's decision of
     2026-10-24).** `MaterializedSession(memory_trim=)` defaults to `GlibcTrim()` (`aquaflux/allocator.py`,
     `malloc_trim(0)`, a no-op without glibc; the only `ctypes` in the package) and hands it to
