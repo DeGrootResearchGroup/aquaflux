@@ -3,12 +3,12 @@
 The SIMPLE smoother applies ``S = C - D (M G)`` from its pieces and fits only ``S``'s diagonal and row norms
 (``simple_fit._schur_rows``), a chunk of rows at a time on ``S``'s row columns. This harness puts numbers on
 the alternatives on a saddle shaped like bfs3d's leading block -- a reach-3 hexahedral lattice of
-``SCHUR_PROBE_SHAPE`` cells (default ``40x24x24``, bfs3d's 23040), four fields, every field pair storing the
+``PROBE_SCHUR_SHAPE`` cells (default ``40x24x24``, bfs3d's 23040), four fields, every field pair storing the
 reach-3 cell pattern, random values with a dominant velocity and pressure diagonal -- and prints:
 
 - the entry counts of ``S`` formed and of its pieces, and the bytes each would hold in single precision;
 - one product with ``S`` formed (packed from the host product) against the pieces' ``schur_apply``, forward
-  and transposed (mean of ``SCHUR_PROBE_CALLS`` calls, three repeats), and how far apart they are; and the
+  and transposed (mean of ``PROBE_SCHUR_CALLS`` calls, three repeats), and how far apart they are; and the
   same products ``LOOPED`` times inside one compiled loop, as the smoother's sweeps run them. ⚠️ The
   isolated call overstates the formed product: its per-row gather (``n x width`` single-precision values,
   33 MiB on the default lattice) is above glibc's 32 MiB mapping threshold, so each standalone call
@@ -39,8 +39,8 @@ from aquaflux.precondition.saddle_multigrid import _simple_pieces  # noqa: E402
 from aquaflux.precondition.simple_fit import fit_simple_level, simple_plan  # noqa: E402
 from aquaflux.precondition.traced_cycle import in_precision  # noqa: E402
 
-SHAPE = tuple(int(v) for v in os.environ.get("SCHUR_PROBE_SHAPE", "40x24x24").split("x"))
-CALLS = int(os.environ.get("SCHUR_PROBE_CALLS", "50"))
+SHAPE = tuple(int(v) for v in os.environ.get("PROBE_SCHUR_SHAPE", "40x24x24").split("x"))
+CALLS = int(os.environ.get("PROBE_SCHUR_CALLS", "50"))
 #: Terms sorted at once by the sort-based row norms.
 SORT_TERMS = 1 << 18
 #: Products per compiled loop in the looped timing.
