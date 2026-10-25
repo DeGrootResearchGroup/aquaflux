@@ -578,3 +578,15 @@
     which half it deliberately omits. A dropped or mis-signed step fails this outright; it is the check
     the missing prediction could never have passed. Plus linearity and `<y,Mx> = <Mᵀy,x>` for all three,
     since a non-flexible outer GMRES and the transposed adjoint both require them.
+
+## From "Field initialization" → laplace_field's per-call programs (2026-10-25)
+
+`laplace_field` compiled its one-step Laplace solve as `eqx.filter_jit(newton_step)(residual, …,
+preconditioner=…)`, the residual and the multigrid factory being closures built per call. Measured on
+`main` `d7f5bf28` (`validation/memory_residue.py`, `RESIDUE_DROP`; `.claude/notes/solve-direct-preconditioners-log.md`
+on branch `claude/reclaimable-cache`, "Which setup programs hold the reclaimable cache"): the three such
+programs of a coupled initialization (φ, `k`, ω) held 0.19 GiB on bfs3d and never ran again. Built as a
+per-call `jax.jit` (`claude/laplace-field-release`). The seed it gives is not bit-identical to the old one:
+on pitzDaily's shipped case the three state blocks differ by at most 4.9e-14, 2.7e-14 and 1.1e-15 of their
+largest magnitude (`hybrid_initialize`, same container, jax 0.12.0.1), the last bits of a recompiled
+program; a march from it is a new draw. The bfs3d memory re-measure is in progress.
