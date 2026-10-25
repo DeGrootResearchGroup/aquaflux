@@ -800,6 +800,60 @@
         process is not separated (one run each); compare end-clear readings only at one cache state.
       - Records: `memory_residue.<case>.json` and run logs (git-ignored), copied into this entry.
 
+### Lazy transposes (§14d) (2026-10-24)
+
+      Branch `claude/lazy-transposes` on `claude/cell-level-pattern` (#817; the branch was rebased onto `main` after #817 merged, so
+      `f235016a` below is the rebased commit "Pack the transposes where a caller transposes a
+      preconditioner itself", whose `aquaflux/precondition` and `aquaflux/solve` the rebase left as they
+      were measured, and base `02c3e7c4` has #817's `aquaflux/` as squashed into `0c76b4ec`): padded-row
+      operators hold
+      their rows alone; `solve.with_transposes` packs `Aᵀ` for an adjoint's transpose solve only
+      (`solve-amg-multigrid.md`, "The transpose is packed only for an adjoint"). Base `02c3e7c4`, branch
+      `f235016a`, each run once in its own worktree, one after the other on one otherwise idle 4-core
+      Xeon container (15.7 GiB, jax 0.12.0.1, glibc defaults, shipped `case.yaml`s, warm compilation
+      cache shared by both).
+
+      **bfs3d, `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=1
+      BFS3D_MEMORY_CHECKSUMS=1`.** GiB:
+
+      | stage | base `02c3e7c4` | branch `f235016a` |
+      |---|---|---|
+      | fit (first build): device | 1.09 | 0.64 |
+      | re-fit #1: stage peak | 6.17 | 5.52 |
+      | march step 1, first call: stage peak (= run peak) | 6.49 | 6.13 |
+      | step 1 end: device (float32 / int32) | 1.20 (0.66 / 0.40) | 0.69 (0.35 / 0.22) |
+      | step 1 end: resident | 5.51 | 5.14 |
+
+      - Both traced splits: 565 → 327 leaves; every one of the 327 kept has the base's digest; the 238
+        gone are 34 operators × 7 (`t_values` and the six arrays of a transposed `_KroneckerColumns`).
+        Step 1's inner rows identical.
+      - By owner at step 1's end (census): `_KroneckerColumns` 264.0 MiB / 41 → 93.0 / 15; the operators
+        under `_SimplePieces` 193.4 → 96.7, under the levels 177.2 + 165.5 → 88.6 + 82.7, the coupling
+        88.6 → 44.3. Device 0.51 GiB less, about the 0.6 the backlog estimated: the int32 half is smaller
+        than estimated because #817 had already moved the transposed columns to cell level.
+      - Census runs: peaks sit above census-free ones (stages 1–3's census-free step-1 peak was 7.19).
+
+      **pitzDaily `march_cost.py`** (shipped `case.yaml`): base 21 steps / 102 cycles / final R 5.736e-06 /
+      `x_r/h` 8.0686 / ν_t/ν peak 418.09, VmHWM 3.085 GiB, end 2.925; branch the same counts with all 21
+      step rows identical (every column but wall time), VmHWM 2.900 GiB, end 2.597. The base run
+      overlapped a 3-worker unit-test run, so its seconds (solve 337.7 s against 260.9) are void.
+
+      **Adjoint.** The finite-difference adjoint tests (`test_coupled_field_split.py`, both precisions,
+      the pivot-floored fit, refit every step) and the other gradient tests of the integration suite pass;
+      a transpose is packed by the operator's own slot rule at the widest column, so it equals what a
+      fit packed whenever no transpose budget applied (neither case sets `shape_headroom`). The adjoint
+      now pays one host read-back of every operator per transpose solve, timed below.
+
+      **What the packing costs an adjoint** (`adjoint_transpose_cost.py`, branch at "Time what packing the
+      transposes costs a bfs3d adjoint", same container, shipped `case.yaml`, the hybrid start, one run,
+      2026-10-25): `with_transposes` over the step's adjoint factory 22.9 s, resident high-water unchanged
+      at 4.43 GiB; the factory's widening to double 3.5 s (paid before too); one transposed application of
+      the widened split 1.13 s best / 1.19 s mean of 20, its first call (compile) 123 s. The packing is 19
+      mean applications: against the 1454–1575 a bfs3d adjoint was measured to spend
+      (`adjoint_probe.py`'s docstring), 1.2–1.3 % of the transpose solve's applications. Not measured: a
+      whole adjoint on both arms (the probe's converged state, `state-00067`, is from a march that no
+      longer exists, so it needs a fresh march and a `STATES` entry first).
+
 ## Condensed out of the rule (2026-10-17)
 
 > Moved verbatim from the rule file on 2026-10-17 when it was condensed to current state; the

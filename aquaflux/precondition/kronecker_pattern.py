@@ -162,17 +162,6 @@ class KroneckerPattern:
             return candidate
         return None
 
-    def transposed(self) -> tuple[KroneckerPattern, np.ndarray]:
-        """The transpose's pattern, and for each of its cell entries the cell entry it transposes."""
-        rows = self.cell_rows()
-        transpose, order = KroneckerPattern.of_coordinates(
-            self.cells.indices,
-            rows,
-            (self.cells.shape[1], self.cells.shape[0]),
-            (self.column_fields, self.row_fields),
-        )
-        return transpose, order.astype(self.cells.indices.dtype)
-
     @property
     def shape(self) -> tuple[int, int]:
         """The degree-of-freedom shape."""

@@ -43,6 +43,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition.traced_field_split import traced_field_split  # noqa: E402
+from aquaflux.solve import with_transposes  # noqa: E402
 from aquaflux.turbulence import open_session  # noqa: E402
 
 REPEATS = int(os.environ.get("BFS3D_SPLIT_TIMING_REPEATS", "10"))
@@ -105,9 +106,11 @@ def main():
     forward = eqx.filter_jit(lambda s, x: s.apply(x))
     transposed = eqx.filter_jit(lambda s, x: jax.linear_transpose(s.apply, x)(x)[0])
     compile_forward = _first_call(forward, split, v)
-    compile_transposed = _first_call(transposed, split, v)
+    # A fitted split holds no transposes; an adjoint packs them, and so does this timing, untimed.
+    packed = with_transposes(split)
+    compile_transposed = _first_call(transposed, packed, v)
     print(
-        f"split apply {_best(forward, split, v):.1f} ms, transpose {_best(transposed, split, v):.1f} "
+        f"split apply {_best(forward, split, v):.1f} ms, transpose {_best(transposed, packed, v):.1f} "
         f"ms (best of {REPEATS}); first call {compile_forward:.1f} s / {compile_transposed:.1f} s",
         flush=True,
     )
@@ -116,7 +119,7 @@ def main():
         np.savez(
             save,
             forward=np.asarray(forward(split, v)),
-            transposed=np.asarray(transposed(split, v)),
+            transposed=np.asarray(transposed(packed, v)),
             leading=leading,
             trailing=trailing,
         )

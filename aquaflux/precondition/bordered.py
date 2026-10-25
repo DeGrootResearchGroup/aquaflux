@@ -29,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
+import equinox as eqx
 import jax.numpy as jnp
 
 from ..solve import FieldLayout
@@ -83,11 +84,27 @@ def bordered_preconditioner(
     With an exact inner inverse the result is the exact inverse of the bordered matrix, so a Krylov
     solve preconditioned by it converges in one iteration. With any inner preconditioner the result
     satisfies the border row exactly: the scalar is eliminated, not approximated.
-    """
 
-    def factory(bordered: jnp.ndarray) -> _Matvec:
-        inner_matvec = inner_preconditioner(border.split(fields, bordered)[0])
-        m_column = inner_matvec(column)  # M a
+    The factory is a module holding the inner one as data, not a closure over it, so whatever arrays the
+    inner factory holds stay reachable as leaves (an adjoint's transpose solve packs the transposes of
+    the operators among them).
+    """
+    return _BorderedFactory(inner_preconditioner, border, fields, column, row)
+
+
+class _BorderedFactory(eqx.Module):
+    """``bordered_state -> (matvec ~ J_aug^{-1})``: :func:`bordered_preconditioner`'s factory."""
+
+    inner_preconditioner: _PreconditionerFactory
+    border: ScalarBorder
+    fields: FieldLayout
+    column: jnp.ndarray
+    row: jnp.ndarray
+
+    def __call__(self, bordered: jnp.ndarray) -> _Matvec:
+        border, fields, row = self.border, self.fields, self.row
+        inner_matvec = self.inner_preconditioner(border.split(fields, bordered)[0])
+        m_column = inner_matvec(self.column)  # M a
         schur = jnp.dot(row, m_column)  # c^T M a, approximating c^T J^{-1} a
 
         def apply(residual: jnp.ndarray) -> jnp.ndarray:
@@ -97,5 +114,3 @@ def bordered_preconditioner(
             return border.join(fields, y - d_border * m_column, d_border)
 
         return apply
-
-    return factory

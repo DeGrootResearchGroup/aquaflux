@@ -206,7 +206,7 @@ class _LevelPlan(eqx.Module):
     Attributes
     ----------
     layout : _PaddedLayout
-        The level operator's padded rows and their transpose.
+        The level operator's padded rows.
     diagonal : DeviceEntryMap
         Each row's diagonal entry (zero where none is stored).
     cells : DeviceEntryMap or None
@@ -272,8 +272,8 @@ class LevelValues(NamedTuple):
 
     Attributes
     ----------
-    slot_values, transposed_slot_values : jnp.ndarray
-        The level operator's padded-row values and those of its transpose, on the level's layout
+    slot_values : jnp.ndarray
+        The level operator's padded-row values, on the level's layout
         (:meth:`_PaddedLayout.with_values`). Only the values: an array a compiled function returns is a
         new buffer, so returning the whole operator would copy the layout's index arrays every fit.
     diagonal : jnp.ndarray
@@ -287,7 +287,6 @@ class LevelValues(NamedTuple):
     """
 
     slot_values: jnp.ndarray
-    transposed_slot_values: jnp.ndarray
     diagonal: jnp.ndarray
     lam_max: jnp.ndarray
     coarse_inv: jnp.ndarray | None
@@ -369,7 +368,6 @@ def fit_levels(
         fitted.append(
             LevelValues(
                 slot_values=operator.values,
-                transposed_slot_values=operator.t_values,
                 diagonal=diagonal,
                 lam_max=spectral_estimate(preconditioned, level.start),
                 coarse_inv=coarse_inv,
@@ -396,7 +394,6 @@ def level_plan(
     *,
     prolongation: sp.coo_matrix | None,
     width: int | None = None,
-    transpose_width: int | None = None,
     embed: DeviceEntryMap | None = None,
     constant: np.ndarray | None = None,
 ) -> tuple[_LevelPlan, SparsePattern | None]:
@@ -411,8 +408,8 @@ def level_plan(
     prolongation : scipy.sparse.coo_matrix or None
         The frozen prolongation to the next level; ``None`` makes this the coarsest level, solved by a
         dense inverse.
-    width, transpose_width : int, optional
-        The padded-row budgets (:meth:`_PaddedLayout.of`).
+    width : int, optional
+        The padded-row budget (:meth:`_PaddedLayout.of`).
     embed, constant : optional
         How this level's values follow from the previous level's product (:class:`_LevelPlan`).
 
@@ -442,7 +439,7 @@ def level_plan(
             jnp.asarray(prolongation.data),
         )
     plan = _LevelPlan(
-        layout=_PaddedLayout.of(pattern, width, transpose_width, fields=(block_size, block_size)),
+        layout=_PaddedLayout.of(pattern, width, fields=(block_size, block_size)),
         diagonal=EntryMap.gathering(pattern, lambda m: m.diagonal()).on_device(),
         cells=cells,
         dense=dense,

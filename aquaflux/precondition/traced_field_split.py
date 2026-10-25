@@ -71,8 +71,9 @@ class TracedFieldSplit(TracedForm):
     leading_cycle, trailing_cycle : TracedCycle
         Each group's traced solve, ``jnp.ndarray -> jnp.ndarray``, holding its hierarchy as leaves.
     coupling : _PaddedRowOperator
-        The retained coupling block. No transpose is stored: ``jax.linear_transpose`` derives ``M^T``
-        from the forward code, so there is nothing to keep in step with it.
+        The retained coupling block. No transpose of the split is stored: ``jax.linear_transpose``
+        derives ``M^T`` from the forward code, once :meth:`with_transposes` has packed the transposes
+        of the operators it applies.
     groups : FieldGroups
         The partition. Static -- it carries only sizes.
     """
