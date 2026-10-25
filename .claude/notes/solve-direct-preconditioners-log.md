@@ -937,11 +937,37 @@
         baseline and not ~1.
       - **Peak 6.80 GiB with the tracer**, against #822's 7.30 (mean of three, tracer on, before #819 and
         #824): one run, so read as ~0.5 lower with the 0.4 GiB spread in mind.
-      - Proposals, each a library change (backlog §14f): release or narrow the probe's float64 result
-        before the block re-fits (~0.3 GiB at the peak); release the superseded leading inverse before
+      - Proposals, each a library change (backlog §14f): release the superseded leading inverse before
         building the new (~0.45 GiB, about half of it removed by #825); bound `fit_simple_level`'s
-        temporaries (chunk the fit).
+        temporaries (chunk the fit). Letting the probe's other blocks go before the leading fit was
+        refuted (entry below, "Fitting the leading block last").
       - Record: `memory_attribution.json` and `run-20261025-014717.log` (git-ignored), copied here.
+
+### Fitting the leading block last, with the other probed blocks let go first: refuted (2026-10-25)
+
+      `memory_attribution.py`, bfs3d, `BFS3D_MEMORY_STEPS=2`, census only at the leading block re-fit of
+      re-fit #2, `BFS3D_MEMORY_SAMPLE_DEVICE=1 BFS3D_MEMORY_CHECKSUMS=1`, tracer on (0.32 GiB), 4-core Linux
+      container, 15.7 GiB, glibc 2.39 defaults, jax 0.12.0.1, warm cache, shipped `case.yaml` (re-fit trim
+      on). Base `89e1710b` (`main` with #825 and #826's harness); arm `0f8c153f` (the same plus
+      `refactor_blocks` taking a list it empties, fitting trailing, then the coupling, then leading). One
+      run each. GiB:
+
+      | | base | leading last |
+      |---|---|---|
+      | leading block re-fit in re-fit #1: stage peak / live device at it | 4.97 / 1.36 | 4.90 / 1.29 |
+      | leading block re-fit in re-fit #2: stage peak / live device at it | **5.82 / 1.36** | **5.87 / 1.45** |
+      | step 1's program, first call: stage peak | 5.51 | 5.75 |
+      | run peak (VmHWM) | 5.82 | 5.87 |
+      | live device at a step's end | 0.69 | 0.69 |
+
+      - Every leaf of all three traced splits (981) has the same digest in both runs: no value moved.
+      - The arm frees the float64 coupling and trailing block before the leading fit, but moves the trailing
+        block's new hierarchy and the new coupling ahead of it, and those sit beside the old ones (released
+        only when the re-fit ends). At re-fit #2 the second outweighs the first by 0.09 GiB; at re-fit #1
+        the arm read 0.07 lower. Neither reading is outside what one run per arm can resolve.
+      - With #825 the leading re-fit adds +0.67 GiB of live arrays over a step's end (was +1.06 before it),
+        and the 2-step peak is 5.82 GiB with the tracer (6.80 on `1bd8d292`, before #825; one run each).
+      - Records: `run-20261025-025721.log` (arm) and `run-20261025-032029.log` (base), git-ignored.
 
 ## Condensed out of the rule (2026-10-17)
 
