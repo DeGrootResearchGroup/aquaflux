@@ -67,7 +67,7 @@ There is no `StructuralPatterns`, `_structured`, `block_approximate_inverse` or 
 - **No product term list is held (the owner's constraint: memory must not grow).** A product places
   each term by a binary search of its column in its output row (`_placed_terms`, `_search`,
   `scan_unrolled`, ~2x the looped search), `TERMS_PER_CHUNK` terms at a time (2**18, a CPU cache
-  calibration; read when the fit is traced, so a test varying it clears the compiled fit first). A cell-level
+  calibration; read when the fit is traced, so a test varying it jits a function object of its own, `test_simple_fit._compiled_afresh`: equinox keys its cache on the function, and a global `jax.clear_caches()` recompiles everything else, 17.5 -> 97 s, past a unit shard's limit). A cell-level
   position table would remove the search but costs ~7 MB on pitzDaily and ~0.2-0.5 GB on bfs3d.
 - **Two shortcuts, each decided per level at plan time and each with the general path beside it**
   (pinned on all three fixture shapes by `tests/unit/test_simple_fit.py`): where a cell's velocity rows
