@@ -853,8 +853,8 @@ were 0.148 GiB of HLO on bfs3d but only ~0.05 GiB resident, measured on a march 
 **Only the setup-only part of that cache can be given back, and most of it is three programs (2026-10-25,
 same log, "How much of the compiled-program cache a mid-run clear gives back" and "Which setup programs hold
 the reclaimable cache")**: the march recompiles and holds 1.4–1.5 GiB of the cache whatever is cleared; of
-the setup's ~0.38 GiB, `laplace_field`'s three per-call `newton_step` programs hold 0.19 and never run
-again. Proposal: 14g.
+the setup's ~0.38 GiB, `laplace_field`'s three per-call `newton_step` programs held 0.19 and never ran
+again; released since 14g.
 
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
@@ -862,8 +862,8 @@ again. Proposal: 14g.
 JVP, each compiled twice: with the shipped split and with an identity preconditioner. Compile only, no march.
 Optionally add one device-memory snapshot at the first re-fit's peak.
 
-**Why.** It splits the step's ~984 MiB of temporaries into the preconditioner's share and the residual
-JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_rows, width)` products.
+**Why.** It splits the step's ~1 GiB of temporaries into the preconditioner's share and the residual
+JVP's.
 - If the residual's share alone exceeds the per-cell budget once projected by face count, which is about
   2× on a polyhedral dual, the laptop target is closed whatever the preconditioner does.
 - If the padded products dominate, 14b–14d are worth doing.
@@ -872,6 +872,23 @@ JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_row
 face loop at its peak. Face-blocking it and the flux balance reaches ~440–472 MiB, no better than halving
 the batch, and is not built (`solve-refuted-directions.md`, "Assembling the residual's face sums in
 blocks").
+
+**The step half, 2026-10-25 (bfs3d, first step, `validation/step_temporaries.py`;
+`solve-direct-preconditioners-log.md`, "What the march step's temporary holds"):** the step's 1017 MiB of
+temporaries is 624 MiB the split's (the identity arm is 393), and 591 of that is int32 decoded padded
+columns, every operator's `s32[n_rows, width]` live twice at the peak: one copy XLA hoisted to the entry
+computation (the Arnoldi and final `x = M y` applications share it) and one rebuilt inside the true-residual
+`lax.cond` of `_ResidualStopGMRES`, where both arms peak. The gathered operand is one `f32[n_rows·width]`
+per application, not held; the solve's own vectors are 4 MiB. The residual's share without a split is ~2× a
+JVP (393 MiB, 17 KB a cell) because that cond branch recomputes a whole JVP while the Arnoldi loop's hoisted
+linearization is still held. So the split is the lever on the step's temporary, but through its decoded
+indices, not 14b–14c's values. The true residual moved out of the `lax.cond` into a one-trip loop saves
+nothing (+13.8 MiB; the decode is rebuilt in that loop too; ledger). **Built**: the cell-level padded
+product gathers once per cell row (`a0fca85b`): the step's temporary 1022.7 → 683.7 MiB, the split's share
+629.8 → 290.7; both marches unchanged in every count, bfs3d's 17.5 % faster, peak 5.29 → 5.12 GiB. Left: the decode is still held per call site
+(~295 MiB); keeping it in the loop body (`validation/padded_decode_hoisting.py`: four operators 443 → 161
+MiB) is untimed and would re-decode every apply. Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
+not its temporary).
 
 ### 14b. A consistent compact operator for the fit
 
@@ -949,70 +966,26 @@ HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the
 - CLOSED (2026-10-25): letting the probe's other float64 blocks go before the leading fit, by fitting it
   last, measured no lower (ledger, "Fitting a refit's leading block last"); the leading block itself is its
   fit's input, and the fit is computed in float64 by design;
-- the superseded leading inverse lives beside the new one until `_release_superseded` (after #825: fine
-  operator values 88 MiB, levels 42, SIMPLE pieces 96, the packed coupling 44); see the design below;
+- BUILT (2026-10-25): the superseded leading inverse is freed at the start of a re-fit (`refit_keeps()`,
+  `solve.md`); live arrays at the re-fit's peak 1.36 -> 1.05 GiB, 2-step peak 5.80 -> 5.58 GiB, now set
+  by the step program's first call (log, "Freeing the superseded split at the start of a re-fit");
 - `fit_simple_level`'s 993 MiB of temporaries (as large as the step program's): fit per level or per row
   chunk.
 
-**Design for the superseded inverse (proposed 2026-10-25, for review; not built).**
-- *What holds the old arrays through the fit.* The host inverse lets go of its own hierarchy before the fit
-  (`HierarchyBlockInverse.refactor_block`: `self._hierarchy = None`) but keeps its SIMPLE pieces
-  (`_extras`) until `derive_extras` replaces them, after `fit_simple_level`, the largest program of a
-  re-fit. The traced form shares those arrays, and it is held by the session (`_form`), by its cached
-  stopping steps, and by every step the march and its callers hold (`staged_march` keeps the step it
-  passed `newton_march`; `newton_march` holds `strategy` and `active_step`). `_release_superseded` deletes
-  them only after the re-fit, so through the fit the old and new inverse are both alive.
-- *The change.* Release the outgoing form's value arrays at the start of a re-fit, before the probe, at
-  the hook point `BetaTrackingRefresh` already calls the allocator trim from (#818): the session hands the
-  hook a `before_refit` that deletes the leaves of `self._form` the re-fit will replace, then trims.
-  - Which leaves: a re-fit replaces each level's operator values, the SIMPLE pieces and the coupling,
-    and reuses a frozen coarsening's structural arrays and the prolongation values it reads back. So
-    each block inverse declares what a re-fit keeps (`refit_keeps() -> leaves`, beside
-    `traced_cycle()`), and everything else in the form is deleted. A dtype rule (integer kept, floating
-    replaced) is wrong: prolongation values are floating and kept.
-  - Drop `HierarchyBlockInverse._extras` before the fit as `_hierarchy` already is.
-  - `_release_superseded` stays, for whatever the early release keeps.
-- *Safety.* Between the hook's start and the update it returns nothing applies the preconditioner, so
-  deleting early changes no value; a step applied across a re-fit already raises (the 2026-10-18 release contract).
-  New failure mode: a re-fit that raises after the release leaves the session's form deleted. Guard it:
-  on an exception inside the re-fit, set `_form = None` and `_full_rebuild_pending`, so the next
-  `build` fits afresh rather than gluing deleted arrays (the Reynolds ladder's retreat catches only a
-  march's non-convergence, `EquinoxRuntimeError`, and rebuilds through the session).
-- *Not taken: the march hand-off ("option 3" in `solve.md`)* — a one-shot holder so `staged_march` keeps
-  no step. It would let the post-refit release become garbage collection, but it frees nothing before the
-  fit by itself: the session's `_form`, its stopping steps and the host inverse's `_extras` still hold the
-  old arrays. It is a cleanup, independent of this.
-- *Expected gain:* the old leading values, SIMPLE pieces and packed coupling, ~0.27 GiB at the re-fit peak
-  (~5 % of bfs3d's 5.82 GiB 2-step peak), estimated from the 2026-10-25 census shapes after #825.
-- *Measurement, pre-registered:* `memory_attribution.py`, 2 steps, census at the leading block re-fit of
-  re-fit #2, `BFS3D_MEMORY_SAMPLE_DEVICE=1 BFS3D_MEMORY_CHECKSUMS=1`, one run per arm: success is live device
-  at that peak at least 0.2 GiB below base with every split leaf digest identical. Tests: a re-fit after the
-  early release is bit-identical to one without (both precisions); a raising re-fit leaves the session to
-  re-fit, not to glue deleted arrays.
+**The superseded-inverse design is BUILT** (2026-10-25, measured on `main` `1c5a1875`, before #829 changed
+the SIMPLE fit): the design, its safety guard and the pre-registered measurement now live in `solve.md`
+(the early-release bullet) and the log, "Freeing the superseded split at the start of a re-fit".
 
-### 14g. Proposal (not built) — release `laplace_field`'s per-call programs when it returns
+### 14g. BUILT (2026-10-25) — `laplace_field` releases its per-call programs when it returns
 
-**Evidence** (`solve-direct-preconditioners-log.md`, "Which setup programs hold the reclaimable cache",
-2026-10-25, `main` `d7f5bf28`, warm, 1 step, census off, one run per arm): of what the setup leaves compiled,
-the three `eqx.filter_jit(newton_step)` programs of `laplace_field` (φ, `k`, ω) hold 0.19 GiB on bfs3d and
-never run again. Dropping only them lowered the step-1 resident 4.60 → 4.26 and the peak 5.59 → 5.25 at no
-recompile cost. The 673 op-by-op programs hold 0.09 GiB, ~430 of them used again; a global clear
-(`jax.clear_caches()`, measured first, same log, "How much of the compiled-program cache a mid-run clear
-gives back") also drops the march's programs and is not the fix.
-
-**The cause** is a pattern, not the cache: a per-call closure passed to a module-level `eqx.filter_jit`
-compiles a program per call, with the closure's arrays compiled in, and its cache key keeps both for the
-process. **Candidate forms, none measured:**
-- in `laplace_field`, jit a function defined per call (`jax.jit`, whose programs die with the function);
-  this releases the three programs on return and is local;
-- pass the residual and the preconditioner as pytrees (`eqx.Module`s holding their arrays) to a
-  module-level jit, so the arrays are arguments: the three solves may share programs and none embeds
-  arrays, but what is compiled is still kept;
-- the Laplace hierarchy's own `fit_levels` / `compiled_apply` / `_operator_spectral_estimate` entries
-  (~0.01 GiB) stay with either form.
-
-Audit any other place a per-call closure reaches a module-level `eqx.filter_jit` (only this call site in
-`aquaflux/` on 2026-10-25). Worth ~0.2–0.35 GiB on bfs3d, ~5 % of its peak.
+`laplace_field` compiles its solve as a function defined per call under `jax.jit`, so the program goes with
+it; it had handed per-call closures to a module-level `eqx.filter_jit(newton_step)`, which kept a program
+per call, with its closures, for the process. bfs3d: the cache a run holds at its end is 0.17 GiB smaller
+(two runs per arm); resident and peak move within the run-to-run spread, because the seed's last bits
+also change the first fit's coarsening (`flow-log.md`, "laplace_field's per-call programs"). The Laplace
+hierarchy's own `fit_levels` / `compiled_apply` / `_operator_spectral_estimate` entries (~0.01 GiB) stay.
+A global `jax.clear_caches()` after setup was measured first and is not the fix (log, "How much of the
+compiled-program cache a mid-run clear gives back").
 
 ### 14h. Two small allocator-side ideas (proposals, not built, 2026-10-25)
 

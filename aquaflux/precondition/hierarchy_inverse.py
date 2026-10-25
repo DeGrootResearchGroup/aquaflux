@@ -295,6 +295,33 @@ class HierarchyBlockInverse:
             step=_HierarchyStep(self.cycle(), self.smoother()),
         )
 
+    def refit_keeps(self) -> tuple | None:
+        """What a re-fit reuses of what this inverse holds now, or ``None`` when it re-coarsens.
+
+        A re-fit on a frozen coarsening takes every level's structure -- its operator's index arrays, its
+        prolongation -- from the coarsening's plan, and the smoother's plans from the structure they were
+        made for (:meth:`_refit_structure`), and computes everything else afresh. So every other array
+        of the current :meth:`traced_cycle`'s state is dead once a re-fit starts, and a caller holding
+        that state may free it before the fit rather than after (the materialized session does, so the
+        superseded hierarchy is not alive beside the one being fitted). A re-fit that re-coarsens reads
+        nothing of the old hierarchy either, but builds new structure without a plan to say which, so
+        it answers ``None``: nothing is known to be reusable, and nothing should be freed early.
+
+        Returns
+        -------
+        tuple of pytrees or None
+            The pytrees whose array leaves a re-fit reuses.
+        """
+        if self._coarsening is None or not (
+            self._frozen_coarsening or not self._coarsening_reads_values()
+        ):
+            return None
+        return (self._coarsening.plan, *self._refit_structure())
+
+    def _refit_structure(self) -> tuple:
+        """The smoother's own structure a re-fit reuses, beside the coarsening's plan: none here."""
+        return ()
+
     def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The cycle over what this inverse currently holds, traced in and not captured.
 
@@ -345,8 +372,9 @@ class HierarchyBlockInverse:
                 f"cannot refactor a {self._n_dofs}-dof inverse onto a {block.shape[0]}-dof block."
             )
         if self._frozen_coarsening or not self._coarsening_reads_values():
-            # The held hierarchy is let go first, so the old levels are not alive beside the new ones.
-            self._hierarchy = None
+            # The held hierarchy and the smoother's record of it are let go first, so the old levels are
+            # not alive beside the new ones.
+            self._hierarchy = self._extras = None
             self._hierarchy = self._coarsening.fit(block, "HierarchyBlockInverse.refactor_block")
             self._after_coarsening()
             return

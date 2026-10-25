@@ -49,7 +49,7 @@ class PaddedColumns(eqx.Module):
         raise NotImplementedError
 
     def product(self, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
-        """``A x`` for the operator storing ``values`` in these slots, shape ``(n_rows,)``.
+        """``A x`` for the operator storing ``values`` in these slots.
 
         On the CPU, where :func:`~aquaflux.precondition.fused_product.fused_products` allows it, one
         fused, threaded loop over the stored slots; otherwise a gather of ``x`` at every slot's column,
@@ -58,9 +58,14 @@ class PaddedColumns(eqx.Module):
         Parameters
         ----------
         values : jnp.ndarray
-            The slot values, shape ``(n_rows, width)``; a padding slot holds zero.
+            The entry of every slot, shape ``(n_rows, width)``; a padding slot holds zero.
         x : jnp.ndarray
-            The vector, shape ``(n_cols,)``.
+            The vector, shape ``(n_columns,)``.
+
+        Returns
+        -------
+        jnp.ndarray
+            The product, shape ``(n_rows,)``.
         """
         return fused_product.routed(self._fused_product, self._gathered_product, values, x)
 
@@ -177,6 +182,15 @@ class _KroneckerColumns(PaddedColumns):
         place = jnp.clip(slot - field * length, 0, self.cells.shape[1] - 1)
         return field, place, slot < self.other_fields * length
 
+    def _cell_columns(self) -> jnp.ndarray:
+        """The column of every slot of one row field's rows, shape ``(n_cells, width)``.
+
+        Every row field's rows read the same columns, so this is :meth:`columns` before the repeat.
+        """
+        field, place, live = self._slots()
+        cell = jnp.take_along_axis(self.cells, place, axis=1)
+        return jnp.where(live, field * self.n_other + cell, 0)
+
     def _by_row_field(self, per_cell: jnp.ndarray) -> jnp.ndarray:
         """A per-cell-row array repeated for every row field: shape ``(fields * n_cells, ...)``."""
         return jnp.broadcast_to(per_cell[None], (self.fields, *per_cell.shape)).reshape(
@@ -184,9 +198,19 @@ class _KroneckerColumns(PaddedColumns):
         )
 
     def columns(self) -> jnp.ndarray:
-        field, place, live = self._slots()
-        cell = jnp.take_along_axis(self.cells, place, axis=1)
-        return self._by_row_field(jnp.where(live, field * self.n_other + cell, 0))
+        return self._by_row_field(self._cell_columns())
+
+    def _gathered_product(self, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
+        """XLA's form of the product, with ``x`` gathered once per cell row and read by every row field.
+
+        The same slots, entries and row sums as the general gathered form, without decoding and
+        gathering ``fields`` identical copies of each cell row's columns: inside a loop the compiler
+        keeps the decoded columns live for the whole loop, so the repeat costs memory as well as work.
+        """
+        n_cells = self.cells.shape[0]
+        gathered = x[self._cell_columns()]
+        per_field = values.reshape(self.fields, n_cells, self.width)
+        return jnp.sum(per_field * gathered[None], axis=2).reshape(self.fields * n_cells)
 
     def row_lengths(self) -> jnp.ndarray:
         return self._by_row_field(self.other_fields * self.lengths)
@@ -223,7 +247,8 @@ class _PaddedRowOperator(eqx.Module):
     The column indices are a :class:`PaddedColumns`: held as an array, or -- for an operator storing a
     cell pattern over full field-pair blocks -- computed inside the product from the cell pattern, so the
     operator holds its index arrays at a fraction of the size. The slots are the same either way, so the
-    product is too.
+    product is too; the cell-level form also gathers ``x`` once per cell row for all its row fields
+    (:meth:`PaddedColumns.product`), which in single precision may sum a row in another order.
 
     **The transpose is stored only when asked for.** :meth:`with_transpose` packs ``A^T`` in the same
     padded form (``transposed``, ``t_values``), and :meth:`apply` tells ``jax.linear_transpose`` to apply

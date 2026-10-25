@@ -206,9 +206,16 @@ path.
       `run_case.sh`), Numba's threading layer `omp` or `tbb`, and both targets registered and agreeing with
       numpy (`registered()`, `_self_check`). ⚠️ **`workqueue` keeps the gathered form, deliberately**: it
       aborts the process when two threads enter it at once, and XLA can run two products concurrently; a
-      one-thread loop also loses to XLA on narrow rows (bfs3d trailing fine 14.1 vs 6.9 ms). macOS pip
-      wheels usually have only `workqueue`, so the Mac most likely runs the gathered form (unmeasured; the
-      macOS `ynn` bullet below still governs it).
+      one-thread loop also loses to XLA on narrow rows (bfs3d trailing fine 14.1 vs 6.9 ms).
+    - **macOS: `omp` only with libomp installed (optional; README and `docs/index.md` installation).** Numba's
+      macOS wheel ships its OpenMP layer but links `@rpath/libomp.dylib`, which pip cannot supply (no TBB
+      layer at all), so a plain install has `workqueue` and runs the gathered form. Homebrew's libomp is
+      keg-only, so it takes `brew link --force libomp` (macOS strips `DYLD_LIBRARY_PATH` when `bash` starts
+      a process, as `run_case.sh` does); conda's Numba depends on `llvm-openmp` and needs nothing. Measured on
+      an M3 Pro (2026-10-25, jax 0.10.2, `omp` 11 threads): bfs3d march −14.4 %, pitzDaily **+3.0 %** (its
+      leading cycle, mean row 73, runs 21 % slower fused); log, "The fused level product on macOS". Which
+      path a run took is in its `run.yaml` (`padded_products`) and a log line after the solve, from
+      `padded_product_path()` (`case.md`).
     - **The handlers read the typed-FFI call frame by its C layout and declare FFI version (0, 1)**, the
       oldest XLA accepts; XLA asks each handler its version at registration (the metadata extension) and
       keeps every accepted version's layout. The layout constants are at the top of the module, against
@@ -242,6 +249,21 @@ path.
     living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
     jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
     1–3").
+    - **A cell-level operator's gathered form gathers `x` once per cell row
+      (`_KroneckerColumns._gathered_product`, 2026-10-25)** -- XLA's form, taken wherever the fused loop is
+      not (above); the loop decodes each slot itself and forms no columns. `columns()` repeats one
+      `(n_cells, width)` array across the row fields (`_by_row_field`); the gathered form gathers at `(n_cells, width)` and multiplies each row
+      field's entries (`values` viewed `(fields, n_cells, width)`) against that one gather, so the decode
+      and the gathered operand are a row field's, not all of them. In the march step XLA keeps every
+      operator's decode live per call site of the split (an entry-computation copy and one inside
+      `_ResidualStopGMRES`'s true-residual `lax.cond`), so this was the step's largest temporary: bfs3d's
+      first step 1022.7 → 683.7 MiB, decoded indices 590.5 → 294.6 (`validation/step_temporaries.py`).
+      float64 products are bit-identical; float32 rows may be summed in another order (≤ 0.71 eps of the
+      row's `Σ|terms|`): the pitzDaily and bfs3d marches keep every count (bfs3d 17 steps, 147 cycles,
+      `x_r/h` 8.361), two step residuals each moving in their last printed digit; bfs3d's march 1835 →
+      1513 s, its steps after the first −21 %, peak 5.29 → 5.12 GiB (one run each, 4-core Linux). Pinned by `test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field`
+      (the gather's shape) and `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays` (the values).
+      Log, "What the march step's temporary holds".
     - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
       count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
       sized or static by the actual pattern retraced a budgeted rebuild
@@ -410,6 +432,13 @@ path.
       (2026-10-22)"; pinned by `test_the_product_map_holds_the_terms_of_the_plain_construction_in_its_order`).
       Host-map measurements: log, "Refit by entry maps (2026-10-17)"; harness
       `validation/pitzdaily_openfoam/refit_profile.py`.
+- **`HierarchyBlockInverse.refit_keeps()` names what a re-fit reuses (2026-10-25)**: the coarsening's
+  `CoarseningPlan` plus the smoother's `_refit_structure()` (`SimpleSmoothedInverse`: its SIMPLE plans and
+  the index arrays they were made for), or `None` when the re-fit re-coarsens. Everything else in the
+  current `traced_cycle()` state is dead once a re-fit starts, which is what lets the materialized session
+  free it before the fit (`solve.md`). A frozen re-fit lets go of `_hierarchy` and `_extras` before fitting.
+  A new block inverse family that holds structure across refits must return it here, or the session frees
+  it early and the re-fit reads deleted arrays (the bit-identity test catches it).
 - **A coarsening that reads no values is refitted, not re-aggregated** (`HierarchyBlockInverse.
   refactor_block`, `_coarsening_reads_values()`): at `strength_threshold` 0, `prolongation_smoothing`
   `"none"` and no `shape_headroom`, a rebuild provably reproduces the held aggregates and `P`, so the

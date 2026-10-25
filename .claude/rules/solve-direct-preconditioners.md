@@ -181,7 +181,9 @@ bare block inverse).
     0.12.0): log, "bfs3d memory by owner" and "Where a run's memory goes".
     After the device fit (#804–#808) the 2-step peak is 8.87 GiB in a later re-fit's leading block re-fit,
     and the device holds 2.19 GiB of int32 pattern arrays against 0.66 GiB of float32 values (2026-10-24,
-    `7fe27d07`; log, "bfs3d memory by owner after the device fit, probe and seeds").
+    `7fe27d07`; log, "bfs3d memory by owner after the device fit, probe and seeds"). Current: 5.58 GiB
+    with the tracer, set by the step program's first call (2026-10-25, after #817--#825 and the early
+    release of the superseded split; `solve.md`).
   - **One program per column field (2026-10-20).** A problem whose assembler implements
     `residual_with_field(state, field, values)` (`FieldwiseResidual`) sets `probes_by_field = True`
     (`_CoupledProblem`, `_FlowProblem`); the session (`_probe_products`, used by both the fit and the

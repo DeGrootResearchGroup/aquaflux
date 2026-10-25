@@ -321,6 +321,30 @@ def _release_superseded(superseded, current, inverse) -> None:
             leaf.delete()
 
 
+def _release_outgoing(form, inverse) -> bool:
+    """Free the arrays of the traced form a re-fit is about to replace, before it is fitted.
+
+    A re-fit computes every value its new form holds and reuses only the structure the inverse names
+    (``refit_keeps``: a frozen coarsening's plan, the smoother's plans, the coupling's packing layouts),
+    so every other array of the current form is dead once the re-fit starts. Freeing them before the
+    probe, rather than after the fit (:func:`_release_superseded`), keeps the superseded inverse from
+    being alive beside the one being fitted. Nothing applies the preconditioner between the start of a
+    re-fit and the update the session hands back, so no value changes.
+
+    Returns whether anything was released: ``False`` for a host-applied inverse (no form) or one that
+    cannot name what a re-fit reuses (an inverse that re-coarsens, or a block without ``refit_keeps``).
+    """
+    keeps = getattr(inverse, "refit_keeps", None)
+    kept = None if keeps is None or form is None else keeps()
+    if kept is None:
+        return False
+    held = {id(leaf) for leaf in jax.tree.leaves(kept)}
+    for leaf in jax.tree.leaves(form):
+        if isinstance(leaf, jax.Array) and id(leaf) not in held and not leaf.is_deleted():
+            leaf.delete()
+    return True
+
+
 def _held_state(inverse) -> list:
     """The traced state each block of an inverse currently holds, for :func:`_release_superseded`."""
     blocks = (
@@ -381,6 +405,10 @@ class BetaTrackingRefresh:
         Called just before each re-fit's probe, to give the allocator's kept, freed memory back to the
         operating system (:class:`~aquaflux.allocator.GlibcTrim`), so a re-fit's own transient lands on
         a lower resident set. It changes no value. ``None`` (default) leaves the allocator alone.
+    before_refit : callable, optional
+        ``() -> None``, called just before each re-fit's probe and before ``memory_trim``, for its owner
+        to let go of what the re-fit will replace (the session frees the outgoing traced form, so the
+        trim then returns its memory). ``None`` (default) calls nothing.
 
     Attributes
     ----------
@@ -402,9 +430,11 @@ class BetaTrackingRefresh:
         floorable_rows: np.ndarray | None = None,
         by_field: FieldLayout | None = None,
         memory_trim: MemoryTrim | None = None,
+        before_refit: Callable[[], None] | None = None,
     ) -> None:
         self._probe = probe
         self._memory_trim = memory_trim
+        self._before_refit = before_refit
         self._by_field = by_field
         self._pivot_floor = pivot_floor
         # On the device, where the floor is applied, once rather than at every re-fit.
@@ -455,6 +485,8 @@ class BetaTrackingRefresh:
         # the re-fits the march's own cadence pays for from the ones its solves provoked.
         kind = "full" if self._full_rebuild_pending else "cost"
         self._full_rebuild_pending = False
+        if self._before_refit is not None:
+            self._before_refit()
         if self._memory_trim is not None:
             self._memory_trim()
         self._report(kind, started, self._materialize_at(active_step, state, float(beta)))
@@ -744,6 +776,8 @@ class MaterializedSession:
         # in the inverse's precision, so a step holding its own would keep one such copy alive per step
         # built, for as long as that step is.
         self._form: TracedForm | None = None
+        # Whether the re-fit in progress freed the form before fitting (`_release_outgoing_form`).
+        self._form_released = False
         # What the last build was made at and with, for building a step on another problem alike.
         self._reference_state: jnp.ndarray | None = None
         self._march: dict = {}
@@ -754,7 +788,16 @@ class MaterializedSession:
         def refresh_preconditioner(
             active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
         ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
-            refitted = self._refresh_hook()(active_step, state, due=due)
+            self._form_released = False
+            try:
+                refitted = self._refresh_hook()(active_step, state, due=due)
+            except BaseException:
+                if self._form_released:
+                    # The form was freed for a re-fit that did not finish, and the inverse is half
+                    # re-fitted: nothing held is usable, so the next build fits afresh.
+                    self._preconditioner = self._form = self._hook = None
+                    self._stopping_steps = {}
+                raise
             if not (refitted and self._form is not None):
                 return None
             superseded, self._form = self._form, None
@@ -901,6 +944,10 @@ class MaterializedSession:
             )
         return self._probe
 
+    def _release_outgoing_form(self) -> None:
+        """Free the arrays of the current traced form a re-fit is about to replace (:func:`_release_outgoing`)."""
+        self._form_released = _release_outgoing(self._form, self._preconditioner.inverse)
+
     def _refresh_hook(self) -> BetaTrackingRefresh:
         if self._hook is None:
             if self._preconditioner is None:
@@ -918,6 +965,7 @@ class MaterializedSession:
                 floorable_rows=self._floorable_row_mask(),
                 by_field=self._by_field,
                 memory_trim=self._memory_trim,
+                before_refit=self._release_outgoing_form,
                 **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
         return self._hook

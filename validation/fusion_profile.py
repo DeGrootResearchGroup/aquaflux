@@ -87,6 +87,8 @@ from aquaflux.precondition.materialized_session import (  # noqa: E402
     batched_jacobian_matvec,
 )
 from aquaflux.turbulence import open_session  # noqa: E402
+from hlo_text import COMPUTATION, INSTRUCTION, shape_bytes  # noqa: E402
+from hlo_text import arrays as _hlo_arrays  # noqa: E402
 from step_cases import load_case  # noqa: E402
 
 CASE = os.environ.get("FUSION_CASE", "pitzdaily")
@@ -104,11 +106,6 @@ _M_TRIM_THRESHOLD, _M_MMAP_THRESHOLD = -1, -3
 
 #: The CPU backend's per-thread minimum for a memory-bound kernel, in bytes touched.
 L2_BYTES_PER_THREAD = 256 << 10
-
-_BYTES = {"f64": 8, "s64": 8, "u64": 8, "f32": 4, "s32": 4, "u32": 4, "pred": 1, "s8": 1, "u8": 1}
-_ARRAY = re.compile(r"\b(f64|f32|s64|s32|u64|u32|pred|s8|u8)\[([0-9,]*)\]")
-_INSTRUCTION = re.compile(r"^\s*(?:ROOT )?%(\S+) = (.*?) ([a-z][a-z0-9\-]*)\((.*)$")
-_COMPUTATION = re.compile(r"^%(\S+) .*\{$")
 
 
 def _raise_mmap_threshold(mib):
@@ -143,21 +140,6 @@ def _restore_lapack_first_pass():
     mc._boundary_condition_first_pass = first_pass
 
 
-def _arrays(text):
-    """``(dtype, n_elements)`` for each array shape written in ``text``."""
-    out = []
-    for dtype, dims in _ARRAY.findall(text):
-        n = 1
-        for d in filter(None, dims.split(",")):
-            n *= int(d)
-        out.append((dtype, n))
-    return out
-
-
-def _shape_bytes(text):
-    return sum(_BYTES[dtype] * n for dtype, n in _arrays(text))
-
-
 class Kernel:
     """One entry-computation instruction of the compiled program, as the HLO text describes it."""
 
@@ -165,7 +147,7 @@ class Kernel:
         self.name = name
         self.opcode = opcode
         self.shape = shape.split("{")[0] if not shape.startswith("(") else shape
-        arrays = _arrays(shape)
+        arrays = _hlo_arrays(shape)
         self.elements = max((n for _, n in arrays), default=0)
         kind = re.search(r"kind=(k[A-Za-z]+)", rest)
         self.kind = kind.group(1) if kind else opcode
@@ -174,7 +156,7 @@ class Kernel:
         called = re.search(r"calls=%(\S+?)[,\s]", rest)
         self.root = roots.get(called.group(1), opcode) if called else opcode
         operands = re.findall(r"%([\w.\-]+)", rest.split(")", 1)[0])
-        self.bytes = _shape_bytes(shape) + sum(shapes.get(o, 0) for o in operands)
+        self.bytes = shape_bytes(shape) + sum(shapes.get(o, 0) for o in operands)
         self.time = 0.0
         self.alone = 0.0
 
@@ -203,11 +185,11 @@ def _parse(hlo):
         if line.startswith("ENTRY"):
             current, local = "ENTRY", {}
             continue
-        heading = _COMPUTATION.match(line)
+        heading = COMPUTATION.match(line)
         if heading:
             current, local = heading.group(1), {}
             continue
-        m = _INSTRUCTION.match(line)
+        m = INSTRUCTION.match(line)
         if not m:
             continue
         name, shape, opcode, rest = m.groups()
@@ -219,7 +201,7 @@ def _parse(hlo):
                 roots[current] = opcode
         if current == "ENTRY":
             entry.append((name, shape, opcode, rest))
-            shapes[name] = _shape_bytes(shape)
+            shapes[name] = shape_bytes(shape)
         else:
             local[name] = opcode
     return [Kernel(n, s, o, r, shapes, roots) for n, s, o, r in entry if o not in _FREE]
