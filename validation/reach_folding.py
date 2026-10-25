@@ -11,15 +11,23 @@ uniform-reach-3 march of either case, the two things that could separate them:
             reach-3 pattern -- exactly the difference the two arms' preconditioners are fitted from.
             Per (row field, column field) block, ``|E_ab| / |J3_ab|`` (Frobenius); and per row field, the
             share of rows whose DIAGONAL moved, with quantiles of ``|E_ii| / |J3_ii + s_i|`` against the
-            shifted diagonal the preconditioner sees (a far coupling folds onto the diagonal when the
-            row's own cell shares the far cell's colour).
-  solves    one inner solve of the step (the first, or ``REACH_FOLDING_INNER``), rebuilt as the viscosity-ramp march builds it (session bound
-            to the anchor companion and built at the anchor's seed, then re-bound to the step's station
-            and re-fitted at the checkpoint and the step's shift), once per probe arm: the step's own
+            shifted diagonal the preconditioner sees. (Expect none: a reach-2 colouring keeps two cells
+            of one colour more than four apart, so a distance-3 coupling can land on another
+            distance-2 entry of its row but never on the row's own cell.)
+  solves    one inner solve of the step (the first, or ``REACH_FOLDING_INNER``), rebuilt as the
+            viscosity-ramp march builds it (session bound to the anchor companion and built at the
+            anchor's seed, then re-bound to the step's station and re-fitted at the checkpoint and the
+            step's shift), once per probe arm: the step's own
             solver at the march's tolerance and again at ``REACH_FOLDING_TIGHT_RTOL``, with cycles, the
             Euclidean and row-scaled linear residuals (the latter also per row field), the rows the pivot
             floor moved, and the step's line-search ladder ``|G(phi + a d)| / |G(phi)|``. The operator
             is the exact Jacobian in every arm; only the preconditioner differs.
+  Schur     what the fold does to the pressure Schur complement ``S = C - D M G`` a SIMPLE-smoothed flow
+            block relaxes, from the shifted ``[[F, G], [D, C]]`` of each matrix: the norms of ``C``,
+            ``D M G`` and ``S`` (how far the two terms cancel) and the relative change of each under the
+            fold, overall and on ``S``'s diagonal. ``M`` here is the diagonal ``1 / F_ii`` -- a proxy
+            for the per-cell block inverse the shipped smoother builds, so read it for the cancellation
+            and the amplification, not as the smoother's own ``S``.
 
 Arms (``REACH_FOLDING_ARMS``, comma-separated, default ``3,2,each``): ``3`` probes every column at reach 3,
 ``2`` every column at reach 2, ``each`` adds one arm per field with only that column at reach 2 --
@@ -69,6 +77,7 @@ import equinox as eqx  # noqa: E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
+import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition import materialize_block_jacobian  # noqa: E402
 from aquaflux.precondition.materialized_session import (  # noqa: E402
@@ -287,8 +296,60 @@ def folding_report(coupled, phi, shift, names):
     for f in range(n_fields):
         in_field = (rows >= f * n) & (rows < (f + 1) * n)
         print(f"  {names[f]:>5s} max {weight[in_field].max() if in_field.any() else 0.0:10.2e}", flush=True)
+    schur_report(j3, j2, shift, n, n_fields)
     del j2, j3, e
     gc.collect()
+
+
+def schur_parts(jacobian, shift, n, n_fields):
+    """``C``, ``D M G`` and ``S = C - D M G`` of the shifted flow block, with ``M = 1 / F_ii``."""
+    dim = n_fields - 3  # velocity components, then p, k, omega
+    shifted = (jacobian + sp.diags(shift)).tocsr()
+    velocity, pressure = slice(0, dim * n), slice(dim * n, (dim + 1) * n)
+    f = shifted[velocity, velocity]
+    g = shifted[velocity, pressure]
+    d = shifted[pressure, velocity]
+    c = shifted[pressure, pressure].tocsr()
+    dmg = (d @ sp.diags(1.0 / f.diagonal()) @ g).tocsr()
+    return c, dmg, (c - dmg).tocsr()
+
+
+def schur_report(j3, j2, shift, n, n_fields):
+    c3, dmg3, s3 = schur_parts(j3, shift, n, n_fields)
+    c2, dmg2, s2 = schur_parts(j2, shift, n, n_fields)
+
+    def frobenius(m):
+        return float(np.linalg.norm(m.data))
+
+    print(
+        "\n  pressure Schur complement S = C - D M G (M = 1/F_ii, a proxy for the smoother's block inverse)",
+        flush=True,
+    )
+    print(
+        f"  |C| {frobenius(c3):.3e}  |D M G| {frobenius(dmg3):.3e}  |S| {frobenius(s3):.3e}  "
+        f"cancellation |D M G| / |S| {frobenius(dmg3) / frobenius(s3):.2f}",
+        flush=True,
+    )
+    print(
+        f"  fold: |dC|/|C| {frobenius(c2 - c3) / frobenius(c3):.2e}  "
+        f"|d(D M G)|/|D M G| {frobenius(dmg2 - dmg3) / frobenius(dmg3):.2e}  "
+        f"|dS|/|S| {frobenius(s2 - s3) / frobenius(s3):.2e}",
+        flush=True,
+    )
+    diagonal3, diagonal2 = s3.diagonal(), s2.diagonal()
+    change = np.abs(diagonal2 - diagonal3) / np.abs(diagonal3)
+    print(
+        f"  S_ii: relative change median {np.median(change):.2e} p99 {np.quantile(change, 0.99):.2e} "
+        f"max {change.max():.2e}; rows above 1e-2 {int(np.sum(change > 1e-2))}, above 1e-1 "
+        f"{int(np.sum(change > 1e-1))}, sign flipped {int(np.sum(np.sign(diagonal2) != np.sign(diagonal3)))}",
+        flush=True,
+    )
+    off3 = np.abs(s3 - sp.diags(diagonal3)).sum(axis=1).A1
+    print(
+        f"  S row dominance |S_ii| / sum_j|S_ij|: median {np.median(np.abs(diagonal3) / off3):.3f}, "
+        f"rows below 1: {int(np.sum(np.abs(diagonal3) < off3))} of {n}",
+        flush=True,
+    )
 
 
 def main():
@@ -317,7 +378,8 @@ def main():
     rebuild = StepRebuild(coupled, phi, beta, step_number, iterate)
     print(
         f"[configuration] case {CASE_NAME}, {n} cells, step {step_number} (station {rebuild.station}) from "
-        f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, file probe "
+        f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, split precision "
+        f"{compare.SOLVER.preconditioner.inverse.precision}, file probe "
         f"{compare.SOLVER.preconditioner.probe}, jax {jax.__version__}",
         flush=True,
     )
