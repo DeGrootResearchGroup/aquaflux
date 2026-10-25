@@ -764,6 +764,8 @@
       - (c) `RESIDUE_CLEAR="fit (first build);end"`, warm cache: the mid-run clear frees 1.39 GiB (0.32
         traced) of 1287 executables; re-fit #1 then takes 196.8 s (its probe 148.6 s re-traces the batched
         JVPs), peak 5.85, resident at step 1's end 4.85, 817 executables at the end whose clear frees 1.39.
+      - (a) control again, warm cache (31 entries, `5ba0652a`): peak 6.35, resident at step 1's end 5.37, march
+        522.3 s, 1311 executables at the end whose clear frees 1.88 GiB (0.40 traced).
 
 ## Condensed out of the rule (2026-10-17)
 
