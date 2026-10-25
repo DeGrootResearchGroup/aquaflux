@@ -283,7 +283,8 @@ class _Sampler(threading.Thread):
         import bisect
 
         lo = bisect.bisect_left(self.times, start)
-        hi = bisect.bisect_right(self.times, stop)
+        # The sampler appends a sample's time before its readings, so the newest time may not have them.
+        hi = min(bisect.bisect_right(self.times, stop), len(self.rss), len(self.traced))
         if hi <= lo:
             return {}
         index = max(range(lo, hi), key=self.rss.__getitem__)
