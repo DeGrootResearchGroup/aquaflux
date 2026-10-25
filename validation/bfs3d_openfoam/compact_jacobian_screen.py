@@ -598,7 +598,7 @@ def schur_diagonal_estimate(split, assembler, phi, fitted_shift, n, samples):
 
 
 def wiring_simple(split, simple, n) -> None:
-    """The matrix-free divergence, velocity correction and Schur against the stored pieces."""
+    """The matrix-free divergence, velocity correction and Schur against the pieces' products."""
     _, pieces = leading_fine(split)
     divergence, gradient, schur, _ = simple.by_velocity[3 * n]
     rng = np.random.default_rng(3)
@@ -609,7 +609,7 @@ def wiring_simple(split, simple, n) -> None:
     pairs = (
         ("divergence", divergence(u), pieces.divergence.apply(u.astype(dtype))),
         ("velocity correction", dg, pieces.dg.apply(p.astype(dtype))),
-        ("Schur", schur(p, dg), pieces.schur.apply(p.astype(dtype))),
+        ("Schur", schur(p, dg), pieces.schur_apply(p.astype(dtype))),
     )
     for name, exact, stored in pairs:
         exact, stored = np.asarray(exact, np.float64), np.asarray(stored, np.float64)
