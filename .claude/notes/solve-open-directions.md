@@ -791,10 +791,11 @@ on two meshes")**: JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 
 GiB is per-program runtime and compiler state over ~1300 executables; what doubles it between the meshes is
 not separated, so no 300k projection stands. Arrays XLA folded into every program holding the residual (14e)
 were 0.148 GiB of HLO on bfs3d but only ~0.05 GiB resident, measured on a march (2026-10-25).
-**Only the setup-only part of that cache can be given back (2026-10-25, same log, "How much of the
-compiled-program cache a mid-run clear gives back")**: a clear after `hybrid_initialize` frees 0.38 GiB on
-bfs3d (0.28 pitzDaily) for ~10–20 s of recompilation, and lowers the step-1 resident by ~0.37 GiB; the
-march recompiles and holds 1.4–1.5 GiB of it whatever is cleared. Proposal: 14g.
+**Only the setup-only part of that cache can be given back, and most of it is three programs (2026-10-25,
+same log, "How much of the compiled-program cache a mid-run clear gives back" and "Which setup programs hold
+the reclaimable cache")**: the march recompiles and holds 1.4–1.5 GiB of the cache whatever is cleared; of
+the setup's ~0.38 GiB, `laplace_field`'s three per-call `newton_step` programs hold 0.19 and never run
+again. Proposal: 14g.
 
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
@@ -888,22 +889,29 @@ peak"). Measured before #825, which stops storing the transposes (about half the
 - `fit_simple_level`'s 993 MiB of temporaries (as large as the step program's): fit per level or per row
   chunk.
 
-### 14g. Proposal (not built) — do not keep the setup's op-by-op programs through the march
+### 14g. Proposal (not built) — release `laplace_field`'s per-call programs when it returns
 
-**Evidence** (`solve-direct-preconditioners-log.md`, "How much of the compiled-program cache a mid-run
-clear gives back", 2026-10-25, `main` `1bd8d292`, warm cache, 1 step, census off): of the 701 executables
-bfs3d's case build and `hybrid_initialize` leave, 267 never run again; dropping all 701 after
-`hybrid_initialize` frees 0.38 GiB (pitzDaily 0.28 of 685), the step-1 resident falls ~0.37 GiB (two runs
-per arm) and the peak 6.27 / 6.35 → 5.94 / 5.97 (inside the 0.4 GiB spread), for ~10–20 s of compilation.
-Clearing after the first fit too is dominated: +~200 s of re-tracing on bfs3d for ~0.1 GiB more.
+**Evidence** (`solve-direct-preconditioners-log.md`, "Which setup programs hold the reclaimable cache",
+2026-10-25, `main` `d7f5bf28`, warm, 1 step, census off, one run per arm): of what the setup leaves compiled,
+the three `eqx.filter_jit(newton_step)` programs of `laplace_field` (φ, `k`, ω) hold 0.19 GiB on bfs3d and
+never run again. Dropping only them lowered the step-1 resident 4.60 → 4.26 and the peak 5.59 → 5.25 at no
+recompile cost. The 673 op-by-op programs hold 0.09 GiB, ~430 of them used again; a global clear
+(`jax.clear_caches()`, measured first, same log, "How much of the compiled-program cache a mid-run clear
+gives back") also drops the march's programs and is not the fix.
 
-**Two library forms, neither measured:**
-- clear JAX's caches once the setup is done (in the case build's driver, before the first fit). Cheap,
-  but `jax.clear_caches()` is process-global: it also drops a caller's own compiled programs, so it
-  cannot sit inside the solver unasked;
-- compile the setup as fewer, larger programs (jit `hybrid_initialize`'s and the case build's array work
-  instead of running it op by op), which would shrink both the 701 programs and their compile time. This
-  is the one that scales: the reclaimable part is ~6 % of bfs3d's peak, not a lever for the 300k target.
+**The cause** is a pattern, not the cache: a per-call closure passed to a module-level `eqx.filter_jit`
+compiles a program per call, with the closure's arrays compiled in, and its cache key keeps both for the
+process. **Candidate forms, none measured:**
+- in `laplace_field`, jit a function defined per call (`jax.jit`, whose programs die with the function);
+  this releases the three programs on return and is local;
+- pass the residual and the preconditioner as pytrees (`eqx.Module`s holding their arrays) to a
+  module-level jit, so the arrays are arguments: the three solves may share programs and none embeds
+  arrays, but what is compiled is still kept;
+- the Laplace hierarchy's own `fit_levels` / `compiled_apply` / `_operator_spectral_estimate` entries
+  (~0.01 GiB) stay with either form.
+
+Audit any other place a per-call closure reaches a module-level `eqx.filter_jit` (only this call site in
+`aquaflux/` on 2026-10-25). Worth ~0.2–0.35 GiB on bfs3d, ~5 % of its peak.
 
 ## Smaller housekeeping
 

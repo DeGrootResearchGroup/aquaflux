@@ -800,6 +800,52 @@
         process is not separated (one run each); compare end-clear readings only at one cache state.
       - Records: `memory_residue.<case>.json` and run logs (git-ignored), copied into this entry.
 
+### Which setup programs hold the reclaimable cache: three Laplace solves (2026-10-25)
+
+      `validation/memory_residue.py` with `RESIDUE_FUNCTIONS` (every live `jax.jit` / `eqx.filter_jit`
+      wrapper the collector reaches, with its cache's entries, by defining module; the live executables
+      by HLO module name) and `RESIDUE_DROP` (clear only the named functions' caches at a stage's end, then
+      collect and trim). Library `main` `d7f5bf28` (#825; the runs' commits differ only in the harness
+      and `.claude/`); same container, jax 0.12.0.1, glibc defaults, shipped `case.yaml`s,
+      `BFS3D_MEMORY_STEPS=1`, census off, tracer on, `RESIDUE_CLEAR=end`, warm cache except where a run
+      shows misses. One run per arm. Each drop is an arm. GiB:
+
+      | case, arm (drop at `hybrid_initialize`'s end) | programs dropped | executables 701 → | freed then | executables at end | resident at step 1's end | peak | march s |
+      |---|---|---|---|---|---|---|---|
+      | bfs3d (f) control | -- | -- | -- | 1311 | 4.60 | 5.59 | 488.0 |
+      | bfs3d (d) `jax` (the op-by-op programs) | 673 | 28 | 0.09 | 1064 | 4.56 | 5.53 | 534.0 (4 cache misses) |
+      | bfs3d (e) `aquaflux,other` | 11 | 690 | 0.20 | 1300 | 4.21 | 5.20 | 470.4 |
+      | bfs3d (g) `aquaflux.solve.newton.newton_step` | 3 | 698 | 0.19 | 1308 | 4.26 | 5.25 | 483.2 |
+      | pitzDaily (f) control | -- | -- | -- | 1126 | 2.62 | 2.86 | 228.6 |
+      | pitzDaily (e) `aquaflux,other` | 13 | 672 (of 685) | 0.08 | 1113 | 2.80 | 2.95 | 247.5 (3 misses) |
+
+      - **The 673 op-by-op programs are not where the memory is**: they free 0.09 GiB, and the run compiles
+        ~430 of them again (end 1064 = 1311 − 673 + 426). Every op-by-op program belongs to a jitted
+        library function (`jnp.multiply`, `jnp.less`, the `jit_broadcast_in_dim` / `jit_gather` dispatch
+        wrappers): the largest name counts at bfs3d's end are `jit_stage` 174, `jit_broadcast_in_dim` 168,
+        `jit_convert_element_type` 128.
+      - **The 11 aquaflux programs left at `hybrid_initialize` are setup-only and hold 0.20 GiB**, and
+        three of them hold 0.19: the `eqx.filter_jit(newton_step)` programs of `laplace_field`'s three
+        solves (`flow/initialization.py`: φ, then `k` and ω in `turbulence/initialization.py`). The
+        others are `_fused_geometry`, `fit_levels`, and 3 each of `compiled_apply` and
+        `_operator_spectral_estimate` at the Laplace hierarchy's shapes. None is compiled again (end 1300 /
+        1308 = 1311 − 11 / 3), so dropping them costs nothing.
+      - **Why they stay**: `laplace_field` passes per-call closures (`residual`, the preconditioner factory
+        over the Laplace hierarchy) to the module-level `eqx.filter_jit(newton_step)`. A closure is a static
+        argument, so each call compiles a program of its own with the closure's arrays compiled in (the 3 ×
+        ~16 MiB of HLO noted above), and the C++ cache key holding the closure keeps it alive for the
+        process. A standalone check (same container): `eqx.filter_jit` of a per-call function, a
+        module-level `eqx.filter_jit` given a per-call closure, and an `eqx.filter_jit(...).lower().compile()`
+        all keep their program after every reference is gone, the second also its closure's captured
+        array; `jax.jit` of a per-call function frees its program, cached or AOT, once the function is
+        gone.
+      - Step-1 resident and peak fall by ~0.35 GiB in (e) and (g) on bfs3d, more than the 0.19–0.20 freed at
+        the drop; whether the rest is noise (one run each) or memory released with the closures is not
+        separated. pitzDaily's 13-program drop frees 0.08, below its run-to-run spread; its (e) run read
+        higher than its control.
+      - Counts a function's cache reports (`_cache_size()`) exceed its programs (3002 entries for 701
+        executables at bfs3d's `hybrid_initialize`): count programs by executable, not by cache entry.
+
 ### Lazy transposes (§14d) (2026-10-24)
 
       Branch `claude/lazy-transposes` on `claude/cell-level-pattern` (#817; the branch was rebased onto `main` after #817 merged, so
