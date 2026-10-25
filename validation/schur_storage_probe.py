@@ -8,7 +8,11 @@ reach-3 cell pattern, random values with a dominant velocity and pressure diagon
 
 - the entry counts of ``S`` formed and of its pieces, and the bytes each would hold in single precision;
 - one product with ``S`` formed (packed from the host product) against the pieces' ``schur_apply``, forward
-  and transposed (mean of ``SCHUR_PROBE_CALLS`` calls, three repeats), and how far apart they are;
+  and transposed (mean of ``SCHUR_PROBE_CALLS`` calls, three repeats), and how far apart they are; and the
+  same products ``LOOPED`` times inside one compiled loop, as the smoother's sweeps run them. ⚠️ The
+  isolated call overstates the formed product: its per-row gather (``n x width`` single-precision values,
+  33 MiB on the default lattice) is above glibc's 32 MiB mapping threshold, so each standalone call
+  faults it in afresh until the threshold adapts, which a loop allocating once does not pay;
 - the whole level fit, and the diagonal and squared row norms formed instead by sorting each row chunk's
   terms, with no pattern of ``S`` held -- the alternative that would drop ``S``'s row columns too.
 
@@ -39,6 +43,8 @@ SHAPE = tuple(int(v) for v in os.environ.get("SCHUR_PROBE_SHAPE", "40x24x24").sp
 CALLS = int(os.environ.get("SCHUR_PROBE_CALLS", "50"))
 #: Terms sorted at once by the sort-based row norms.
 SORT_TERMS = 1 << 18
+#: Products per compiled loop in the looped timing.
+LOOPED = 40
 SPLITTING = {"frobenius": True, "schur_frobenius": True, "block_splitting": True}
 
 
@@ -178,6 +184,25 @@ def main() -> None:
             f"pieces {mean_ms(forward_pieces, pieces, x):.2f} ms; transposed formed "
             f"{mean_ms(transposed_formed, formed, x):.2f} ms, pieces "
             f"{mean_ms(transposed_pieces, pieces, x):.2f} ms",
+            flush=True,
+        )
+
+    def looped(apply):
+        def run(operator, v):
+            def body(_, p):
+                return p + 1e-3 * apply(operator, p)
+
+            return jax.lax.fori_loop(0, LOOPED, body, v)
+
+        return jax.jit(run)
+
+    looped_formed = looped(lambda s, v: s.apply(v))
+    looped_pieces = looped(lambda p, v: p.schur_apply(v))
+    for repeat in range(3):
+        per_formed = mean_ms(looped_formed, formed, x) / LOOPED
+        per_pieces = mean_ms(looped_pieces, pieces, x) / LOOPED
+        print(
+            f"  looped repeat {repeat}: formed {per_formed:.2f} ms, pieces {per_pieces:.2f} ms a product",
             flush=True,
         )
 

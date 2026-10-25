@@ -2144,8 +2144,8 @@ The project owner chose this (design A) from these options:
 
 | option | memory | apply | march |
 |---|---|---|---|
-| A: matrix-free apply, `C` stored, row stats on kept row columns | − values, transpose, transpose layout; + `C` | ties | apply order changes; diagonal inverse bit-identical |
-| A′: as A, row stats by sorting each chunk's terms, no `S` columns | − 33 MiB more (lattice) | ties | as A; fit 23.6 s against 6.3 s for the whole fit |
+| A: matrix-free apply, `C` stored, row stats on kept row columns | − values, transpose, transpose layout; + `C` | 1.2–1.35x a product in a loop | apply order changes; diagonal inverse bit-identical |
+| A′: as A, row stats by sorting each chunk's terms, no `S` columns | − 33 MiB more (lattice) | as A | as A; fit 23.6 s against 6.3 s for the whole fit |
 | B: formed `S`, forward only | − transpose and its layout | unchanged | identical; a fragment of §14d's first bullet |
 
 **Configuration (all):** 4-core Linux container, 15.7 GiB, jax 0.12.0.1, base `main` `1bd8d292`, arm branch
@@ -2160,8 +2160,13 @@ reproduces those counts (7.2M / 9.3M) and was used for what needs the arrays in 
 MiB + transpose values 33.1 (float32, width 377), row layout 33.3 MiB, transpose layout 66.4 MiB; `C`
 5.5 + 5.5 MiB values (width 63).
 
-**Isolated product, lattice, float32, default flags, mean of 50 calls, three repeats:** formed 22.9–27.3
-ms, from pieces 22.7–25.0 ms; transposed 24.6–26.6 against 22.2–25.8. Results 1.1e-7 apart (relative).
+**Product, lattice, float32, default flags:** isolated (mean of 10–50 calls, three repeats in each of three
+processes) formed 12.4–28.3 ms against 22.7–31.2 from pieces, both ways -- read as a tie when the option was
+put to the owner, wrongly: the formed product's `(n, 377)` single-precision gather (33 MiB) is above glibc's
+32 MiB mapping threshold, so a standalone call faults it in per call until the threshold adapts (the 12.4).
+Inside one compiled loop of 40 products, as the smoother runs them: formed 8.9–10.1 ms, from pieces
+11.8–13.0 ms a product (three repeats), 1.2–1.35x, about the 1.3x entry ratio. Results 1.2e-7 apart
+(relative).
 
 **bfs3d, `memory_attribution.py`, `BFS3D_MEMORY_STEPS=1 BFS3D_MEMORY_CENSUS=0 BFS3D_MEMORY_CHECKSUMS=1`,
 one run per arm** (base on a cold compilation cache, arm on the base's, so seconds are not compared):
@@ -2183,3 +2188,14 @@ order, not fused multiply-add placement; `VmHWM` 2.765 / 2.709, solve 425.8 / 44
 **pitzDaily, `split_apply_timing.py`, hybrid start, best of 15, two runs per arm:** apply 182.6 / 152.7 ms
 (base) against 153.5 / 171.1 (arm); transpose 158.9 / 157.3 against 141.6 / 166.7. Tied within the
 run-to-run spread. Outputs 2.4e-9 of the largest entry apart; the base reproduces itself exactly.
+
+**bfs3d, `split_apply_timing.py`, hybrid start (the arms share it: the change is downstream of every value
+the start reads, and the level tables print equal), best of 10, two runs per arm, alternating:** apply
+1382.7 / 1192.7 ms (base) against 1159.6 / 1341.2 (arm); transpose 1430.2 / 1202.6 against 1174.7 / 1314.1.
+The first pair alone read as a 16 % win; the second reversed it. The looped product's extra ~3 ms, about
+four fine-level products a V-cycle, is ~1 % of an apply, below this spread. Outputs 4.6e-9 / 5.9e-9 of the
+largest entry apart.
+
+**Not measured:** a bfs3d march (one draw is not evidence at this size of change, `validation.md`); a
+census by owner (the split's leaves were summed from the checksum lines instead; the plan's arrays,
+`S`'s row columns among them, are outside that sum).

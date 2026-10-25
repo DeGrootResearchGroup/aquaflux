@@ -45,8 +45,11 @@ There is no `StructuralPatterns`, `_structured`, `block_approximate_inverse` or 
   for `C`. Its values (both ways) and transpose layout were ~132 MiB float32 on a 23040-cell reach-3
   lattice against ~17 MiB for `C` (its row columns, 33 MiB, stay), and the whole-`S` float64 product was a
   transient at every re-fit. bfs3d 1-step: device arrays at the step's end 1.20 -> 1.04 GiB, peak
-  6.50 -> 6.39 GiB (one run per arm), every shared split leaf bit-identical. An isolated product ties (22–27 ms both
-  ways, same lattice). **Rejected:** row norms without `S`'s columns, by sorting each chunk's terms
+  6.50 -> 6.39 GiB (one run per arm), every shared split leaf bit-identical. **Cost:** a product from the
+  pieces is 1.2–1.35x the formed one inside a loop (11.8–13.0 against 8.9–10.1 ms, same lattice; it reads
+  1.3x the entries); a whole split apply did not move outside run-to-run noise (bfs3d 1160/1341 against
+  1383/1193 ms, pitzDaily likewise). ⚠️ An isolated call reads a tie: the formed product's 33 MiB gather
+  page-faults per call (`validation.md`, the 32 MiB trap). **Rejected:** row norms without `S`'s columns, by sorting each chunk's terms
   (exact to 2e-15, but 23.6 s against 6.3 s for the whole fit); a forward-only formed `S` (a fragment of
   §14d's first bullet, which wants every operator's transposes). ⚠️ Not bit-identical to the formed
   product (sums in another order, 1.1e-7 relative in float32 on the lattice); the diagonal and norms are
