@@ -788,10 +788,9 @@ an unmeasured, cheap arm on bfs3d (on pitzDaily it moved the peak 0.03 GiB).
 
 **The non-array residue is named (2026-10-24, same log, "What the resident memory holds beyond live arrays,
 on two meshes")**: JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 on pitzDaily. About 0.7–0.9
-GiB is ~0.7 MiB per small op-by-op program, fixed in the mesh. About 0.8 GiB (estimated) is arrays XLA folds
-into every program holding the residual or its JVP (`batched_field_jacobian_matvec` once per field,
-`newton_step`, `_march_step`, `norm_of_residual`, `_eddy_viscosity_drift`): the unit tangents of
-`BoundaryClosure.gradient_weight`, cells × dim², ~11 GB at 300k cells; removed by 14e.
+GiB is per-program runtime and compiler state over ~1300 executables; what doubles it between the meshes is
+not separated, so no 300k projection stands. Arrays XLA folded into every program holding the residual (14e)
+were 0.148 GiB of HLO on bfs3d but only ~0.05 GiB resident, measured on a march (2026-10-25).
 
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
@@ -860,9 +859,9 @@ its own process, to re-measure.
 **Why.** XLA's constant folding evaluates the scatter at compile time and stores an `(n_cells, dim)` result per
 component and field in every program that holds the residual (15.87 MiB in bfs3d's residual alone, cells ×
 dim²); a broadcast is not folded. `validation/folded_constants.py` (on `50fe3be0`): bfs3d 15.87 → 0.05 MiB,
-pitzDaily 1.87 → 0.01, residual bit-identical on both. Expected gain: ~0.8 GiB on bfs3d (estimated from the HLO
-sizes at ~3.4× resident per byte), ~11 GB at 300k cells; the march's arithmetic is unchanged. Not yet measured:
-the resident drop on a march (`memory_residue.py` with `RESIDUE_CLEAR=end`).
+pitzDaily 1.87 → 0.01, residual bit-identical on both. **Measured gain on a bfs3d march is small**: all programs'
+HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the 1-step peak 6.25 → 6.43 (inside the
+0.4 GiB spread); one run per arm (log entry above). Kept because it costs nothing and removes a per-cell term.
 
 ## Smaller housekeeping
 

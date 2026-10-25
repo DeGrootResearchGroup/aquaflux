@@ -86,7 +86,7 @@ reconstructing against boundary closures wraps them in this; do not write anothe
 - ⚠️ **`gradient_weight`'s unit tangents are broadcasts (`jnp.broadcast_to(eye[k], shape)`), never
   `zeros_like(...).at[:, k].set(1.0)`**: that scatter is a computation on constants, which XLA folds into
   every compiled program holding the residual as an `(n_cells, dim)` constant (bfs3d 15.87 MiB in the
-  residual alone, ~0.8 GiB resident over its programs). Pinned by
+  residual alone; ~0.05 GiB resident over its programs, measured). Pinned by
   `test_the_gradient_weight_compiles_to_no_per_cell_constant`; any per-cell tangent seeded in a traced
   residual has the same trap (`.claude/notes/solve-direct-preconditioners-log.md`, "What the resident
   memory holds beyond live arrays").

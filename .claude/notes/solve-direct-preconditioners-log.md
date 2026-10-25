@@ -692,17 +692,22 @@
           the residual (nine `f64[23040, 3, 3]`, three `f64[23040, 3]`), pitzDaily 1.87 (four
           `f64[12225, 2, 2]`, two `f64[12225, 2]`): cells × dim², which with one more batched-JVP program
           is the 4.5×; not the stencil. The same tangent as `jnp.broadcast_to(unit_k, shape)` (not
-          folded) leaves 0.05 / 0.01 MiB and a bit-identical residual on both cases. A standalone probe (four jitted functions each closing over 32 MiB of
-          int32) cost 432 MiB resident for 114 MiB of HLO, ~3.4× the data; at that multiplier (an
-          estimate, not measured on the case) they hold ~0.8 GiB of bfs3d's 1.71 untraced and ~0.2 of
-          pitzDaily's 0.87, ~38 KB a bfs3d cell.
-        - **Everything else is ~0.7 MiB per small program**: (1.71 − 0.8) / ~1226 on bfs3d against
-          (0.87 − 0.2) / ~1059 on pitzDaily, the op-by-op programs the case build, `hybrid_initialize` and
-          the fit compile: about 0.7–0.9 GiB, fixed in the mesh. The traced 0.19 → 0.38 (jaxprs) is not
-          separated between the two parts.
-        - **For a 300k-cell case**: the constants at bfs3d's ~38 KB a cell are ~11 GB (estimated; the same
-          on a polyhedral mesh, since they follow cells × dim²), and broadcast tangents remove them
-          (built, `solve-open-directions.md` §14e); the per-program part stays ~1 GiB.
+          folded) leaves 0.05 / 0.01 MiB and a bit-identical residual on both cases. On a march their resident cost
+          is small (next bullet).
+        - **Measured on a march, the folded constants cost ~0.05 GiB resident, not the ~0.8 estimated**
+          (bfs3d, `memory_residue.py` with `RESIDUE_CLEAR=end` and `RESIDUE_HLO`, 1 step, census off,
+          tracer on, warm cache, 2026-10-25, one run per arm). `main` `39786723`: HLO 0.234 GiB, clear +
+          trim freed 1.61 GiB, peak 6.25. With broadcast tangents (`3636ab49`): HLO 0.086, freed 1.56,
+          peak 6.43 -- the peaks within the 0.4 GiB spread two runs of one configuration show; the clear's
+          reading reproduced to 0.01 between two earlier runs. The estimate came from a standalone probe
+          (four jitted functions closing over 32 MiB of int32 each: 432 MiB resident for 114 MiB of HLO);
+          that multiplier does not transfer to the case.
+        - **So the cache is not proportional to its programs' HLO**: ~1.5 GiB of bfs3d's is per-program
+          runtime and compiler state over ~1300 executables. What doubled it from pitzDaily to bfs3d (1.06
+          against 2.09 on `13fa17d4`, with 16 % more executables) is not separated, and no projection of it
+          to 300k cells stands. `newton_step` still carries 3 × 16 MiB of HLO with broadcast tangents
+          (`laplace_field` hands `eqx.filter_jit(newton_step)` closures, whose captured arrays compile in);
+          its resident cost is unmeasured and, by the measurement above, small.
       - **After the march returns, its session and splits are cyclic garbage** until a collection: 1.6 GiB
         of arrays on bfs3d. During the march a collection frees nothing (entry of 2026-10-18), so this is
         not in the march's footprint; it is in the footprint of anything run after a solve in the same
