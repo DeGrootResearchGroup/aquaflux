@@ -22,12 +22,17 @@ uniform-reach-3 march of either case, the two things that could separate them:
             arm; only the preconditioner differs.
 
 Arms (``REACH_FOLDING_ARMS``, comma-separated, default ``3,2,each``): ``3`` probes every column at reach 3,
-``2`` every column at reach 2, and ``each`` adds one arm per field with only that column at reach 2 --
-which column's folding costs the solve.
+``2`` every column at reach 2, ``each`` adds one arm per field with only that column at reach 2 --
+which column's folding costs the solve -- and a field name (``p``) adds that one such arm.
 
 Usage, one checkpoint per run (``state-<step-1>`` is the step's start, ``state-<step>`` gives its shift)::
 
     validation/run_case.sh validation/reach_folding.py   # with REACH_FOLDING_CASE and REACH_FOLDING_STEP
+
+⚠️ **Run at most two arms per process on bfs3d.** Each arm opens its own session and compiles its own
+programs, and they are not all released: on a 15 GiB machine the fifth arm died in LLVM's allocator
+(2026-10-25). Run the ``3`` arm with the matrix report, then each other arm alone with
+``REACH_FOLDING_SKIP_MATRIX=1``.
 
 Environment: ``REACH_FOLDING_CASE`` (``bfs3d_openfoam`` or ``pitzdaily_openfoam``), ``REACH_FOLDING_STEP``
 (one-based), ``REACH_FOLDING_CHECKPOINTS`` (default the case's ``checkpoints/``), ``REACH_FOLDING_ARMS``,
@@ -98,8 +103,11 @@ def arms(n_fields, names):
         elif token == "each":
             for f in range(n_fields):
                 out[f"{names[f]} at 2"] = tuple(2 if g == f else 3 for g in range(n_fields))
+        elif token in names:
+            f = names.index(token)
+            out[f"{token} at 2"] = tuple(2 if g == f else 3 for g in range(n_fields))
         else:
-            raise SystemExit(f"REACH_FOLDING_ARMS: unknown arm {token!r} (3, 2 or each)")
+            raise SystemExit(f"REACH_FOLDING_ARMS: unknown arm {token!r} (3, 2, each, or a field name)")
     return out
 
 
