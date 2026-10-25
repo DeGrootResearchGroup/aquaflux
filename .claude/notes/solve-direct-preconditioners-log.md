@@ -1031,7 +1031,8 @@
         loop) fuses the decode into the gather in the last two and materializes nothing, so it does not
         reproduce the step. Ledger: `solve-refuted-directions.md`, "The true residual out of the `lax.cond`".
       - **Built: the cell-level product gathers once per cell row (`a0fca85b`, the review's cut 2).**
-        `_KroneckerColumns.product` gathers `x` at `(n_cells, width)` and multiplies every row field's entries
+        `_KroneckerColumns._gathered_product` (the XLA form; named `product` until it met the fused loop) gathers
+        `x` at `(n_cells, width)` and multiplies every row field's entries
         against it, where `columns()` had repeated the same columns `fields` times. bfs3d first step
         (`d5f7ff02` + the change; capture 254 s): **split arm temp 1022.7 → 683.7 MiB**, identity arm 392.9
         unchanged, the split's share 629.8 → 290.7 (its peak slots 680.5 → 329.2); decoded indices

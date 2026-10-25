@@ -75,9 +75,12 @@ OTHER = "driver, setup, report"
 
 def main_thread_stacks(path: str):
     """``(frames, samples)`` for each of the capture's main-thread stacks."""
-    with open(path) as capture:
+    # `py-spy --nonblocking` can read a frame name mid-write, leaving bytes that are not UTF-8.
+    with open(path, errors="replace") as capture:
         for line in capture:
             stack, _, count = line.rstrip("\n").rpartition(" ")
+            if not count.isdigit():
+                continue
             frames = stack.split(";")
             # With --threads the root frame names the thread: `thread (0x...)` or `process ...`.
             if not any("MainThread" in f for f in frames[:2]):

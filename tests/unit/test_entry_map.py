@@ -206,7 +206,8 @@ def test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field() 
     Every row field's rows read the same columns, so the product gathers them once and every row field
     multiplies its own entries against that one gather. Gathering per row instead decodes and gathers
     ``fields`` identical copies, which a loop then keeps live for its whole length. The values are pinned
-    by the test above; this pins the shape of the work.
+    by the test above; this pins the shape of the work. It reads XLA's gathered form directly: on the CPU
+    the product may route to the fused loop instead, which decodes each slot itself and gathers nothing.
     """
     fields = (4, 4)
     cells = SparsePattern(_random_pattern(9, 9, 0.3, seed=3))
@@ -215,7 +216,7 @@ def test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field() 
     operator = layout.packed(jax.numpy.ones(pattern.nnz))
     x = jax.numpy.ones(pattern.shape[1])
 
-    jaxpr = jax.make_jaxpr(lambda x: operator.rows.product(operator.values, x))(x)
+    jaxpr = jax.make_jaxpr(lambda x: operator.rows._gathered_product(operator.values, x))(x)
     gathered = [
         equation.outvars[0].aval.shape
         for equation in jaxpr.jaxpr.eqns

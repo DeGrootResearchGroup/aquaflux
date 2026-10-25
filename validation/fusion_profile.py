@@ -44,7 +44,8 @@ Usage
 
 Environment: ``FUSION_CASE`` (default ``pitzdaily``); ``FUSION_PROGRAMS``, a comma list of ``residual``,
 ``jvp``, ``probe`` (default those three) and ``probe-fields``, the probe's one program per column field
-(``batched_field_jacobian_matvec``, each seeded with its own field's first colours); ``FUSION_BATCH``, the probe's batch (default the library's
+(``batched_field_jacobian_matvec``, each seeded with its own field's first colours) and ``split``, the
+traced field split the session's first fit hands the step, applied to one vector; ``FUSION_BATCH``, the probe's batch (default the library's
 ``PROBE_BATCH_SIZE``), seeded with the probe's own first colours; ``FUSION_STATE``, a ``.npz`` holding
 ``state`` (default the hybrid start); ``FUSION_CALLS`` traced calls (default 10), ``FUSION_REPEATS``
 untraced timing calls (default 15), ``FUSION_TOP`` rows in each table (default 25), and
@@ -454,7 +455,7 @@ def main():
         _restore_lapack_first_pass()
     elif ARM != "main":
         raise SystemExit(f"FUSION_ARM must be 'main' or 'lapack', not {ARM!r}")
-    unknown = set(PROGRAMS) - {"residual", "jvp", "probe", "probe-fields"}
+    unknown = set(PROGRAMS) - {"residual", "jvp", "probe", "probe-fields", "split"}
     if unknown:
         raise SystemExit(f"FUSION_PROGRAMS names no such program: {sorted(unknown)}")
     print(
@@ -510,6 +511,24 @@ def main():
             (probed_params, jax.lax.stop_gradient(state), seeds),
             "jit_probe_batch",
             tangents=BATCH,
+        )
+    if "split" in PROGRAMS:
+        # The step's preconditioner: the traced field split the session's first fit hands the step (its
+        # precision included), applied to one random vector. Its levels keep their shapes across re-fits,
+        # so this program is the one every Krylov application of the march runs.
+        session = open_session(case.SOLVER.settings()["preconditioner"], coupled)
+        session.build(state, dual_time=case.SOLVER.dual_time)
+        form_params, form_static = eqx.partition(session._form, eqx.is_array)
+        vector = jnp.asarray(np.random.default_rng(0).standard_normal(state.size))
+
+        def split_apply(p, v):
+            return eqx.combine(p, form_static).apply(v)
+
+        _report(
+            "the field split's apply",
+            jax.jit(split_apply),
+            (form_params, vector),
+            "jit_split_apply",
         )
     if "probe-fields" in PROGRAMS:
         # The probe's per-column-field programs, as the session runs them: each field's own first colours,

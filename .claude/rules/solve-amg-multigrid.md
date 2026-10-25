@@ -4,6 +4,7 @@ paths:
   - "aquaflux/precondition/hierarchy_inverse.py"
   - "aquaflux/precondition/entry_map.py"
   - "aquaflux/precondition/padded_rows.py"
+  - "aquaflux/precondition/fused_product.py"
   - "aquaflux/precondition/level_fit.py"
   - "aquaflux/precondition/kronecker_pattern.py"
 ---
@@ -11,7 +12,8 @@ paths:
 # Rules — `aquaflux/precondition/` the traced multigrid (and the record of the deleted monolithic AMG)
 
 This file governs the traced multigrid (`precondition/multigrid.py`, `precondition/hierarchy_inverse.py`)
-the padded-row level operator (`precondition/padded_rows.py`), the entry maps a refit applies
+the padded-row level operator (`precondition/padded_rows.py`) and its fused CPU product
+(`precondition/fused_product.py`), the entry maps a refit applies
 (`precondition/entry_map.py`) and the device fit of a hierarchy's level values (`precondition/level_fit.py`).
 Package-wide contracts are in `solve.md`; the materialized base `MaterializedJacobianPreconditioner` is in
 `solve-direct-preconditioners.md`. Dated measurements and investigation behind every entry are in
@@ -186,9 +188,48 @@ path.
 - **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`** (`padded_rows.py`, with
   `_padded_rows`, the one slot rule, and `_PaddedLayout`/`_padded_operator`; moved out of `multigrid.py`
   to keep it under its size budget, 2026-10-18). `columns` / `values` are
-  `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (by `rows.product`; a
-  gather fusion then a row-sum kernel, not one fused loop). Measurements on both machines: log, "The
-  padded-row level operator — measurements".
+  `(n_rows, width)`, `row_lengths` marks stored slots, and `apply` is `sum(values * x[columns], axis=1)`,
+  computed by the index half (`PaddedColumns.product`): on the CPU a fused loop (below), elsewhere a
+  gather fusion then a row-sum kernel. Measurements on both machines: log, "The padded-row level
+  operator — measurements".
+  - **On the CPU every padded-row product is one fused, threaded Numba loop called as an XLA foreign
+    function (`fused_product.py`, 2026-10-25).** XLA's form writes `values * x[columns]` out whole (177 MiB
+    on bfs3d's leading fine level, twice an application) and row-sums it on one thread; the loop reads each
+    stored slot once and threads over rows. Two targets: held columns (`held_product`) and cell-level
+    columns (`cell_product`, which decodes `_KroneckerColumns` itself, so `columns()` is never formed).
+    `PaddedColumns.product` routes through `fused_product.routed`, which takes the loop only for one
+    floating type on both operands and only where `fused_products()` holds, inside
+    `jax.lax.platform_dependent(cpu=...)`, so any other backend compiles the gathered form; the transpose
+    (`_HeldColumns`) is routed the same way.
+    - **`fused_products()` is decided once per process**: CPU backend present,
+      `AQUAFLUX_DISABLE_FUSED_PRODUCT` unset (the A/B switch; read at the first decision, recorded by
+      `run_case.sh`), Numba's threading layer `omp` or `tbb`, and both targets registered and agreeing with
+      numpy (`registered()`, `_self_check`). ⚠️ **`workqueue` keeps the gathered form, deliberately**: it
+      aborts the process when two threads enter it at once, and XLA can run two products concurrently; a
+      one-thread loop also loses to XLA on narrow rows (bfs3d trailing fine 14.1 vs 6.9 ms).
+    - **macOS: `omp` only with libomp installed (optional; README and `docs/index.md` installation).** Numba's
+      macOS wheel ships its OpenMP layer but links `@rpath/libomp.dylib`, which pip cannot supply (no TBB
+      layer at all), so a plain install has `workqueue` and runs the gathered form. Homebrew's libomp is
+      keg-only, so it takes `brew link --force libomp` (macOS strips `DYLD_LIBRARY_PATH` when `bash` starts
+      a process, as `run_case.sh` does); conda's Numba depends on `llvm-openmp` and needs nothing. Measured on
+      an M3 Pro (2026-10-25, jax 0.10.2, `omp` 11 threads): bfs3d march −14.4 %, pitzDaily **+3.0 %** (its
+      leading cycle, mean row 73, runs 21 % slower fused); log, "The fused level product on macOS". Which
+      path a run took is in its `run.yaml` (`padded_products`) and a log line after the solve, from
+      `padded_product_path()` (`case.md`).
+    - **The handlers read the typed-FFI call frame by its C layout and declare FFI version (0, 1)**, the
+      oldest XLA accepts; XLA asks each handler its version at registration (the metadata extension) and
+      keeps every accepted version's layout. The layout constants are at the top of the module, against
+      `xla/ffi/api/c_api.h` (`jax.ffi.include_dir()`). The legacy custom-call API is not an option: XLA:CPU
+      logs an error per call and has scheduled it for removal. Registration starts the CPU backend first,
+      since a refusal registered before the backend exists stops the backend itself.
+    - ⚠️ **Not bit-identical to the gathered form**: each row is summed serially in slot order (float32
+      rounding a few ulps), deterministic for any thread count. The held and cell-level loops agree exactly
+      with each other (`test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`).
+    - ⚠️ **A traced product is cached per function, so the choice is fixed at the first trace**: a test
+      flipping `fused_products` must `jax.clear_caches()` between arms, or the second arm reruns the first.
+    - Pinned by `tests/unit/test_fused_product.py` (each loop bit for bit against a serial numpy product,
+      the routing in the compiled program, the threading-layer and environment refusals). Measured: log,
+      "The fused level product (2026-10-25)".
   - **The index half is a `PaddedColumns` (2026-10-24, the second stage of `solve-open-directions.md`
     §14d): `columns()`, `row_lengths()` and `entries()` (the stored entry each slot is packed from,
     `nnz` for padding), held (`_HeldColumns`) or computed at cell level (`_KroneckerColumns`, rows only:
@@ -208,9 +249,10 @@ path.
     living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
     jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
     1–3").
-    - **A cell-level operator's product gathers `x` once per cell row (`PaddedColumns.product`,
-      2026-10-25).** `columns()` repeats one `(n_cells, width)` array across the row fields
-      (`_by_row_field`); `_KroneckerColumns.product` gathers at `(n_cells, width)` and multiplies each row
+    - **A cell-level operator's gathered form gathers `x` once per cell row
+      (`_KroneckerColumns._gathered_product`, 2026-10-25)** -- XLA's form, taken wherever the fused loop is
+      not (above); the loop decodes each slot itself and forms no columns. `columns()` repeats one
+      `(n_cells, width)` array across the row fields (`_by_row_field`); the gathered form gathers at `(n_cells, width)` and multiplies each row
       field's entries (`values` viewed `(fields, n_cells, width)`) against that one gather, so the decode
       and the gathered operand are a row field's, not all of them. In the march step XLA keeps every
       operator's decode live per call site of the split (an entry-computation copy and one inside
@@ -269,9 +311,11 @@ path.
     `test_a_fitted_split_holds_no_transposes_and_an_adjoint_packs_them_for_its_solve_only`. Saved (both
     case files' configuration, CPU, jax 0.12.0.1, 2026-10-24): pitzDaily march identical row for row,
     peak 3.085 → 2.900 GiB; bfs3d: `solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)". The
-    adjoint pays the packing instead: 22.9 s on bfs3d, 19 transposed applications, ~1.3 % of a
-    transpose solve (`adjoint_transpose_cost.py`, 2026-10-25).
-  - ⚠️ **On macOS the row-sum kernel (a single-threaded `__ynn_fusion`) is the bottleneck for wide rows**
+    adjoint pays the packing instead: ~30 s on bfs3d, ~115 transposed applications with the fused product,
+    ~7 % of a transpose solve (20 and ~1.3 % with XLA's form; `adjoint_transpose_cost.py`, 2026-10-25, log,
+    "The fused level product").
+  - ⚠️ **Where the gathered form runs (macOS without a thread-safe Numba layer), on macOS the row-sum
+    kernel (a single-threaded `__ynn_fusion`) is the bottleneck for wide rows**
     (bfs3d, up to ~364 wide), and no rewrite of the sum avoids it: `einsum`, a chunked sum, a column-major
     layout, a reduce-free halving sum and an unrolled sum were all measured slower. The XLA flag
     `--xla_cpu_experimental_ynn_fusion_type=-reduce` fixes the Mac and is neutral-to-worse on Linux, so it
