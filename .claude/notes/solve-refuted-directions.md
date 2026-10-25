@@ -1833,6 +1833,9 @@ are probed through the aggregates, a re-fit still holds the fine Jacobian and th
 the re-fits, does not fall by 887 MiB.
 
 **Reopen with** an exact, cheap `|S_i|²`: for instance, forming `S` in row chunks at the fit from transiently
-held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. Or with a Schur
+held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. The stored split does
+this since 2026-10-25 (`_schur_rows`, from the held `D` and `M G`), on `S`'s row columns, which it keeps;
+without them the row norms need a sort of each chunk's terms, ~4× the whole fit's time on a bfs3d-sized
+lattice (`solve-flow-block.md`, "`S` is never held"). Or with a Schur
 relaxation that needs no row norms and is shown to work: plain damped Jacobi is the one other candidate, and
 `solve-flow-block.md` records that an undamped one diverges.
