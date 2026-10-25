@@ -68,21 +68,32 @@ class _SimplePieces(eqx.Module):
     refresh cheap, and is defeated outright by a closure, since a closed-over array is a compile-time
     constant and every refresh mints a new one.
 
-    The formed Schur is carried only in its traced form: a host sparse matrix is neither a leaf nor a
-    hashable static field, so :func:`_simple_pieces` returns a host copy alongside instead.
+    The Schur complement ``S = C - D M G`` is not held: :meth:`schur_apply` applies it from ``C``, ``D``
+    and ``M G``. Formed, it reaches twice as far as the level operator and its rows are wider than its
+    pieces' together, so holding it, with its transpose, cost more memory than the one piece it adds,
+    ``C``; the product from the pieces reads about a third more entries than a formed one would.
     """
 
     f_diagonal_inverse: jnp.ndarray  # (n_velocity,) 1 / diag(F)
-    dg: _PaddedRowOperator  # diag(F)^-1 G, the velocity correction operator
+    dg: _PaddedRowOperator  # M G, the velocity correction operator (M approximates F^-1)
     divergence: _PaddedRowOperator  # D
-    schur: _PaddedRowOperator  # S = C - D diag(F)^-1 G
-    schur_diagonal_inverse: jnp.ndarray  # (n_pressure,) 1 / diag(S)
+    pressure: _PaddedRowOperator  # C, the pressure-pressure block
+    schur_diagonal_inverse: jnp.ndarray  # (n_pressure,) the approximate inverse of diag(S)
     #: Set when the splitting is a per-cell BLOCK inverse instead of a scalar diagonal; the velocity
     #: predictor then applies this rather than an elementwise multiply. ``None`` keeps the diagonal path,
     #: which stays an elementwise multiply rather than a nine-nonzero-per-row matvec.
     f_block_inverse: _PaddedRowOperator | None
     #: Static: it slices the level vector, so it must be concrete.
     n_velocity: int = eqx.field(static=True)
+
+    def schur_apply(self, p: jnp.ndarray) -> jnp.ndarray:
+        """``S p = C p - D (M G p)``, shape ``(n_pressure,)``.
+
+        Linear, and transposed through each piece's transpose once the pieces hold them
+        (:func:`~aquaflux.solve.with_transposes`). It sums in another order than a product with ``S``
+        formed, so the two differ in the last bits of the working precision.
+        """
+        return self.pressure.apply(p) - self.divergence.apply(self.dg.apply(p))
 
 
 def _simple_pieces(
@@ -94,7 +105,7 @@ def _simple_pieces(
     simplec: bool = False,
     report: Callable[[str], None] = lambda _message: None,
     precision: str = "float64",
-) -> tuple[_SimplePieces, sp.csr_matrix]:
+) -> _SimplePieces:
     """Form one level's SIMPLE pieces from an assembled operator, through a plan made for it.
 
     Works on **any** level, including a Galerkin coarse operator, because it reads nothing but the
@@ -105,11 +116,8 @@ def _simple_pieces(
 
     Returns
     -------
-    pieces : _SimplePieces
+    _SimplePieces
         The traced record the smoother applies, in ``precision``.
-    schur : scipy.sparse.csr_matrix
-        The same Schur complement in host sparse form and double precision, for a diagnostic that needs
-        a transposable sparse operator -- rather than forming ``C - D diag(F)^-1 G`` a second time.
     """
     a = sp.csr_matrix(a).sorted_indices()
     plan = simple_plan(
@@ -121,8 +129,7 @@ def _simple_pieces(
         simplec=simplec,
     )
     values, checks = fit_simple_level(plan, _PaddedRowOperator.from_scipy(a).values)
-    schur = plan.schur_layout.with_values(values.schur).to_scipy()
-    return _held_pieces(plan, values, checks, report, precision), schur
+    return _held_pieces(plan, values, checks, report, precision)
 
 
 def _held_pieces(
@@ -139,17 +146,15 @@ def _held_pieces(
     """
     refuse_unusable(checks)
     c_entries, d_entries, g_entries, schur_entries = plan.entry_counts
-    # The formed Schur against the pieces it is built from. Applying `S` matrix-free -- as C.p minus
-    # D.(diag(F)^-1.(G.p)) -- is algebraically identical, so which is cheaper is purely a question of
-    # which side carries more nonzeros. Printed rather than assumed.
+    # What the Schur would store formed, against the pieces it is applied from.
     report(
-        f"      Schur {schur_entries / 1e6:.1f}M nnz formed vs "
+        f"      Schur {schur_entries / 1e6:.1f}M nnz if formed, applied from "
         f"{(c_entries + d_entries + g_entries) / 1e6:.1f}M as pieces "
         f"(C {c_entries / 1e6:.1f}M + D {d_entries / 1e6:.1f}M + G {g_entries / 1e6:.1f}M)",
     )
     if plan.schur_frobenius:
         low, median, high = (float(v) for v in checks.schur_relaxation)
-        n_pressure = plan.schur_layout.shape[0]
+        n_pressure = plan.schur_rows.shape[0]
         report(
             f"      Schur relaxation (Eq. 39): min {low:.3e} median {median:.3e} "
             f"max {high:.3e}  ({schur_entries / n_pressure:.0f} nnz/row)",
@@ -164,7 +169,7 @@ def _held_pieces(
             f_diagonal_inverse=values.velocity_inverse,
             dg=plan.correction_layout.with_values(values.correction),
             divergence=plan.divergence_layout.with_values(values.divergence),
-            schur=plan.schur_layout.with_values(values.schur),
+            pressure=plan.pressure_layout.with_values(values.pressure),
             schur_diagonal_inverse=values.schur_inverse,
         ),
         precision,
@@ -197,22 +202,22 @@ def _simple_correction(
     rhs = pressure_residual - pieces.divergence.apply(predictor)
     # The first sweep is peeled because it would otherwise multiply the Schur complement by a zero
     # vector: starting from p = 0, the update collapses to pressure_smoother_weight * S_diag^-1 * rhs. That is one of every
-    # `pressure_sweeps` applications of the densest operator in the smoother, and it is not folded away
-    # -- the sparse product runs at full cost against the zeros. Peeling it is bit-identical.
+    # `pressure_sweeps` applications of the Schur complement (three sparse products), and it is not
+    # folded away -- the products run at full cost against the zeros. Peeling it is bit-identical.
     if pressure_sweeps <= 0:
         pressure = jnp.zeros_like(rhs)
     else:
         pressure = pressure_smoother_weight * pieces.schur_diagonal_inverse * rhs
 
     # A LOOP, not a Python `for`, so the remaining sweeps enter the graph ONCE instead of being
-    # unrolled into `pressure_sweeps - 1` copies of the densest operator in the smoother. Every sweep
+    # unrolled into `pressure_sweeps - 1` copies of the Schur complement's products. Every sweep
     # has identical shapes, so there is nothing for unrolling to specialize on, and the traced graph is
     # what a refresh has to recompile whenever the coarsening moves. `fori_loop` at a static trip count
     # stays linearly transposable -- verified to give the same value AND the same transpose as the
     # unrolled form -- which the adjoint requires.
     def sweep(_, p):
         return p + pressure_smoother_weight * pieces.schur_diagonal_inverse * (
-            rhs - pieces.schur.apply(p)
+            rhs - pieces.schur_apply(p)
         )
 
     pressure = jax.lax.fori_loop(0, max(pressure_sweeps - 1, 0), sweep, pressure)
@@ -553,7 +558,8 @@ class SimpleSmoothedInverse(HierarchyBlockInverse):
             )
             del values
         sizes = ", ".join(
-            f"level {n}: S {p.schur.shape[0]} dofs / {p.schur.nnz / 1e6:.1f}M nnz"
+            f"level {n}: S {p.pressure.shape[0]} dofs / "
+            f"{(p.pressure.nnz + p.divergence.nnz + p.dg.nnz) / 1e6:.1f}M nnz as C, D, M G"
             for n, p in pieces.items()
         )
         # Report the COARSE GRID SIZE and the coarsening ratio beside the level count. A level count

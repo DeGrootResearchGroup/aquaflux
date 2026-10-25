@@ -172,8 +172,7 @@ precision=)`, passed by the session through `BlockInverse.bound(stored_precision
 `_stores_precision` allows; lAIR does not, and stays double). Each fit and refit is computed in float64
 and rounded once, prolongation values excepted (a frozen refit reads them back, and the held Galerkin maps
 key on them), so the split shares the inverse's arrays and applies exactly what narrowing a double
-hierarchy gave. Each SIMPLE piece is rounded as it is formed (`_simple_pieces(precision=)`, the host
-Schur it returns stays double) and the levels a level at a time after `derive_extras`, so no whole double
+hierarchy gave. Each SIMPLE piece is rounded as it is formed (`_simple_pieces(precision=)`) and the levels a level at a time after `derive_extras`, so no whole double
 copy sits beside a whole rounded one. **The host split holds its coupling in the split's precision too**
 (`FieldSplitInverse(stored_precision=)`, from the session's `FieldSplitPreconditioner.build`), held on
 the device as a `DeviceMatrix` rounded by `in_precision` (JAX's conversion, which flushes
