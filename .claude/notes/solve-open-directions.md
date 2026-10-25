@@ -884,11 +884,46 @@ HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the
 - CLOSED (2026-10-25): letting the probe's other float64 blocks go before the leading fit, by fitting it
   last, measured no lower (ledger, "Fitting a refit's leading block last"); the leading block itself is its
   fit's input, and the fit is computed in float64 by design;
-- the superseded leading inverse (fine operator 177 MiB, levels 85, SIMPLE pieces 192) lives beside the new
-  one until `_release_superseded`: release it before the new one is built, where the step does not still
-  hold it, or build in place;
+- the superseded leading inverse lives beside the new one until `_release_superseded` (after #825: fine
+  operator values 88 MiB, levels 42, SIMPLE pieces 96, the packed coupling 44); see the design below;
 - `fit_simple_level`'s 993 MiB of temporaries (as large as the step program's): fit per level or per row
   chunk.
+
+**Design for the superseded inverse (proposed 2026-10-25, for review; not built).**
+- *What holds the old arrays through the fit.* The host inverse lets go of its own hierarchy before the fit
+  (`HierarchyBlockInverse.refactor_block`: `self._hierarchy = None`) but keeps its SIMPLE pieces
+  (`_extras`) until `derive_extras` replaces them, after `fit_simple_level`, the largest program of a
+  re-fit. The traced form shares those arrays, and it is held by the session (`_form`), by its cached
+  stopping steps, and by every step the march and its callers hold (`staged_march` keeps the step it
+  passed `newton_march`; `newton_march` holds `strategy` and `active_step`). `_release_superseded` deletes
+  them only after the re-fit, so through the fit the old and new inverse are both alive.
+- *The change.* Release the outgoing form's value arrays at the start of a re-fit, before the probe, at
+  the hook point `BetaTrackingRefresh` already calls the allocator trim from (#818): the session hands the
+  hook a `before_refit` that deletes the leaves of `self._form` the re-fit will replace, then trims.
+  - Which leaves: a re-fit replaces each level's operator values, the SIMPLE pieces and the coupling,
+    and reuses a frozen coarsening's structural arrays and the prolongation values it reads back. So
+    each block inverse declares what a re-fit keeps (`refit_keeps() -> leaves`, beside
+    `traced_cycle()`), and everything else in the form is deleted. A dtype rule (integer kept, floating
+    replaced) is wrong: prolongation values are floating and kept.
+  - Drop `HierarchyBlockInverse._extras` before the fit as `_hierarchy` already is.
+  - `_release_superseded` stays, for whatever the early release keeps.
+- *Safety.* Between the hook's start and the update it returns nothing applies the preconditioner, so
+  deleting early changes no value; a step applied across a re-fit already raises (the 2026-10-18 release contract).
+  New failure mode: a re-fit that raises after the release leaves the session's form deleted. Guard it:
+  on an exception inside the re-fit, set `_form = None` and `_full_rebuild_pending`, so the next
+  `build` fits afresh rather than gluing deleted arrays (the Reynolds ladder's retreat catches only a
+  march's non-convergence, `EquinoxRuntimeError`, and rebuilds through the session).
+- *Not taken: the march hand-off ("option 3" in `solve.md`)* — a one-shot holder so `staged_march` keeps
+  no step. It would let the post-refit release become garbage collection, but it frees nothing before the
+  fit by itself: the session's `_form`, its stopping steps and the host inverse's `_extras` still hold the
+  old arrays. It is a cleanup, independent of this.
+- *Expected gain:* the old leading values, SIMPLE pieces and packed coupling, ~0.27 GiB at the re-fit peak
+  (~5 % of bfs3d's 5.82 GiB 2-step peak), estimated from the 2026-10-25 census shapes after #825.
+- *Measurement, pre-registered:* `memory_attribution.py`, 2 steps, census at the leading block re-fit of
+  re-fit #2, `BFS3D_MEMORY_SAMPLE_DEVICE=1 BFS3D_MEMORY_CHECKSUMS=1`, one run per arm: success is live device
+  at that peak at least 0.2 GiB below base with every split leaf digest identical. Tests: a re-fit after the
+  early release is bit-identical to one without (both precisions); a raising re-fit leaves the session to
+  re-fit, not to glue deleted arrays.
 
 ### 14g. Proposal (not built) — release `laplace_field`'s per-call programs when it returns
 
