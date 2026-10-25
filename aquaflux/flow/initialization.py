@@ -18,7 +18,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -154,15 +153,21 @@ def laplace_field(
             return fixation.apply(assembler.residual(phi), phi)
 
     preconditioner = _laplace_preconditioner(mesh, geometry, residual, diffusivity, fixed_cells)
-    # Pure diffusion is linear, so one Newton correction is the exact solve. Compiled here because
-    # newton_step leaves the jit boundary to its caller; un-jitted, the preconditioned linear solve
-    # would dispatch operation by operation. The multigrid `M` is a strong inverse of this SPD Laplacian,
-    # so precondition on the LEFT: on a wall-resolved mesh the near-wall anisotropy makes the condition
-    # number ~1e6-1e10, where the preconditioned residual `‖M r‖` reaches tolerance but the true residual
-    # (the default right-side stop) cannot in a bounded number of Krylov steps.
-    field = eqx.filter_jit(newton_step)(
-        residual, jnp.zeros(mesh.n_cells), preconditioner=preconditioner, preconditioner_side="left"
-    )
+
+    # Pure diffusion is linear, so one Newton correction is the exact solve. The multigrid `M` is a
+    # strong inverse of this SPD Laplacian, so precondition on the LEFT: on a wall-resolved mesh the
+    # near-wall anisotropy makes the condition number ~1e6-1e10, where the preconditioned residual
+    # `‖M r‖` reaches tolerance but the true residual (the default right-side stop) cannot in a bounded
+    # number of Krylov steps.
+    def solve_laplace(phi: jnp.ndarray) -> jnp.ndarray:
+        return newton_step(residual, phi, preconditioner=preconditioner, preconditioner_side="left")
+
+    # Compiled here because newton_step leaves the jit boundary to its caller; un-jitted, the
+    # preconditioned linear solve would dispatch operation by operation. The function compiled is
+    # this call's own, closing over this call's residual and hierarchy, so its program is released
+    # with it when the call returns. Handing the closures to a module-level `eqx.filter_jit(newton_step)`
+    # instead would key a program on each call's closures and keep both for the life of the process.
+    field = jax.jit(solve_laplace)(jnp.zeros(mesh.n_cells))
     return field, assembler
 
 

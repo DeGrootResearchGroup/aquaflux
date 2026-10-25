@@ -706,7 +706,8 @@
           runtime and compiler state over ~1300 executables. What doubled it from pitzDaily to bfs3d (1.06
           against 2.09 on `13fa17d4`, with 16 % more executables) is not separated, and no projection of it
           to 300k cells stands. `newton_step` still carries 3 × 16 MiB of HLO with broadcast tangents
-          (`laplace_field` hands `eqx.filter_jit(newton_step)` closures, whose captured arrays compile in);
+          (`laplace_field` handed `eqx.filter_jit(newton_step)` closures, whose captured arrays compiled in; a per-call
+          `jax.jit` since 2026-10-25, `flow-log.md`, "laplace_field's per-call programs");
           its resident cost is unmeasured and, by the measurement above, small.
       - **After the march returns, its session and splits are cyclic garbage** until a collection: 1.6 GiB
         of arrays on bfs3d. During the march a collection frees nothing (entry of 2026-10-18), so this is
@@ -845,6 +846,8 @@
         higher than its control.
       - Counts a function's cache reports (`_cache_size()`) exceed its programs (3002 entries for 701
         executables at bfs3d's `hybrid_initialize`): count programs by executable, not by cache entry.
+      - **Fixed since**: `laplace_field` compiles a per-call `jax.jit` (2026-10-25); the end cache is 0.17 GiB
+        smaller on bfs3d (`flow-log.md`, "laplace_field's per-call programs").
 
 ### Lazy transposes (§14d) (2026-10-24)
 

@@ -578,3 +578,34 @@
     which half it deliberately omits. A dropped or mis-signed step fails this outright; it is the check
     the missing prediction could never have passed. Plus linearity and `<y,Mx> = <Mᵀy,x>` for all three,
     since a non-flexible outer GMRES and the transposed adjoint both require them.
+
+## From "Field initialization" → laplace_field's per-call programs (2026-10-25)
+
+`laplace_field` compiled its one-step Laplace solve as `eqx.filter_jit(newton_step)(residual, …,
+preconditioner=…)`, the residual and the multigrid factory being closures built per call. Measured on
+`main` `d7f5bf28` (`validation/memory_residue.py`, `RESIDUE_DROP`; `.claude/notes/solve-direct-preconditioners-log.md`,
+"Which setup programs hold the reclaimable cache", #827): the three such
+programs of a coupled initialization (φ, `k`, ω) held 0.19 GiB on bfs3d and never ran again. Built as a
+per-call `jax.jit` (`claude/laplace-field-release`). The seed it gives is not bit-identical to the old one:
+on pitzDaily's shipped case the three state blocks differ by at most 4.9e-14, 2.7e-14 and 1.1e-15 of their
+largest magnitude (`hybrid_initialize`, same container, jax 0.12.0.1), the last bits of a recompiled
+program; a march from it is a new draw.
+
+**Re-measured on bfs3d** (`memory_residue.py`, `RESIDUE_FUNCTIONS`, `RESIDUE_CLEAR=end`, 1 step, census off,
+tracer on; library `main` `5c3fe7b4` for the control, the same plus this change for the fix; 4-core Linux
+container, 15.7 GiB, glibc defaults, jax 0.12.0.1; one process per run, through `run_case.sh`). GiB:
+
+| run | executables after `hybrid_initialize` / at end | end clear frees | resident at step 1's end | peak | device at end |
+|---|---|---|---|---|---|
+| control (`d7f5bf28`, same library), warm | 701 / 1311 | 1.84 | 4.60 | 5.59 | 0.688 |
+| control, warm | 701 / 1311 | 1.83 | 4.56 | 5.54 | 0.688 |
+| fix, cold (5 cache misses) | 698 / 1308 | 1.66 | 4.73 | 5.73 | 0.726 |
+| fix, warm | 698 / 1308 | 1.67 | 4.31 | 5.30 | 0.726 |
+
+- The three programs are gone (698 / 1308) and the cache the end clear frees is 0.17 GiB smaller in both
+  fix runs, against 0.19 measured by dropping them; that reading reproduced to 0.01 within each arm.
+- The seed's last bits move bfs3d's leading coarsening (`validation.md`, "moves under rounding"), so the
+  fix's runs fit a different hierarchy: 4 fresh compiles at the first fit of the cold run and 0.04 GiB
+  more device memory at the end. Resident and peak therefore compare two different hierarchies, not the
+  release alone: the warm fix run sits 0.27 below the controls' mean, the cold one 0.15 above it (one run
+  each, inside the 0.4 GiB spread). Read the release from the cache clear, not from the peak.

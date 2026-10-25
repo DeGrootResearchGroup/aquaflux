@@ -794,8 +794,8 @@ were 0.148 GiB of HLO on bfs3d but only ~0.05 GiB resident, measured on a march 
 **Only the setup-only part of that cache can be given back, and most of it is three programs (2026-10-25,
 same log, "How much of the compiled-program cache a mid-run clear gives back" and "Which setup programs hold
 the reclaimable cache")**: the march recompiles and holds 1.4–1.5 GiB of the cache whatever is cleared; of
-the setup's ~0.38 GiB, `laplace_field`'s three per-call `newton_step` programs hold 0.19 and never run
-again. Proposal: 14g.
+the setup's ~0.38 GiB, `laplace_field`'s three per-call `newton_step` programs held 0.19 and never ran
+again; released since 14g.
 
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
@@ -931,29 +931,16 @@ HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the
   early release is bit-identical to one without (both precisions); a raising re-fit leaves the session to
   re-fit, not to glue deleted arrays.
 
-### 14g. Proposal (not built) — release `laplace_field`'s per-call programs when it returns
+### 14g. BUILT (2026-10-25) — `laplace_field` releases its per-call programs when it returns
 
-**Evidence** (`solve-direct-preconditioners-log.md`, "Which setup programs hold the reclaimable cache",
-2026-10-25, `main` `d7f5bf28`, warm, 1 step, census off, one run per arm): of what the setup leaves compiled,
-the three `eqx.filter_jit(newton_step)` programs of `laplace_field` (φ, `k`, ω) hold 0.19 GiB on bfs3d and
-never run again. Dropping only them lowered the step-1 resident 4.60 → 4.26 and the peak 5.59 → 5.25 at no
-recompile cost. The 673 op-by-op programs hold 0.09 GiB, ~430 of them used again; a global clear
-(`jax.clear_caches()`, measured first, same log, "How much of the compiled-program cache a mid-run clear
-gives back") also drops the march's programs and is not the fix.
-
-**The cause** is a pattern, not the cache: a per-call closure passed to a module-level `eqx.filter_jit`
-compiles a program per call, with the closure's arrays compiled in, and its cache key keeps both for the
-process. **Candidate forms, none measured:**
-- in `laplace_field`, jit a function defined per call (`jax.jit`, whose programs die with the function);
-  this releases the three programs on return and is local;
-- pass the residual and the preconditioner as pytrees (`eqx.Module`s holding their arrays) to a
-  module-level jit, so the arrays are arguments: the three solves may share programs and none embeds
-  arrays, but what is compiled is still kept;
-- the Laplace hierarchy's own `fit_levels` / `compiled_apply` / `_operator_spectral_estimate` entries
-  (~0.01 GiB) stay with either form.
-
-Audit any other place a per-call closure reaches a module-level `eqx.filter_jit` (only this call site in
-`aquaflux/` on 2026-10-25). Worth ~0.2–0.35 GiB on bfs3d, ~5 % of its peak.
+`laplace_field` compiles its solve as a function defined per call under `jax.jit`, so the program goes with
+it; it had handed per-call closures to a module-level `eqx.filter_jit(newton_step)`, which kept a program
+per call, with its closures, for the process. bfs3d: the cache a run holds at its end is 0.17 GiB smaller
+(two runs per arm); resident and peak move within the run-to-run spread, because the seed's last bits
+also change the first fit's coarsening (`flow-log.md`, "laplace_field's per-call programs"). The Laplace
+hierarchy's own `fit_levels` / `compiled_apply` / `_operator_spectral_estimate` entries (~0.01 GiB) stay.
+A global `jax.clear_caches()` after setup was measured first and is not the fix (log, "How much of the
+compiled-program cache a mid-run clear gives back").
 
 ### 14h. Two small allocator-side ideas (proposals, not built, 2026-10-25)
 
