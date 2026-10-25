@@ -95,7 +95,9 @@ class TracedForm(eqx.Module):
     same shapes taken after a re-fit reuses the compiled step and applies the re-fitted values.
 
     There is no ``transpose`` argument: the map is traced and linear, so :func:`jax.linear_transpose`
-    derives ``M^T`` from the forward code.
+    derives ``M^T`` from the forward code, once :func:`~aquaflux.solve.with_transposes` has packed the
+    transposes of its operators, which a fitted form does not hold (an adjoint's transpose solve packs
+    them itself).
 
     Every subclass provides two more attributes, as fields or properties, which this base reads: ``n_dofs``,
     the degrees of freedom the map is defined over, and ``precision``, ``"float64"`` or ``"float32"``,

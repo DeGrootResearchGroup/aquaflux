@@ -190,6 +190,10 @@ class _TracedFormAdjoint(eqx.Module):
     widened here, once per transpose solve, so it applies its rounded entries in double-precision
     arithmetic: applied in single precision it is linear only to about ``1e-7``, and a transpose solve
     run to a tighter tolerance than that stagnates against the difference.
+
+    The form's operators hold no transposes; the transpose solve packs them, once per solve, before it
+    transposes the map returned here (:func:`~aquaflux.solve.with_transposes`, applied by
+    :func:`~aquaflux.solve.root_adjoint`), so the step never holds them.
     """
 
     form: TracedForm

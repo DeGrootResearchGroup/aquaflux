@@ -24,7 +24,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import equinox as eqx
 import jax
@@ -33,7 +33,46 @@ import lineax as lx
 
 from .linear import default_linear_solver, solve_linear
 
-__all__ = ["TransposedPreconditioner", "root_adjoint", "stop_array_gradients"]
+__all__ = [
+    "PacksTranspose",
+    "TransposedPreconditioner",
+    "root_adjoint",
+    "stop_array_gradients",
+    "with_transposes",
+]
+
+
+@runtime_checkable
+class PacksTranspose(Protocol):
+    """A linear operator that applies its transpose from a stored copy, packed only when asked for.
+
+    A forward solve never applies a preconditioner's transpose, so an operator whose transpose costs a
+    second copy of its storage need not hold one; only the transpose solve of an adjoint applies it,
+    and :func:`with_transposes` asks every such operator in the adjoint's preconditioner first.
+    """
+
+    def with_transpose(self) -> PacksTranspose:
+        """This operator holding its transpose, ready for :func:`jax.linear_transpose`."""
+        ...
+
+
+def with_transposes(tree: object) -> object:
+    """``tree`` with every :class:`PacksTranspose` in it holding its transpose; the rest as it is.
+
+    What a map built on such operators needs before :func:`jax.linear_transpose` can transpose it.
+    :func:`root_adjoint` applies it to the adjoint's preconditioner factory at the start of each transpose
+    solve, so the copy lives only as long as that solve.
+
+    Parameters
+    ----------
+    tree : pytree
+        Any pytree, such as a preconditioner factory holding its hierarchies as leaves.
+    """
+    return jax.tree.map(
+        lambda leaf: leaf.with_transpose() if isinstance(leaf, PacksTranspose) else leaf,
+        tree,
+        is_leaf=lambda leaf: isinstance(leaf, PacksTranspose),
+    )
 
 
 def stop_array_gradients(tree: object) -> object:
@@ -172,7 +211,9 @@ def _transposed_preconditioner(preconditioner, root, example):
     The forward ``M = preconditioner(root)`` approximates ``J^{-1}``; the adjoint solves the
     transpose system ``J^T lambda = v``, for which ``M^T ~ J^{-T}`` is the consistent
     preconditioner, obtained by transposing the (linear) preconditioner matvec with
-    :func:`jax.linear_transpose`. It is applied on whichever side
+    :func:`jax.linear_transpose` -- after :func:`with_transposes` has asked every operator in the factory
+    that packs its transpose on request to do so, a copy dropped with the transpose solve that holds the
+    returned map. It is applied on whichever side
     :func:`~aquaflux.solve.linear.solve_linear` defaults to (the right), which is a different
     bracketing from transposing the forward *preconditioned operator* — the two have the same
     spectrum, so this changes the Krylov residual measured, not the converged gradient.
@@ -185,7 +226,7 @@ def _transposed_preconditioner(preconditioner, root, example):
         return None
     if isinstance(preconditioner, TransposedPreconditioner):
         return preconditioner(root)
-    m = preconditioner(root)
+    m = with_transposes(preconditioner)(root)
     transpose = jax.linear_transpose(m, example)
     return lambda u: transpose(u)[0]
 

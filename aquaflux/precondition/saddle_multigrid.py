@@ -121,7 +121,7 @@ def _simple_pieces(
         simplec=simplec,
     )
     values, checks = fit_simple_level(plan, _PaddedRowOperator.from_scipy(a).values)
-    schur = plan.schur_layout.with_values(*values.schur).to_scipy()
+    schur = plan.schur_layout.with_values(values.schur).to_scipy()
     return _held_pieces(plan, values, checks, report, precision), schur
 
 
@@ -156,15 +156,15 @@ def _held_pieces(
         )
     block_inverse = None
     if values.block_inverse is not None:
-        block_inverse = plan.block_layout.with_values(*values.block_inverse)
+        block_inverse = plan.block_layout.with_values(values.block_inverse)
     return in_precision(
         _SimplePieces(
             f_block_inverse=block_inverse,
             n_velocity=plan.n_velocity,
             f_diagonal_inverse=values.velocity_inverse,
-            dg=plan.correction_layout.with_values(*values.correction),
-            divergence=plan.divergence_layout.with_values(*values.divergence),
-            schur=plan.schur_layout.with_values(*values.schur),
+            dg=plan.correction_layout.with_values(values.correction),
+            divergence=plan.divergence_layout.with_values(values.divergence),
+            schur=plan.schur_layout.with_values(values.schur),
             schur_diagonal_inverse=values.schur_inverse,
         ),
         precision,
