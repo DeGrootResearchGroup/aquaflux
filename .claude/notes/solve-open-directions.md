@@ -812,13 +812,16 @@ blocks").
 **The step half, 2026-10-25 (bfs3d, first step, `validation/step_temporaries.py`;
 `solve-direct-preconditioners-log.md`, "What the march step's temporary holds"):** the step's 1017 MiB of
 temporaries is 624 MiB the split's (the identity arm is 393), and 591 of that is int32 decoded padded
-columns, each operator's `s32[n_rows, width]` hoisted out of the loops and held for every operator at
-once, twice (two call sites of the split); no `(n_rows, width)` float product is materialized, and the
-solve's own vectors are 4 MiB. The residual's share without a split is ~2× a JVP (393 MiB, 17 KB a cell),
-7 KB a cell of it loop invariants XLA hoisted. So the split is the lever on the step's temporary, but
-through its decoded indices, not 14b–14c's values: keeping the decode inside the loop body
-(`validation/padded_decode_hoisting.py`: four operators 443 → 161 MiB) is the cut to measure on the step
-first, unbuilt. Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
+columns, every operator's `s32[n_rows, width]` live twice at the peak: one copy XLA hoisted to the entry
+computation (the Arnoldi and final `x = M y` applications share it) and one rebuilt inside the true-residual
+`lax.cond` of `_ResidualStopGMRES`, where both arms peak. The gathered operand is one `f32[n_rows·width]`
+per application, not held; the solve's own vectors are 4 MiB. The residual's share without a split is ~2× a
+JVP (393 MiB, 17 KB a cell) because that cond branch recomputes a whole JVP while the Arnoldi loop's hoisted
+linearization is still held. So the split is the lever on the step's temporary, but through its decoded
+indices, not 14b–14c's values. Unbuilt cuts, in order: the true residual out of the `lax.cond` (up to −273
+MiB split, −118 identity, no runtime cost); a Kronecker-aware padded product (decode and gathered operand ÷
+the row-field count); the decode kept in the loop body (`validation/padded_decode_hoisting.py`: four
+operators 443 → 161 MiB, untimed). Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
 not its temporary).
 
 ### 14b. A consistent compact operator for the fit

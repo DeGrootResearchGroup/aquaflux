@@ -36,6 +36,11 @@ number for its temporary buffer. This names what fills it. On a step case (``STE
    assembler at the same state and prints their temp sizes, as the record's 202 / 106 MiB (bfs3d) were
    taken, to check the method.
 
+Two limits of the reading, found on the first runs: the "hoisted" flag also fires on an instruction from
+a one-trip loop XLA inlined (it compares ``while/body`` counts, not operands), and a slot's site is the
+metadata of whichever instruction survived XLA's merging (one entry-computation decode serves two call
+sites but names one); a per-call-site claim needs the ``while`` carries traced.
+
 **Owner of a slot (registered before the first run).** By the innermost ``aquaflux`` frame of its
 instruction: ``aquaflux/precondition/`` -- the split's apply, and an ``s32``/``s64`` slot there is the
 decoded or index arrays (``decode``); ``aquaflux/solve/linear.py`` -- the Krylov solve's basis and

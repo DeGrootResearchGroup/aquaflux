@@ -208,12 +208,15 @@ path.
     living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
     jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
     1–3").
-    - ⚠️ **In the march step that hoisting is the step's largest temporary**: no `(n_rows, width)` float
-      product is materialized (the gathered `x[columns]` is, one operator at a time), but every operator's
-      decoded `s32[n_rows, width]` columns are, hoisted and live together, once per call site of the split
-      (two): 591 of bfs3d's 1017 MiB step temporary, first step, `main` `1bd8d292` (unchanged after #825)
-      (`validation/step_temporaries.py`; log, "What the march step's temporary holds"). Keeping the decode
-      in the loop body is the unbuilt cut (`validation/padded_decode_hoisting.py`).
+    - ⚠️ **In the march step the decoded columns are the step's largest temporary**: every operator's
+      `s32[n_rows, width]` is live twice at the peak -- one copy hoisted to the entry computation (shared by
+      the Arnoldi and final `x = M y` applications) and one rebuilt inside the true-residual `lax.cond` of
+      `_ResidualStopGMRES`, which XLA does not hoist out of: 591 of bfs3d's 1017 MiB step temporary, first
+      step, `main` `1bd8d292` (unchanged after #825). The gathered `x[columns]` is materialized once per
+      application, not held. `columns()` repeats one `(n_cells, width)` array over the row fields
+      (`_by_row_field`), so the decode and the gather are `F` times what a cell-level product needs
+      (`validation/step_temporaries.py`; log, "What the march step's temporary holds", with the unbuilt
+      cuts).
     - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
       count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
       sized or static by the actual pattern retraced a budgeted rebuild
