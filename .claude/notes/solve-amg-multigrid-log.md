@@ -2009,3 +2009,45 @@ identical step table (the loop is deterministic). pitzDaily's march did not move
 application **1462 → 269 ms** (best 1359 → 230), the first call's compile 144 → 133 s. Packing the transposes
 (30 s) did not move, so it is now ~115 transposed applications, 6.8–7.3 % of a transpose solve's
 1454–1575, against 20.5 (1.3–1.4 %) with XLA's form.
+
+### The fused level product on macOS (2026-10-25)
+
+**Configuration.** Apple M3 Pro (5 performance + 6 efficiency cores), 18 GB, macOS 26.3.1 arm64; Python 3.13,
+jax 0.10.2, Numba 0.67.0, threading layer `omp` with 11 threads after `brew install libomp && brew link
+--force libomp` (libomp 23.1.4; without it the layer is `workqueue` and the fused path is off). PR #832's head
+`f2f0ac03`, before it merged #833/#834; both shipped `case.yaml`s; arms switched by
+`AQUAFLUX_DISABLE_FUSED_PRODUCT` in one checkout, each run printing the decision first. Run with the free-memory
+pre-flight forced (4 GB free against 5; other applications open): swap grew 4.5 → 7.4 GB during the first
+one-application run (bfs3d, fused), then stayed flat (±0.2 GB) through every other run.
+
+**One application** (`validation/application_scaling.py`, hybrid start, mean of 30):
+
+| case | piece | XLA form | fused |
+|---|---|---|---|
+| bfs3d | split apply | 101.9 ms | 52.3 |
+| bfs3d | leading / trailing / coupling | 54.1 / 41.2 / 6.4 | 36.2 / 16.5 / 1.5 |
+| bfs3d | `J M v` | 126.8 | 74.6 |
+| pitzDaily | split apply | 14.2 ms | 13.2 |
+| pitzDaily | leading / trailing / coupling | 8.6 / 4.7 / 1.1 | **10.4** / 2.6 / 0.4 |
+| pitzDaily | `J M v` | 19.7 | 18.8 |
+
+XLA's own form is ~5x faster here than in the Linux container (bfs3d split 102 against 530–613 ms). pitzDaily's
+leading fine level (mean row 73) is the one piece the loop loses. The two arms fit different bfs3d leading
+hierarchies (level 2: 6184 unknowns fused, 6132 XLA); trailing and pitzDaily's are identical.
+
+**Marches** (`aquaflux run` on each `case.yaml`, run XLA, fused, XLA, fused; buckets from `history.csv`: set-up
+through step 1, `refit_seconds` over steps 2–end, the rest):
+
+| case | arm | steps / cycles / re-fits | total | set-up + step 1 | re-fits | outside re-fits |
+|---|---|---|---|---|---|---|
+| bfs3d | XLA | 17 / 160 / 14 | 378.7, 379.5 s | 100.2, 100.0 | 76.5, 76.9 | 202.0, 202.6 |
+| bfs3d | fused | 17 / 159 / 14 | 325.5, 323.3 s | 93.8, 93.6 | 77.6, 76.5 | 154.1, 153.3 |
+| pitzDaily | XLA | 21 / 102 / 21 | 72.3, 73.6 s | 46.1, 47.4 | 5.9, 6.0 | 20.3, 20.3 |
+| pitzDaily | fused | 21 / 102 / 21 | 74.9, 75.4 s | 45.3, 45.9 | 5.9, 5.8 | 23.8, 23.7 |
+
+bfs3d −14.4 % (outside re-fits −24 %, 1.30 → 1.00 s a cycle); pitzDaily **+3.0 %** (outside re-fits +17 %),
+from its leading cycle. Each arm's two draws reproduce their step tables exactly. The arms part at step 1 (bfs3d
+stopping norm 0.14691 / 0.14718), consistent with the different hierarchies. Roots: bfs3d 4.15e-6 (XLA),
+5.03e-6 (fused); pitzDaily equal to the 7th digit. Not measured: `x_r/h` (not reported by `aquaflux run`), the
+adjoint, and the branch after merging #834.
+

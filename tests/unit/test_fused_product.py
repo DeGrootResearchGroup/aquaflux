@@ -145,17 +145,62 @@ def test_the_choice_needs_a_threading_layer_that_several_threads_may_enter(monke
     """The ``workqueue`` layer aborts on concurrent entry, so with it the gathered form is kept."""
     monkeypatch.delenv("AQUAFLUX_DISABLE_FUSED_PRODUCT", raising=False)
     monkeypatch.setattr(fused_product.numba, "threading_layer", lambda: "workqueue")
-    assert fused_product.fused_products.__wrapped__() is False
+    assert fused_product._decide()[0] is False
     monkeypatch.setattr(fused_product.numba, "threading_layer", lambda: "omp")
-    assert fused_product.fused_products.__wrapped__() is True
+    assert fused_product._decide()[0] is True
 
 
 def test_the_environment_turns_the_fused_product_off(monkeypatch):
     monkeypatch.setenv("AQUAFLUX_DISABLE_FUSED_PRODUCT", "1")
-    assert fused_product.fused_products.__wrapped__() is False
+    assert fused_product._decide()[0] is False
 
 
 def test_registration_checks_both_targets_against_numpy():
     """The registration-time self-check passes here, so a disagreement it reports would be real."""
     assert fused_product.registered()
     assert fused_product._self_check() is None
+
+
+@pytest.fixture
+def undecided():
+    """The process's decision forgotten for the test, and forgotten again after, so the next use re-decides."""
+    fused_product._decision.cache_clear()
+    yield
+    fused_product._decision.cache_clear()
+    jax.clear_caches()  # a product traced under the test's decision is cached with it
+
+
+def test_the_path_is_reported_only_once_a_product_has_asked_for_it(undecided, monkeypatch):
+    """Before any product decides, there is no path to report; after, the one decided, with its reason."""
+    monkeypatch.setenv("AQUAFLUX_DISABLE_FUSED_PRODUCT", "1")
+    assert fused_product.padded_product_path() is None
+    assert fused_product.fused_products() is False
+    assert fused_product.padded_product_path() == {
+        "form": "gathered",
+        "reason": "AQUAFLUX_DISABLE_FUSED_PRODUCT is set",
+    }
+
+
+def test_the_path_names_a_threading_layer_that_keeps_the_gathered_form(undecided, monkeypatch):
+    """A Mac with Numba's ``workqueue`` layer runs XLA's form, and its record says why."""
+    monkeypatch.delenv("AQUAFLUX_DISABLE_FUSED_PRODUCT", raising=False)
+    monkeypatch.setattr(fused_product.numba, "threading_layer", lambda: "workqueue")
+    fused_product.fused_products()
+    path = fused_product.padded_product_path()
+    assert path["form"] == "gathered"
+    assert path["reason"].startswith("Numba's threading layer is workqueue")
+
+
+def test_a_fused_decision_on_another_default_backend_is_reported_as_the_gathered_form(
+    undecided, monkeypatch
+):
+    """``platform_dependent`` compiles the gathered form off the CPU, whatever the CPU decision."""
+    monkeypatch.delenv("AQUAFLUX_DISABLE_FUSED_PRODUCT", raising=False)
+    monkeypatch.setattr(fused_product.numba, "threading_layer", lambda: "omp")
+    assert fused_product.fused_products() is True
+    assert fused_product.padded_product_path()["form"] == "fused"
+    monkeypatch.setattr(fused_product.jax, "default_backend", lambda: "gpu")
+    assert fused_product.padded_product_path() == {
+        "form": "gathered",
+        "reason": "the default backend is gpu, where the gathered form is compiled",
+    }

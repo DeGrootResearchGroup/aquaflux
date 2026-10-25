@@ -17,6 +17,7 @@ import pytest
 import yaml
 from aquaflux.__main__ import main
 from aquaflux.case import FlowMarch, read_case
+from aquaflux.case import run as run_module
 from aquaflux.case.restart_file import read_restart
 from aquaflux.flow import solve_flow_march
 from aquaflux.io import read_openfoam_time, read_volume_scalar_field
@@ -168,6 +169,33 @@ def test_an_interrupted_run_is_recorded_as_one_that_stopped_short(tmp_path, monk
     assert (record["converged"], record["message"]) == (False, "interrupted before it converged")
     assert not (results / "fields.vtu").exists()
     assert "interrupted before it converged" in (results / "march.log").read_text()
+
+
+@pytest.mark.parametrize(
+    "path", [None, {"form": "gathered", "reason": "Numba's threading layer is workqueue"}]
+)
+def test_a_run_records_which_form_its_padded_row_products_took(tmp_path, monkeypatch, path) -> None:
+    """The run's record and log say which form the products took, so its timings can be compared.
+
+    A run that formed no padded-row product has nothing to say, and says nothing.
+    """
+    monkeypatch.setattr(run_module, "padded_product_path", lambda: path)
+    monkeypatch.setattr(FlowMarch, "solve", _interrupted)
+    case = _write(tmp_path / "case.yaml", _CHANNEL | {"solver": {"kind": "FlowMarch"}})
+    main(["run", str(case)])
+    results = tmp_path / "results"
+    record = yaml.safe_load((results / "run.yaml").read_text())
+    log = (results / "march.log").read_text()
+    if path is None:
+        assert "padded_products" not in record
+        assert "padded-row products" not in log
+    else:
+        assert record["padded_products"] == path
+        assert "padded-row products: gathered (Numba's threading layer is workqueue)" in log
+
+
+def _interrupted(self, problem, **observers):
+    raise KeyboardInterrupt
 
 
 def test_a_run_writes_an_openfoam_time_directory_the_case_can_restart_from(tmp_path) -> None:

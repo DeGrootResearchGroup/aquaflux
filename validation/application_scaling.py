@@ -145,6 +145,11 @@ def main():
             f"| {name} | {mean:.1f} | {best:.1f} | {cores:.2f} | {faults:.0f} | {1e6 * mean / n:.0f} |",
             flush=True,
         )
+    # Decided at the first product traced above: which form every timed product took, and why.
+    from aquaflux.precondition import padded_product_path
+
+    products = padded_product_path()
+    print(f"[padded-row products] {products['form']} ({products['reason']})", flush=True)
 
 
 if __name__ == "__main__":

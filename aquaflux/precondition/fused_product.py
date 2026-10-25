@@ -15,7 +15,8 @@ column array is never formed. Each loop is compiled by Numba and registered with
 function (XLA's typed "FFI" custom-call interface), so it runs inside the compiled program exactly where
 the JAX product would, with no crossing back to Python.
 
-**When it is used** (:func:`fused_products`, decided once per process): on the CPU, when Numba's
+**When it is used** (:func:`fused_products`, decided once per process; :func:`padded_product_path`
+reports the decision and its reason): on the CPU, when Numba's
 threading layer is one that may be entered from several threads at once (OpenMP or TBB), since XLA can
 run two products concurrently; the ``workqueue`` layer aborts the process on concurrent entry, and a
 one-thread loop is no faster than XLA's form on narrow operators. ``AQUAFLUX_DISABLE_FUSED_PRODUCT=1``,
@@ -391,7 +392,6 @@ def routed(fused, plain, values: jnp.ndarray, x: jnp.ndarray) -> jnp.ndarray:
     )
 
 
-@functools.cache
 def fused_products() -> bool:
     """Whether padded-row products run as the fused loop in this process. Decided once.
 
@@ -399,18 +399,58 @@ def fused_products() -> bool:
     threading layer may be entered from several threads at once, and both targets registered and agreed
     with a numpy product on a small operator.
     """
+    return _decision()[0]
+
+
+def padded_product_path() -> dict[str, str] | None:
+    """Which form this process's padded-row products took, and why, for a run's record.
+
+    Returns
+    -------
+    dict or None
+        ``{"form": "fused" | "gathered", "reason": ...}``, the reason naming the threading layer the loop
+        runs on or what kept the gathered form (the environment switch, a threading layer that two threads
+        may not enter at once, a refused registration, a default backend other than the CPU). ``None``
+        when no padded-row product has been formed in this process, so the question never came up.
+    """
+    if _decision.cache_info().currsize == 0:
+        return None
+    fused, reason = _decision()
+    backend = jax.default_backend()
+    if fused and backend != "cpu":
+        fused, reason = (
+            False,
+            f"the default backend is {backend}, where the gathered form is compiled",
+        )
+    return {"form": "fused" if fused else "gathered", "reason": reason}
+
+
+@functools.cache
+def _decision() -> tuple[bool, str]:
+    """:func:`_decide`, once per process."""
+    return _decide()
+
+
+def _decide() -> tuple[bool, str]:
+    """Whether the fused loop may be used here, and the reason, in words a run's record can carry."""
     if os.environ.get("AQUAFLUX_DISABLE_FUSED_PRODUCT"):
-        return False
+        return False, "AQUAFLUX_DISABLE_FUSED_PRODUCT is set"
     try:
         jax.devices("cpu")
     except RuntimeError:
-        return False
+        return False, "there is no CPU backend"
     # The threading layer is settled by the first parallel launch; this one also compiles the loop.
     columns = np.zeros((2, 1), dtype=np.int32)
     _held_rows(columns, np.ones(2, np.int32), np.ones((2, 1)), np.ones(1), np.empty(2))
-    if numba.threading_layer() not in _THREAD_SAFE_LAYERS:
-        return False
-    return registered()
+    layer = numba.threading_layer()
+    if layer not in _THREAD_SAFE_LAYERS:
+        return False, (
+            f"Numba's threading layer is {layer}, which two threads may not enter at once; "
+            "the loop needs OpenMP or TBB"
+        )
+    if not registered():
+        return False, "XLA refused the fused targets or they disagreed with numpy (see the warning)"
+    return True, f"Numba's threading layer is {layer}, {numba.get_num_threads()} threads"
 
 
 @functools.cache
