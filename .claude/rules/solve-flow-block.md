@@ -37,23 +37,25 @@ each read), which a frozen refit keeps and a rebuild replaces;
 There is no `StructuralPatterns`, `_structured`, `block_approximate_inverse` or host
 `_diagonal_approximate_inverse`.
 - **`S` is never held (2026-10-25, §14d, the owner's choice of design A).** The smoother applies it as
-  `_SimplePieces.schur_apply(p) = C p − D (M G p)`, transposed through each piece's stored transpose; the
-  fit forms `S`'s rows a chunk at a time on `schur_rows`, placing `D (M G)`'s terms as `_product_onto`
-  does and in its order, adds `C`, and reduces each chunk to its diagonal and squared norms before the
-  next. **Why:** `S` reaches twice as far as the level operator, so on bfs3d's fine level it stores 7.1M
-  entries in rows padded to ~377 against 9.2M for `C + D + M G`, which the smoother holds anyway but
-  for `C`. Its values (both ways) and transpose layout were ~132 MiB float32 on a 23040-cell reach-3
-  lattice against ~17 MiB for `C` (its row columns, 33 MiB, stay), and the whole-`S` float64 product was a
-  transient at every re-fit. bfs3d 1-step: device arrays at the step's end 1.20 -> 1.04 GiB, peak
-  6.50 -> 6.39 GiB (one run per arm), every shared split leaf bit-identical. **Cost:** a product from the
-  pieces is 1.2–1.35x the formed one inside a loop (11.8–13.0 against 8.9–10.1 ms, same lattice; it reads
-  1.3x the entries); a whole split apply did not move outside run-to-run noise (bfs3d 1160/1341 against
-  1383/1193 ms, pitzDaily likewise). ⚠️ An isolated call reads a tie: the formed product's 33 MiB gather
-  page-faults per call (`validation.md`, the 32 MiB trap). **Rejected:** row norms without `S`'s columns, by sorting each chunk's terms
-  (exact to 2e-15, but 23.6 s against 6.3 s for the whole fit); a forward-only formed `S` (a fragment of
-  §14d's first bullet, which wants every operator's transposes). ⚠️ Not bit-identical to the formed
-  product (sums in another order, 1.1e-7 relative in float32 on the lattice); the diagonal and norms are
-  summed in the formed path's order. Measurements: log, "The Schur applied from its pieces (2026-10-25)".
+  `_SimplePieces.schur_apply(p) = C p − D (M G p)` (transposed through the pieces' own transposes once
+  `solve.with_transposes` packs them); the fit forms `S`'s rows a chunk at a time on `schur_rows`,
+  placing `D (M G)`'s terms as `_product_onto` does and in its order, adds `C`, and reduces each chunk to
+  its diagonal and squared norms before the next. **Why:** `S` reaches twice as far as the level
+  operator (bfs3d's fine level: 7.1M entries in rows padded to ~377, against 9.2M for `C + D + M G`, all
+  held anyway but `C`). Against `main` after #825 (transposes already packed only for an adjoint), on a
+  23040-cell reach-3 lattice with bfs3d's counts: held fine-level values −28 MiB (`S`'s 33 MiB single
+  precision for `C`'s 5.5; `S`'s row columns, 33 MiB, stay in the plan), and the fit's float64 transient
+  −131 MiB (temporaries 964.5 → 888.6, values out 135.0 → 79.8). bfs3d's peak sits in the leading re-fit
+  (#826), so that transient may lower it; unmeasured. On a polyhedral dual `S`'s reach-6 rows grow far
+  faster than its pieces. **Cost:** a product from the pieces is 1.2–1.35x the formed one inside a loop
+  (11.8–13.0 against 8.9–10.1 ms, same lattice; 1.3x the entries), ~1 % of a split apply by count, which
+  stayed inside run-to-run noise (bfs3d 1160/1341 against 1383/1193 ms, pitzDaily likewise; before #825).
+  ⚠️ An isolated call reads a tie: the formed product's 33 MiB gather page-faults per call
+  (`validation.md`, the 32 MiB trap). **Rejected:** row norms without `S`'s columns, by sorting each
+  chunk's terms (exact to 2e-15, but 23.6 s against 6.3 s for the whole fit). ⚠️ Not bit-identical to the
+  formed product (sums in another order, 1.2e-7 relative in float32 on the lattice); the diagonal and
+  norms are summed in the formed path's order (bit-identical). Measurements: log, "The Schur applied from
+  its pieces (2026-10-25)".
 - **A level storing one cell pattern over every field pair cuts and unpacks at cell level (2026-10-24,
   §14d).** `simple_plan` builds `F`/`G`/`D`/`C` and `unpack` (the level's CSR values read from its padded
   slots) as `kronecker_pattern.KroneckerGather` maps, field ranges in place of index arrays, when

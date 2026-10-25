@@ -2146,7 +2146,7 @@ The project owner chose this (design A) from these options:
 |---|---|---|---|
 | A: matrix-free apply, `C` stored, row stats on kept row columns | − values, transpose, transpose layout; + `C` | 1.2–1.35x a product in a loop | apply order changes; diagonal inverse bit-identical |
 | A′: as A, row stats by sorting each chunk's terms, no `S` columns | − 33 MiB more (lattice) | as A | as A; fit 23.6 s against 6.3 s for the whole fit |
-| B: formed `S`, forward only | − transpose and its layout | unchanged | identical; a fragment of §14d's first bullet |
+| B: formed `S`, forward only | − transpose and its layout | unchanged | identical; a fragment of §14d's first bullet (built for every operator by #825 before this merged) |
 
 **Configuration (all):** 4-core Linux container, 15.7 GiB, jax 0.12.0.1, base `main` `1bd8d292`, arm branch
 `claude/schur-storage`; shipped case files (bfs3d: float32 split, `PivotFloor(0.15)`, SIMPLE 2 sweeps × 2
@@ -2195,6 +2195,13 @@ the start reads, and the level tables print equal), best of 10, two runs per arm
 The first pair alone read as a 16 % win; the second reversed it. The looped product's extra ~3 ms, about
 four fine-level products a V-cycle, is ~1 % of an apply, below this spread. Outputs 4.6e-9 / 5.9e-9 of the
 largest entry apart.
+
+**Against `main` after #825 (`dc0fdd12` merged with `9fb1457e`; transposes already packed only for an
+adjoint), so the tables above overstate what this change adds:** compile-only `memory_analysis` of the fine
+level's fit on the lattice, float64, `main` against this branch: temporaries 964.5 → 888.6 MiB, values
+out 135.0 → 79.8 MiB, plan 88.8 → 89.4 MiB. Held after rounding: `S`'s 33.1 MiB of single-precision
+values for `C`'s 5.5. #826 puts bfs3d's 2-step peak in the leading block re-fit, where the fit's transient
+lives; whether the peak moves is not measured.
 
 **Not measured:** a bfs3d march (one draw is not evidence at this size of change, `validation.md`); a
 census by owner (the split's leaves were summed from the checksum lines instead; the plan's arrays,

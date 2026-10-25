@@ -845,9 +845,10 @@ these that also bears on the 300k target. The stored transposes, a third such cu
 
 **The Schur is no longer stored (2026-10-25, branch `claude/schur-storage`):** the smoother applies
 `S = C − D (M G)` from its pieces and the fit forms only `S`'s diagonal and row norms, a chunk of rows at a
-time (`solve-flow-block.md`, "`S` is never held"). It is not bit-identical (the apply sums in another
-order), so it is not strictly one of these cuts; measurements in `solve-flow-block-log.md`, "The Schur
-applied from its pieces (2026-10-25)".
+time (`solve-flow-block.md`, "`S` is never held"). After the lazy transposes it holds ~28 MiB less on a
+bfs3d-sized fine level and its fit's transient ~131 MiB less (lattice). It is not bit-identical (the apply
+sums in another order), so it is not strictly one of these cuts; measurements in `solve-flow-block-log.md`,
+"The Schur applied from its pieces (2026-10-25)".
 
 **The cell-level pattern is built for the probe, the padded layouts, nodal Galerkin maps and the SIMPLE
 cuts (2026-10-24, branch `claude/cell-level-pattern`):** bfs3d device int32 2.19 → 0.40 GiB at step 1's
@@ -861,7 +862,7 @@ gathers (small), a non-nodal or diagonal-padded level, the 1×1 pressure block `
 device at step 1's end 1.20 → 0.69 GiB, step-1 peak 6.49 → 6.13 GiB (census runs), every forward leaf's
 digest and step 1's rows unchanged; pitzDaily march identical, peak 3.085 → 2.900 GiB
 (`solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)"). Left in §14d: the fine Schur on its
-reach-6 pattern.
+reach-6 pattern (since built, above).
 
 ### 14e. BUILT (2026-10-24) — `BoundaryClosure.gradient_weight`'s unit tangents are broadcasts
 
