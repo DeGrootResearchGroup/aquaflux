@@ -46,7 +46,9 @@ and adds, at each stage's end, readings that split the remainder by what could h
   operation run outside a jit on concrete arrays is a call of a jitted library function) with the number
   of programs its cache holds, summed by the module that defined the function and grouped into ``jax``
   (the library's own functions, the op-by-op programs), ``aquaflux`` and ``other`` (equinox, lineax,
-  the case scripts). Executables held by no jitted function's cache are counted apart.
+  the case scripts). A function's count is its cache's entries, which can exceed the programs it holds
+  (more entries than executables in every reading); the live executables are also counted by their HLO
+  module's name (``jit_<function>``), which catches programs no jitted function's cache holds.
 
 * **``RESIDUE_DROP=<stage label>=<group>[,<group>];...``**, an arm: at the end of the named stage, the
   caches of every jitted function of the named groups (as ``RESIDUE_FUNCTIONS`` groups them) are cleared
@@ -448,9 +450,16 @@ def _functions(top: int = 25) -> dict:
         by_group[group][1] += size
         name = getattr(wrapper, "__qualname__", None) or getattr(wrapper, "__name__", "?")
         by_name[(f"{group}:{module}", name)] += size
-    executables = len(jax.devices()[0].client.live_executables())
+    live = jax.devices()[0].client.live_executables()
+    names: dict[str, int] = defaultdict(int)
+    for executable in live:
+        try:
+            names[executable.hlo_modules()[0].name] += 1
+        except Exception:
+            names["?"] += 1
     return {
-        "executables": executables,
+        "executables": len(live),
+        "names": sorted(names.items(), key=lambda kv: -kv[1])[:top],
         "held_by_functions": held,
         "by_group": {g: {"functions": f, "programs": n} for g, (f, n) in by_group.items()},
         "by_module": _summed_by_module(by_name),
@@ -632,6 +641,8 @@ def _print_functions(title: str, functions: dict) -> None:
         print(f"        {size:5d}  {module}", flush=True)
     for module, name, size in functions["top"][:12]:
         print(f"        {size:5d}  {module}.{name}", flush=True)
+    names = ", ".join(f"{name} {count}" for name, count in functions["names"][:15])
+    print(f"        executables by name: {names}", flush=True)
 
 
 def _print(label: str, residue: dict) -> None:
