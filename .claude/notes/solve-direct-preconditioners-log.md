@@ -766,6 +766,9 @@
         JVPs), peak 5.85, resident at step 1's end 4.85, 817 executables at the end whose clear frees 1.39.
       - (a) control again, warm cache (31 entries, `5ba0652a`): peak 6.35, resident at step 1's end 5.37, march
         522.3 s, 1311 executables at the end whose clear frees 1.88 GiB (0.40 traced).
+      - pitzDaily: (a) cold (9 misses) peak 3.09, resident 2.93, march 304.6 s, end clear 0.90 of 1126; (b)
+        mid clear 0.28 of 685, peak 2.77, resident 2.53, march 262.8 s; (c) mid clear 0.82 of 1102, re-fit #1
+        86.1 s, peak 2.73, resident 2.48, march 357.9 s, 715 executables at the end, end clear 0.77.
 
 ## Condensed out of the rule (2026-10-17)
 
