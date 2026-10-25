@@ -10,7 +10,10 @@ values are the closures at the gradient it returned. No scheme argument reconstr
 
 from __future__ import annotations
 
+import re
+
 import aquaflux  # noqa: F401  (enables x64)
+import jax
 import jax.numpy as jnp
 import numpy as np
 from aquaflux.mesh import structured_grid_2d
@@ -100,3 +103,30 @@ def test_no_scheme_reconstructs_a_zero_gradient() -> None:
 
     np.testing.assert_array_equal(gradient, jnp.zeros((mesh.n_cells, 2)))
     np.testing.assert_array_equal(boundary_values, closure.values(field, gradient))
+
+
+def test_the_gradient_weight_compiles_to_no_per_cell_constant() -> None:
+    # Each direction the weight differentiates along is the same in every cell. Built by writing ones
+    # into a zero array it is a computation on constants alone, which the compiler evaluates and keeps
+    # in the program as an (n_cells, dim) array: in a coupled residual, one per component and field in
+    # every program that differentiates it. A broadcast of the unit vector is not evaluated so. The
+    # closure's coefficients and connectivity are arguments, as a residual's mesh and geometry are, or
+    # the compiler would fold the directions further, into per-face constants.
+    mesh = structured_grid_2d(7, 5)
+    owner = jnp.asarray(mesh.face_cells.owner)
+    _, a, w = _closure(mesh)
+
+    def weight(field, gradient, a, w, owner):
+        def values(field, gradient):
+            return a * (field[owner] + dot(gradient[owner], w)) + (1.0 - a) * 2.0
+
+        return BoundaryClosure(values).gradient_weight(field, gradient)
+
+    field = jnp.linspace(-1.0, 1.0, mesh.n_cells)
+    gradient = jnp.ones((mesh.n_cells, 2))
+    program = jax.jit(weight).lower(field, gradient, a, w, owner).compile().as_text()
+    constant_shapes = re.findall(r"= \w+\[([0-9,]*)\]\S* constant\(", program)
+    per_cell = [shape for shape in constant_shapes if shape.split(",")[0] == str(mesh.n_cells)]
+
+    assert per_cell == [], f"constants with one row per cell: {per_cell}"
+    np.testing.assert_allclose(weight(field, gradient, a, w, owner), a[:, None] * w, atol=1e-15)

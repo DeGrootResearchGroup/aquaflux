@@ -692,17 +692,22 @@
           the residual (nine `f64[23040, 3, 3]`, three `f64[23040, 3]`), pitzDaily 1.87 (four
           `f64[12225, 2, 2]`, two `f64[12225, 2]`): cells × dim², which with one more batched-JVP program
           is the 4.5×; not the stencil. The same tangent as `jnp.broadcast_to(unit_k, shape)` (not
-          folded) leaves 0.05 / 0.01 MiB and a bit-identical residual on both cases. A standalone probe (four jitted functions each closing over 32 MiB of
-          int32) cost 432 MiB resident for 114 MiB of HLO, ~3.4× the data; at that multiplier (an
-          estimate, not measured on the case) they hold ~0.8 GiB of bfs3d's 1.71 untraced and ~0.2 of
-          pitzDaily's 0.87, ~38 KB a bfs3d cell.
-        - **Everything else is ~0.7 MiB per small program**: (1.71 − 0.8) / ~1226 on bfs3d against
-          (0.87 − 0.2) / ~1059 on pitzDaily, the op-by-op programs the case build, `hybrid_initialize` and
-          the fit compile: about 0.7–0.9 GiB, fixed in the mesh. The traced 0.19 → 0.38 (jaxprs) is not
-          separated between the two parts.
-        - **For a 300k-cell case**: the constants at bfs3d's ~38 KB a cell are ~11 GB (estimated; the same
-          on a polyhedral mesh, since they follow cells × dim²), and a one-line library change removes
-          them (`solve-open-directions.md` §14e); the per-program part stays ~1 GiB.
+          folded) leaves 0.05 / 0.01 MiB and a bit-identical residual on both cases. On a march their resident cost
+          is small (next bullet).
+        - **Measured on a march, the folded constants cost ~0.05 GiB resident, not the ~0.8 estimated**
+          (bfs3d, `memory_residue.py` with `RESIDUE_CLEAR=end` and `RESIDUE_HLO`, 1 step, census off,
+          tracer on, warm cache, 2026-10-25, one run per arm). `main` `39786723`: HLO 0.234 GiB, clear +
+          trim freed 1.61 GiB, peak 6.25. With broadcast tangents (`3636ab49`): HLO 0.086, freed 1.56,
+          peak 6.43 -- the peaks within the 0.4 GiB spread two runs of one configuration show; the clear's
+          reading reproduced to 0.01 between two earlier runs. The estimate came from a standalone probe
+          (four jitted functions closing over 32 MiB of int32 each: 432 MiB resident for 114 MiB of HLO);
+          that multiplier does not transfer to the case.
+        - **So the cache is not proportional to its programs' HLO**: ~1.5 GiB of bfs3d's is per-program
+          runtime and compiler state over ~1300 executables. What doubled it from pitzDaily to bfs3d (1.06
+          against 2.09 on `13fa17d4`, with 16 % more executables) is not separated, and no projection of it
+          to 300k cells stands. `newton_step` still carries 3 × 16 MiB of HLO with broadcast tangents
+          (`laplace_field` hands `eqx.filter_jit(newton_step)` closures, whose captured arrays compile in);
+          its resident cost is unmeasured and, by the measurement above, small.
       - **After the march returns, its session and splits are cyclic garbage** until a collection: 1.6 GiB
         of arrays on bfs3d. During the march a collection frees nothing (entry of 2026-10-18), so this is
         not in the march's footprint; it is in the footprint of anything run after a solve in the same
@@ -715,6 +720,36 @@
         pattern arrays, #817 shrank them. They are not: the constants are folded tangents (above),
         measured on `50fe3be0` (after #817--#819) by `folded_constants.py`; the cache totals are not
         re-taken there.
+
+### bfs3d memory by owner after #817–#819 and broadcast tangents (2026-10-25)
+
+      `memory_attribution.py` on `3636ab49` (`main` `39786723` + broadcast tangents, #824): 4-core Linux
+      container, 15.7 GiB, no swap, glibc 2.39 defaults, jax 0.12.0.1, warm cache, shipped `case.yaml`
+      (re-fit trim on by default since #818), `BFS3D_MEMORY_STEPS=1`, census on (tracer 0.31 GiB at the
+      end). **Peak 6.35 GiB, set in the step program's first call** (stage peak; re-fit #1's leading
+      block re-fit 5.94, the fit's block inverse build 5.21). Resident at step 1's end 5.38 GiB:
+
+      | owner | GiB |
+      |---|---|
+      | live device arrays (int32 0.40, float32 0.66, float64 0.13) | 1.20 |
+      | -- cell-level padded columns `_KroneckerColumns` (41 arrays) | 0.26 |
+      | -- hierarchy level operators, `values` + stored `t_values` (9 levels) | 0.17 + 0.17 |
+      | -- SIMPLE pieces (Schur, divergence, dg; each with its transpose) | 0.19 |
+      | -- gradient `Corrections` 0.09, coupling 0.04 + 0.04, `KroneckerGalerkin` + `KroneckerGather` 0.07, probe `DeviceMatrix` 0.04 | 0.28 |
+      | host traced by `tracemalloc` (Python objects, jaxprs; arrays ≥ 1 MiB only 0.02) | 0.59 |
+      | `tracemalloc`'s own records | 0.31 |
+      | compiled-program cache outside Python (freed by `clear_caches` + trim, less its traced 0.40; `memory_residue.py` run of the same commit) | ~1.16 |
+      | glibc free-but-retained (`mallinfo2` 1.05; the step program's first call adds most of it) | ~1.05 |
+      | file-backed (libraries) | 0.21 |
+      | rest (interpreter, XLA runtime, thread stacks, arena fragmentation) | ~0.8 |
+
+      - The peak is the step program's 1.02 GiB of temporaries (`memory_analysis`, beside 1.01 GiB of
+        arguments that are the split's leaves and the state) on a 4.6 GiB baseline. Of that baseline,
+        live arrays are 1.2; the cache, retention and tracer about 2.5.
+      - Every peak number in this entry carries the tracer; a census-free run of the same commit peaked
+        at 6.43 and `main` without the tangents at 6.25 (`memory_residue.py`, entry above), one run each.
+        So bfs3d's 1-step peak on current `main` is ~6.3 ± 0.2 GiB, against 7.19 after #817 alone and
+        8.07 on `7fe27d07`.
 
 ## Condensed out of the rule (2026-10-17)
 
