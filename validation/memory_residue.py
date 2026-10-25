@@ -51,7 +51,9 @@ and adds, at each stage's end, readings that split the remainder by what could h
   module's name (``jit_<function>``), which catches programs no jitted function's cache holds.
 
 * **``RESIDUE_DROP=<stage label>=<group>[,<group>];...``**, an arm: at the end of the named stage, the
-  caches of every jitted function of the named groups (as ``RESIDUE_FUNCTIONS`` groups them) are cleared
+  caches of every jitted function of the named groups (as ``RESIDUE_FUNCTIONS`` groups them; a token
+  holding a dot names one function instead, as ``<module>.<qualname>``, e.g.
+  ``aquaflux.solve.newton.newton_step``) are cleared
   -- that function's programs only, nothing else of JAX's -- then a ``gc.collect()`` and a
   ``malloc_trim(0)``, reading the resident set and the executables before and after. Read with
   ``RESIDUE_FUNCTIONS`` at later stages, it says which of the dropped functions' programs the run compiles
@@ -485,8 +487,9 @@ def _drop(groups: set[str]) -> dict:
     _LIBC.malloc_trim(0)
     before = {**_live(), "executables": count()}
     dropped = 0
-    for group, _, wrapper in _jitted_functions():
-        if group in groups:
+    for group, module, wrapper in _jitted_functions():
+        name = f"{module}.{getattr(wrapper, '__qualname__', '')}"
+        if group in groups or name in groups:
             dropped += wrapper._cache_size()
             wrapper.clear_cache()
     gc.collect()
