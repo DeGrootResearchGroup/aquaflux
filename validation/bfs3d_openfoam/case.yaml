@@ -49,7 +49,10 @@ solver:
   # may be shortened. Re-fitted at the step's own shift (no floor), as on pitzDaily. Probing every column
   # at reach 2 inside this pattern, as pitzDaily does, halves the probe but loses the march: with the
   # pivot floor, three perturbed draws per arm took 17 steps every time at reach 3 against 21, 23 and 40
-  # at reach 2, same root (compare.py, BFS3D_COLUMN_REACH and BFS3D_NU_PERTURBATION, 2026-10-25).
+  # at reach 2, same root (compare.py, BFS3D_COLUMN_REACH and BFS3D_NU_PERTURBATION, 2026-10-25). The
+  # pressure column is the one that matters, because this mesh's cells are stretched: across a thin
+  # cell the cell three faces away can couple more strongly than a face neighbour along its long side,
+  # so the short probe drops pressure couplings as large as ones it keeps (validation/reach_folding.py).
   preconditioner:
     kind: MaterializedJacobian
     inverse:

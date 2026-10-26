@@ -1212,6 +1212,67 @@
       the verdict; it only made the reach-3 side a single number. Not run: shortening only some columns
       on bfs3d.
 
+    - **✅ WHY bfs3d NEEDS REACH 3 AND pitzDaily DOES NOT (2026-10-25/26): cell aspect ratio. A short probe
+      DROPS each distance-3 coupling from its own position and ADDS it onto a near entry of the same
+      colour; on bfs3d the dropped pressure couplings are not small next to the ones kept, because graph
+      distance is not physical distance in a stretched cell -- the cell three faces away across the thin
+      direction can couple more strongly than the face neighbour along the long side.** Harness
+      `validation/reach_folding.py` (one inner solve rebuilt as the ramp march builds it, the operator
+      exact in every arm, only the preconditioner's fitted values or coarsening varied); anisotropy from
+      `validation/mesh_anisotropy.py`. Configuration: library at `main` `1c5a187`, shipped `case.yaml` of
+      each case (float32 split, `PivotFloor(0.15)`), 4-core Linux container, jax 0.12.0.1; states from a
+      uniform-reach-3 bfs3d march (17 steps, `BFS3D_INNER_DUMP_ABOVE=1`) and a shipped (reach-2-probe)
+      pitzDaily march (21 steps, `PITZ_INNER_DUMP_ABOVE=1`), both 2026-10-25. The matched solve is step 5,
+      inner solve 2 of each (station 4, beta 0.00617): bfs3d's replay gives the march's own 8 raw cycles
+      and full step; pitzDaily's gives 4 raw cycles where its march logged 5 (its march likely solved that
+      iterate at the post-setback tolerance 0.1, which the harness does not reproduce), same accepted alpha.
+      Cycles below are raw (the march log prints one fewer).
+
+      | bfs3d step 5, inner 2: preconditioner fitted from | cycles (march rtol 0.3) | row-scaled after 16 cycles (rtol 1e-5) |
+      |---|---|---|
+      | uniform reach 3 | 8 | 7.3e-04 |
+      | every column at reach 2 / only p at 2 | 16 (cap), stagnant | 2.70 / 2.72 (larger than the right-hand side) |
+      | u, v, w, k or omega alone at 2 (step 5 inner 0, step 10) | unchanged | unchanged |
+      | p at 2, `BFS3D_SPLIT_PRECISION=float64` | 16, stagnant | 2.72 -- not a float32 effect |
+      | coarsening from reach 3, values from p-at-2 | 16, stagnant | 2.89 |
+      | coarsening from p-at-2, values from reach 3 | 8 | 4.7e-04 -- the coarsening is not the cause |
+      | `J3 + t (Jp - J3)`, t = 0 / 0.25 / 0.5 / 1 | 8 / 13 / 16 / 16 | 7.3e-04 / 2.6e-02 / 1.35 / 2.89 |
+      | only the DROP (J3 with p's distance-3 entries zeroed) | 16, stagnant | 0.39 |
+      | only the FOLD (Jp with those entries restored) | 8 | 1.7e-03 |
+
+      pitzDaily's matched solve: uniform 3, all-at-2, p-at-2, the drop alone, and `t` = 2, 4 all at 4 cycles,
+      row-scaled 0.29 at the march tolerance, 2.6e-04 to 3.0e-04 tight; `t` = 8 costs 5 cycles and 5.2e-04.
+      bfs3d step 6 inner 1 repeats the pattern (uniform 6 cycles / tight 7.1e-03; p at 2 16 cycles, stagnant
+      at 0.21); at step-initial solves the cost is one cycle at most, and at step 10 the tight solve halves
+      its rate -- only the harder inner solves break, which is where the reach-2 marches lost their steps.
+      The stagnant residual is in the continuity rows (2.51 of 2.72), and in the stretched cells: cells above
+      10:1 are 41 % of bfs3d's cells and hold ~63 % of the squared continuity residual of the failed solve,
+      ~25 % in the uniform solve.
+
+      What the reach-2 probe does to the p blocks at that state (dropped = the distance-3 ring zeroed;
+      |.|/|block| Frobenius): bfs3d C 3.3e-03 dropped, 2.3e-03 folded; G 4.5e-03 / 3.3e-03. pitzDaily C
+      1.5e-03 / 1.2e-03, G 1.5e-03 / 1.2e-03. The pressure Schur complement `C - D M G` (diagonal `M`, a
+      proxy for the smoother's block inverse) moves 3.1e-03 on bfs3d and 1.6e-03 on pitzDaily, with no
+      cancellation between its terms (|D M G| / |S| 0.31 and 0.37) and no diagonal moved by more than
+      3.5e-04 -- a block-norm measure cannot separate the cases. On an orthogonal hex mesh many near
+      positions hold couplings near zero, which the fold fills (bfs3d C: 104 060 entries moved by more
+      than their own size, pitzDaily 5 471), but the fold-only arm shows that is nearly harmless.
+
+      The measure that separates them: in each continuity row, the largest dropped `|C_ij|` against the
+      row's WEAKEST face-neighbour `|C_ij|`, by the cell's conductance ratio (max/min of `|S_f| / d_f.n_f`
+      over its faces; median, and share of rows above 0.1):
+
+      | conductance ratio | pitzDaily cells | pitzDaily | bfs3d cells | bfs3d |
+      |---|---|---|---|---|
+      | 1-2:1 | 8 399 | 3.4e-03, 0 % | 40 | 3.9e-02, 0 % |
+      | 2-10:1 | 3 643 | 8.6e-03, 6 % | 13 440 | 0.23, 88 % |
+      | above 10:1 | 183 | 0.51, 77 % | 9 560 | 1.30, 100 % |
+
+      Mesh-wide conductance ratio: pitzDaily median 1.7, p99 12, 1.5 % of cells above 10:1; bfs3d median
+      8.6, p99 59, 41 % above 10:1. So pitzDaily's stretched cells drop couplings as large as bfs3d's do,
+      and there are 183 of them; bfs3d drops them nearly everywhere. Not run: bfs3d on a less graded mesh
+      (the causal test), and pitzDaily with a refined, stretched near-wall region.
+
 ### The residual reaching past stencil_reach — the gradient-sweep trap (2026-08-16)
 
       **⚠️ THE OTHER SIDE OF THE SAME TRAP: the RESIDUAL can reach past `stencil_reach`, and then EVERY

@@ -21,9 +21,11 @@ Two facts make the question worth asking per block rather than once:
 A colouring is collision-free only for the pattern it was built from, so two cells sharing a reach-two
 colour may still both couple to a common row at distance three. The probe response for that row is
 then the *sum* of both couplings, and the de-compression charges the whole sum to the one column
-inside the reach-two pattern. So a reach-two probe does not drop the distance-three entries, it folds
-them onto distance-two positions. Both the dropped mass and the folded mass are bounded by the shell
-norm reported here, which is why this one measurement settles both.
+inside the reach-two pattern. So a reach-two probe both drops the distance-three entries (their
+positions are written as zeros) and folds them onto distance-two positions. Both the dropped mass and
+the folded mass are bounded by the shell norm reported here. Neither bound says what the solve does
+with them: on a mesh of stretched cells a small shell share can still hold couplings as large as the
+weakest kept ones (``validation/reach_folding.py``).
 
 Run it against a state whose provenance you can name, and quote the state with any result -- the shell
 magnitude is a property of the flow, not of the mesh alone.

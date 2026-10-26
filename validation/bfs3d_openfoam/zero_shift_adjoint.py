@@ -16,7 +16,7 @@ an accurate inverse of it -- so a cold-state failure says nothing about the adjo
 
 **The OPERATOR is probed at a uniform reach 3 (exact on this skew-free mesh); the PRECONDITIONER as the
 case configures it** (``compare.COLUMN_REACH``, uniform by default, ``BFS3D_COLUMN_REACH`` to shorten
-columns). A short colouring does not truncate a column -- it folds far couplings onto near entries -- so
+columns). A short colouring both truncates a column and folds its far couplings onto near entries, so
 the operator must stay exact for the true residual to mean anything, while the preconditioner's copy is
 exactly what a shortened probe would hand the adjoint. Compare ``BFS3D_COLUMN_REACH=2,2,2,2,2,2``
 against the default to measure that.

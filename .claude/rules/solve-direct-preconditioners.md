@@ -236,9 +236,19 @@ bare block inverse).
   footprint (re-fit 48.7 → 39.7 s at `state-00032`; a cadence-5 march without the pivot floor 2439 → 2180 s, peak 12.63 → 12.15 GiB), the retaining allocators are not usable for a march
   in 15 GiB: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container" and the subsection after it.
 
-  What decides it is the far mass the colouring folds (`probe_reach_audit.py`: bfs3d's p carries 1.1e-3 of
-  its norm beyond reach 2, against ~4e-4 folded on pitzDaily). Untested: shortening only some of bfs3d's
-  columns. pitzDaily arms and the reach-4 pattern: log, "Probe colouring reach 2 — pitzDaily and bfs3d".
+  **What decides it is cell aspect ratio, through the pressure column** (2026-10-26, `validation/reach_folding.py`).
+  Reach is graph distance; across a stretched cell the cell three faces away can couple more strongly
+  than the face neighbour along its long side, so dropping the distance-3 pressure couplings removes some
+  as large as couplings kept. bfs3d's largest dropped `|C_ij|` is 1.3x the row's weakest face coupling at
+  the median in cells above 10:1 (41 % of its cells) and 0.23x in 2–10:1 ones (58 %); pitzDaily's is 0.3–0.9 %
+  in its 98.5 % of cells below 10:1 and 0.5x in its 183 stretched ones. Only p matters: probing p alone
+  at 2 reproduces bfs3d's failure, which is a stagnant solve at the harder inner iterates, not a slower
+  one; the drop alone stagnates it, the fold alone does not, and neither the coarsening nor float32 is
+  involved. A block-norm measure of the fold (bfs3d 2x pitzDaily) cannot predict this. Re-measure on
+  any case with strongly graded cells before shortening p. Untested: shortening only bfs3d's k, omega
+  or velocity columns (each alone left the solves unchanged at step 5 and 10). pitzDaily arms and the
+  reach-4 pattern: log, "Probe colouring reach 2 — pitzDaily and bfs3d"; the aspect-ratio measurements:
+  same section, "WHY bfs3d NEEDS REACH 3".
 - **Keep the materialized pattern at reach 3 even where a column is probed shorter.** A reach-2 pattern
   changes the aggregation's coarse space (3 levels / 480 coarse equations against 2 / 1296 on bfs3d) and
   diverged the then-shipped pattern-dependent smoother; positions, not values, were causal, and a stored
@@ -246,10 +256,12 @@ bare block inverse).
   before lowering it; ledger: `solve-refuted-directions.md`, reach-2 under "Low-β directions". Under the
   traced split, zeroing the VALUES beyond reach 2 (positions kept) costs 1.2–1.9× the applications on
   bfs3d, and beyond reach 1 does not converge at all (ledger, "TRUNCATING the Jacobian to reach 1").
-- ⚠️ **A short reach corrupts rather than truncates.** A colouring is collision-free only for the pattern
+- ⚠️ **A short reach both truncates and corrupts.** A colouring is collision-free only for the pattern
   it was built at, so two cells sharing a reach-2 colour can both couple to a row at distance 3; the
   response holds the sum and the de-compression charges it to the near entry. So pattern entries outside a
-  column's own reach are written as explicit zeros (`ColumnProbePlan.in_reach`), never gathered. Pinned by
+  column's own reach are written as explicit zeros (`ColumnProbePlan.in_reach`), never gathered: each far
+  coupling is removed from its own position AND added onto a near one. On bfs3d the removal is what
+  breaks the solve (above). Pinned by
   `test_a_short_probed_column_zeroes_its_out_of_reach_entries` and
   `test_per_column_plan_recovers_a_mixed_reach_matrix_exactly_and_more_cheaply`.
 - ⚠️ **The residual can reach past `stencil_reach`, and then every column aliases.** `CorrectedGreenGauss`

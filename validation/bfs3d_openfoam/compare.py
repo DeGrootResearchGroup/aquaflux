@@ -418,6 +418,14 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # 40 / 21 / 23 steps and 384 / 205 / 194 cycles (1957-3870 s), all to mid-span `x_r/h` 8.3611. The
 # probe per fit halves (~18.5 s -> ~8.6 s); the extra steps, each with its own refit, cost more than that.
 #
+# Why this case and not pitzDaily: the pressure column, on stretched cells. Reach is graph distance, and
+# across a cell this mesh grades thin, the cell three faces away can couple more strongly than the face
+# neighbour along the long side -- so dropping the distance-three pressure couplings removes some as
+# large as couplings kept (the largest dropped one is 1.3x a row's weakest face coupling at the median
+# in the 41 % of cells above 10:1; pitzDaily has 1.5 % of its cells there). Probing pressure alone at
+# reach two stalls the harder inner solves outright; the other columns alone change nothing
+# (`validation/reach_folding.py`, 2026-10-26).
+#
 # The coloured probe costs one directional derivative per
 # (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
 # 39 at two, 94 at three on this mesh -- so probing a column further than it reaches is pure cost. The
@@ -432,7 +440,7 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # schemes -- first-order upwind on k/omega with a non-orthogonal diffusion correction reaches two, while
 # the velocity columns carry the limited second-order upwind reconstruction out to three -- so it must be
 # re-measured for any case that changes them, NOT inherited. Shortening a column that does carry far
-# couplings corrupts its near entries rather than truncating them.
+# couplings both drops them and corrupts its near entries with them.
 #
 # Shortening all three would be 564 probes -> 399 (-29%), and the two Jacobians agree to 5.7e-16 relative
 # Frobenius, i.e. float64 rounding. The value shipped under that scheme shortened only k and omega:
@@ -477,7 +485,7 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 #
 # One caution that survives all of it: shortening a column is only sound where its mass beyond the
 # shortened reach is negligible AT EVERY STATE THE MARCH VISITS, and a short-probed column with far
-# couplings has its NEAR entries corrupted rather than its far entries dropped -- a colouring is
+# couplings has its far entries dropped AND its NEAR entries corrupted -- a colouring is
 # collision-free only for the pattern it was built from, so two cells sharing a reach-two colour can
 # both couple to one row at distance three and the response is charged entirely to the near one.
 # Measured structurally, that aliasing touches 53% of the entries of every shortened column here; it

@@ -1,9 +1,10 @@
 """What a reach-2 probe colouring does to one step of a step case, and where: bfs3d or pitzDaily.
 
 Both step cases assemble their preconditioner from a Jacobian materialized in a reach-3 pattern. Probing
-a column at reach 2 inside that pattern does not drop its distance-3 couplings: a reach-2 colouring lets
-two cells three apart share a colour, so a row coupled to both receives their sum, and the
-de-compression charges it to the one inside reach 2. pitzDaily probes every column that way with no
+a column at reach 2 inside that pattern does two things to its distance-3 couplings. It drops them: their
+positions are written as zeros. And it folds them: a reach-2 colouring lets two cells three apart share a
+colour, so a row coupled to both receives their sum, and the de-compression charges it to the one inside
+reach 2. pitzDaily probes every column that way with no
 change to its march; on bfs3d the same colouring costs steps. This measures, at one checkpoint of a
 uniform-reach-3 march of either case, the two things that could separate them:
 

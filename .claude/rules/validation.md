@@ -193,12 +193,21 @@ branches.
   previous one returned (#761), and a freshly evaluated one differs at round-off, which flipped one such
   step from descent to a tenfold rise. Reproduce such a step from a capture of its `_march_step` arguments,
   or read it as a spread over perturbed residuals.
-- **A per-column probe reach is licensed by the gradient scheme and the split; re-audit it when either
-  changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships `MultipleCorrectionGradient` at a
-  uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond reach 2, and a reach-2 colouring
-  cost it 17 → 21–40 steps over three perturbed draws per arm with the pivot floor (2026-10-25,
-  `BFS3D_NU_PERTURBATION`; uniform reach 3 gave 17 steps on every draw). pitzDaily deliberately probes every column at reach 2
-  inside its reach-3 pattern: its march is unchanged and the probe 40 % cheaper (2026-10-14).
+- **A per-column probe reach is licensed by the gradient scheme, the split AND the mesh's cell aspect
+  ratio; re-audit it when any changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships
+  `MultipleCorrectionGradient` at a uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond
+  reach 2, and a reach-2 colouring cost it 17 → 21–40 steps over three perturbed draws per arm with the
+  pivot floor (2026-10-25, `BFS3D_NU_PERTURBATION`; uniform reach 3 gave 17 steps on every draw).
+  pitzDaily deliberately probes every column at reach 2 inside its reach-3 pattern: its march is
+  unchanged and the probe 40 % cheaper (2026-10-14). The difference is the pressure column on stretched
+  cells (bfs3d 41 % above 10:1, pitzDaily 1.5 %; `solve-direct-preconditioners.md`, probe colouring).
+- **`reach_folding.py` replays one inner solve of either step case per probe arm** (`REACH_FOLDING_CASE`,
+  `_STEP`, `_INNER` from a march run with `*_INNER_DUMP_ABOVE=1`; arms `3`, `2`, a field, `A/B` build vs
+  re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`). ⚠️ At most two arms per process on bfs3d (the
+  fifth died in LLVM's allocator on 15 GiB). ⚠️ It re-fits at the step's start, which matches the march
+  only where the step re-fitted there (every ramp step does); a pitzDaily inner replay ran 4 cycles where
+  its march logged 5, likely its post-setback tolerance. `mesh_anisotropy.py` (moved to `validation/`)
+  gives the per-cell conductance ratio both use.
 
 ## Machine contention and run records
 
