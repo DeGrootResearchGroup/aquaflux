@@ -357,6 +357,7 @@ run writes the fields as VTK, the log and the history into `results/` beside the
 outputs:
   directory: results                    # relative to the case file
   log: march.log                        # the march's per-step table; null for the terminal only
+  log_detail: [inner, fields, pc]       # what the table adds beneath each step; [] for one row a step
   history: history.csv                  # the same steps as comma-separated values; null for none
   checkpoints: {kind: Checkpoints, every: 1, keep: 3}
   fields:
@@ -389,6 +390,11 @@ outputs:
   ```
 - Each writer's `fields` names what it writes — `U` and `p`, and under `RANS` also `k`, `omega`
   and `nut`; left out, all of them. The pressure is the solved one.
+- The log's `log_detail` adds, beneath each step's row: `inner`, a row per inner Newton
+  iteration of a dual-time step (its residual in and out, the Krylov cycles and the step length);
+  `fields`, each field's relative change over the step (under `RANS`); `pc`, each refit of a
+  materialized-Jacobian preconditioner and what it took. Each reads what the march already
+  computes. All three are on unless the file says otherwise.
 - The history ({class}`~aquaflux.solve.StepHistory`) has one row per step of the march — the
   step, the seconds since the run started, the residual and its ratio to the starting one, the
   line-search factor, the shift, the linear-solve cost, the continuation station the step drove

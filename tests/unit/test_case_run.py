@@ -32,9 +32,10 @@ from aquaflux.case import (
     case_spec_to_mapping,
     prepare_run,
 )
+from aquaflux.case.outputs import LOG_DETAILS
 from aquaflux.case.run import _checkout_state
 from aquaflux.precondition import FieldSplit, JacobiSmoothed, MaterializedJacobian, SimpleSmoothed
-from aquaflux.solve import DualTimeLoop
+from aquaflux.solve import DualTimeLoop, MarchLogger
 from aquaflux.turbulence import BlockDiagonal, solve_segregated
 
 from tests.support.case_meshes import grid_mesh
@@ -78,10 +79,20 @@ def test_a_file_with_no_outputs_section_writes_vtk_the_log_and_the_history_into_
     assert "outputs" not in case_spec_to_mapping(spec)
 
 
+def test_a_run_logs_by_default_every_detail_a_case_file_can_ask_for() -> None:
+    """Every detail the step log has but the per-equation residuals, which need an extractor a case run
+    does not build: a detail added to the log and not here, or named here and unknown to the log, fails."""
+    assert set(LOG_DETAILS) == MarchLogger.DETAIL - {"residuals"}
+    assert Outputs().log_detail == LOG_DETAILS
+    with pytest.raises(ValueError, match=r"Outputs.log_detail names \['residuals'\]"):
+        Outputs(log_detail=("inner", "residuals"))
+
+
 def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> None:
     section = {
         "directory": "out",
         "log": None,
+        "log_detail": ["inner"],
         "history": "steps.csv",
         "checkpoints": {"kind": "Checkpoints", "every": 5, "keep": 2},
         "fields": [
@@ -97,6 +108,7 @@ def test_an_outputs_section_reads_without_its_kind_and_writes_back_equal() -> No
             OpenFOAMTime(case="of", time="10", template_time="0"),
         ),
         log=None,
+        log_detail=("inner",),
         history="steps.csv",
         checkpoints=Checkpoints(every=5, keep=2),
     )
@@ -205,6 +217,7 @@ def test_the_case_refuses_an_extruded_axis_its_mesh_has_no_use_for(tmp_path) -> 
         ({"history": "logs/history.csv"}, r"Outputs.history is a file name"),
         ({"log": "steps.txt", "history": "steps.txt"}, r"log and Outputs.history both name"),
         ({"directory": ""}, r"Outputs.directory names the directory"),
+        ({"log_detail": ["residuals"]}, r"Outputs.log_detail takes a list of \(one of 'inner'"),
     ],
     ids=[
         "vtk-wrong-suffix",
@@ -217,6 +230,7 @@ def test_the_case_refuses_an_extruded_axis_its_mesh_has_no_use_for(tmp_path) -> 
         "history-in-a-subdirectory",
         "log-and-history-one-file",
         "no-directory",
+        "log-detail-unknown",
     ],
 )
 def test_an_outputs_section_that_cannot_be_written_is_refused(outputs, match) -> None:

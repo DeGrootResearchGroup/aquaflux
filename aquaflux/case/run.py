@@ -146,7 +146,9 @@ class PreparedRun:
             stream.write(f"aquaflux {aquaflux.__version__}: {self.source}\n")
             stream.write(f"  solver: {type(self.solver).__name__}; writing to {self.directory}\n")
             problem = self.checked.build()
-            logger = MarchLogger(stream, fields=spec.physics.progress_fields(problem))
+            logger = MarchLogger(
+                stream, fields=spec.physics.progress_fields(problem), detail=outputs.log_detail
+            )
             checkpointer = (
                 None
                 if outputs.checkpoints is None

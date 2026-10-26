@@ -409,3 +409,21 @@ def test_a_case_starts_from_the_openfoam_time_directory_another_run_wrote(tmp_pa
     np.testing.assert_allclose(again["p"], first_written["p"], rtol=1e-6, atol=1e-9)
     np.testing.assert_allclose(again["U"], first_written["U"], rtol=1e-6, atol=1e-9)
     np.testing.assert_allclose(first_written["U"], np.asarray(velocity), rtol=1e-6, atol=1e-9)
+
+
+def _march_log(tmp_path: Path, name: str, **outputs: object) -> str:
+    """The step log of a dual-time march of the channel, with ``outputs`` as the file states them."""
+    sections = _CHANNEL | {
+        "solver": {"kind": "FlowMarch", "dual_time": {"kind": "DualTimeLoop", "inner_steps": 3}},
+        "outputs": {"directory": name, **outputs},
+    }
+    assert main(["run", str(_write(tmp_path / f"{name}.yaml", sections))]) == 0
+    return (tmp_path / name / "march.log").read_text()
+
+
+def test_a_run_logs_its_inner_iterations_unless_the_file_asks_for_one_row_a_step(tmp_path) -> None:
+    """The wrong answer this catches: a run whose log keeps only the step rows, whatever the file says."""
+    detailed = _march_log(tmp_path, "detailed")
+    plain = _march_log(tmp_path, "plain", log_detail=[])
+    assert "inner" in detailed and "rate" in detailed
+    assert "rate" not in plain

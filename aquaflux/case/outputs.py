@@ -24,7 +24,7 @@ import abc
 import dataclasses
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal, get_args
 
 import numpy as np
 
@@ -439,6 +439,12 @@ class Checkpoints:
                 raise ValueError(f"Checkpoints.{name} must be >= 1, got {getattr(self, name)!r}.")
 
 
+#: What a run's step log may add beneath each step's row (:attr:`Outputs.log_detail`).
+LogDetail = Literal["inner", "fields", "pc"]
+#: Every :data:`LogDetail`, in the order the log describes them.
+LOG_DETAILS: tuple[str, ...] = get_args(LogDetail)
+
+
 @dataclasses.dataclass(frozen=True)
 class Outputs:
     """Where a run writes, and what.
@@ -452,6 +458,11 @@ class Outputs:
     log : str or None
         The per-step log's file name in the output directory; ``None`` writes the log to the terminal
         only.
+    log_detail : tuple of str
+        What the log adds beneath each step's row: ``"inner"``, a row per inner Newton iteration of a
+        dual-time step (its residual in and out, Krylov cycles and step length); ``"fields"``, each
+        field's relative change over the step; ``"pc"``, each re-fit of a materialized preconditioner
+        and what it cost. Each reads what the march already computes. Empty, one row per step.
     history : str or None
         The per-step history's file name in the output directory, a comma-separated-values file with
         one row per step of the march (:class:`~aquaflux.solve.StepHistory`); ``None`` writes none.
@@ -463,7 +474,7 @@ class Outputs:
     ------
     ValueError
         If ``directory`` is empty, or ``log`` or ``history`` is not a plain file name, or the two
-        name the same file.
+        name the same file, or ``log_detail`` names something the log does not report.
     TypeError
         If a field writer or the checkpoints are not values of their family.
     """
@@ -471,6 +482,7 @@ class Outputs:
     directory: str = "results"
     fields: tuple[FieldWriter, ...] = (Vtk(),)
     log: str | None = "march.log"
+    log_detail: tuple[LogDetail, ...] = LOG_DETAILS
     history: str | None = "history.csv"
     checkpoints: Checkpoints | None = None
 
@@ -484,6 +496,9 @@ class Outputs:
             value = getattr(self, name)
             if value is not None and (not value or Path(value).name != value):
                 raise ValueError(f"Outputs.{name} is a file name, got {value!r}.")
+        if not set(self.log_detail) <= set(LOG_DETAILS):
+            unknown = sorted(set(self.log_detail) - set(LOG_DETAILS))
+            raise ValueError(f"Outputs.log_detail names {unknown}; it takes {list(LOG_DETAILS)}.")
         if self.log is not None and self.log == self.history:
             raise ValueError(f"Outputs.log and Outputs.history both name {self.log!r}.")
         for writer in self.fields:

@@ -247,8 +247,7 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `MaterializedJacobian` is refused. `_March.observers_for` wires the session's `observer` to the log's
   and the recorder's `on_refresh`, which is how `history.csv` counts refits. ⚠️ Before 2026-10-23 only
   `CoupledMarch` did: a laminar run's `history.csv` read `refits` 0 whatever it refitted. Pinned by
-  `test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes`. (`march.log` shows
-  refits only with the logger's `"pc"` detail, which a case run does not ask for, on either march.) A `point_setup`
+  `test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes`. A `point_setup`
   may observe a ramp's anchor and is refused if it returns settings. `Segregated` takes no observers and only
   warns when it runs out of sweeps (#543).
 - ⚠️ **`station_step` and `jacobian_gradient_sweeps` are not file settings and not in `_owned()`**; the
@@ -293,7 +292,12 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   0.01–0.4 s against 2.5–5 s of process start-up (2026-10-06, macOS arm64, loaded machine; breakdown in the
   log).
 - **`outputs` is optional; its default writes `results/fields.vtu`, `results/march.log`,
-  `results/history.csv`** (project owner). `history` is `solve.StepHistory` (`solve-march.md`); `log` and
+  `results/history.csv`** (project owner). **`outputs.log_detail` defaults to every `MarchLogger`
+  detail a case run can feed** (`inner`, `fields`, `pc`; project owner, 2026-10-26: the step-only log
+  was too thin to watch a run by); `[]` gives one row a step. `residuals` is not offered (it needs an
+  extractor the runner does not build; `history.csv` has the per-equation residuals). `LOG_DETAILS`
+  (`outputs.py`) is pinned equal to `MarchLogger.DETAIL - {"residuals"}`, and a real run's log by
+  `tests/integration/test_case_run.py`. Before 2026-10-26 no case run's log had any detail. `history` is `solve.StepHistory` (`solve-march.md`); `log` and
   `history` may not name the same file. `SolverSpec.observers_for(logger, recorder)` takes a
   `solve.MarchRecorder` and reads its hooks as attributes; the runner's `_StepCount` forwards to recorders.
   `on_residuals` is wired only when a recorder takes it (each costs a block split of the step's carried
