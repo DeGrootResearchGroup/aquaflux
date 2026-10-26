@@ -301,15 +301,19 @@ def _copied(tree):
 
 
 def _relative_change(old, new):
-    """``|new - old| / |old|`` over every floating array leaf of two pytrees of one structure."""
-    pairs = [
-        (np.asarray(a, np.float64), np.asarray(b, np.float64))
-        for a, b in zip(jax.tree.leaves(old), jax.tree.leaves(new), strict=True)
-        if eqx.is_array(a) and jnp.issubdtype(a.dtype, jnp.floating)
-    ]
-    size = sum(float(np.sum(a * a)) for a, _ in pairs)
-    change = sum(float(np.sum((b - a) ** 2)) for a, b in pairs)
-    return np.sqrt(change / size) if size else 0.0
+    """The largest ``|new - old| / |old|`` over the floating array leaves of two pytrees of one structure.
+
+    Per leaf, then the largest: one sum over every leaf is ruled by whichever leaf holds the largest
+    entries (an inverted near-singular diagonal), which hides a change in every other leaf.
+    """
+    worst = 0.0
+    for a, b in zip(jax.tree.leaves(old), jax.tree.leaves(new), strict=True):
+        if eqx.is_array(a) and jnp.issubdtype(a.dtype, jnp.floating):
+            a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+            size = float(np.linalg.norm(a))
+            if size:
+                worst = max(worst, float(np.linalg.norm(b - a)) / size)
+    return worst
 
 
 class ComponentSwap:
@@ -375,7 +379,7 @@ class ComponentSwap:
         # How far the swap moved each part: zero where nothing was swapped, and where something was,
         # how far the reach-3 fit's values sit from the arm's own (a swap that moved nothing is inert).
         print(
-            "[components] relative change: "
+            "[components] largest relative change of a leaf: "
             + ", ".join(
                 f"{name} {_relative_change(before[name], after[name]):.2e}" for name in before
             ),
