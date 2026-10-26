@@ -642,8 +642,8 @@ attached — check for them before adding a solve to this tier:
 
 **⚠️ A unit CI job that slows down or times out is usually the runner swapping, not your change — and the
 fix is a shard, not a worker.** Workers grow as they draw modules, and unsharded `-n 3` on a 16 GB runner
-swapped tests past the 900 s timeout with no assertion failing. The tier runs as **three shards of two
-workers** (`--splits 3 --group N -n 2`), balanced by durations recorded **on CI, never locally**. When it
+swapped tests past the 900 s timeout with no assertion failing. The tier runs as **four shards of two
+workers** (`--splits 4 --group N -n 2`), balanced by durations recorded **on CI, never locally**. When it
 outgrows that, **add a shard; never add a worker.** Before blaming your branch, read the job's memory step
 (`vmstat` every 30 s) and check whether unrelated branches are slow too. Caching JAX compilations across CI
 runs buys nothing. `.github/workflows/ci.yml` carries these measurements.
