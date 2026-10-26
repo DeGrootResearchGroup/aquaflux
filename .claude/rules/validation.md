@@ -204,7 +204,9 @@ branches.
   colouring).
 - **`reach_folding.py` replays one inner solve of either step case per probe arm** (`REACH_FOLDING_CASE`,
   `_STEP`, `_INNER` from a march run with `*_INNER_DUMP_ABOVE=1`; arms `3`, `2`, a field, `A/B` build vs
-  re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`). ⚠️ At most two arms per process on bfs3d (the
+  re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`, and `p@S<tau>`: p coloured for `R2 + S(tau)`,
+  the rest at 3, the probe built in the harness and installed as the session's `_probe` before it
+  builds). ⚠️ At most two arms per process on bfs3d (the
   fifth died in LLVM's allocator on 15 GiB). ⚠️ It re-fits at the step's start, which matches the march
   only where the step re-fitted there (every ramp step does); a pitzDaily inner replay ran 4 cycles where
   its march logged 5, likely its post-setback tolerance. `mesh_anisotropy.py` (moved to `validation/`)
@@ -212,6 +214,16 @@ branches.
   ratio (`conductance_ratio`, max/min `|S_f|/|d.n|`, roughly its square). ⚠️ Before 2026-10-26
   `conductance_ratio` returned the spacing ratio (a norm over the per-face scalar area), so a
   "conductance ratio" quoted from it before then is a spacing ratio.
+- **`pressure_strength_skeleton.py` is the static pressure-strength skeleton** behind `p@S<tau>`: from
+  geometry alone (the bound multiple-correction gradient probed with zero boundary values, face
+  conductances, a geometric `V / a_P`), `S_ij = sum_f |d m_f / d p_j|` and the proxy continuity block,
+  the pattern `R2 + S(tau)`, a checked collision-free colouring of it (`_saturation_colouring` on
+  `P^T P`) and `pattern_probe_plan` (reach-3 stored pattern, one column read through the pattern).
+  Run alone it prints colour counts. ⚠️ A proxy: continuity rows only, boundary closures simplified.
+  **`reach_option1_audit.py`** materializes the station assembler's uniform-reach-3 Jacobian at one
+  `reach_folding.py` state and reads every (row field, p) block row by row against it: the largest
+  dropped distance-3 `|J_ij|` over the row's weakest face coupling, and the fold the pattern probe adds,
+  binned by spacing ratio. One state per process.
 
 ## Machine contention and run records
 
