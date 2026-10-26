@@ -204,7 +204,12 @@ branches.
   colouring).
 - **`reach_folding.py` replays one inner solve of either step case per probe arm** (`REACH_FOLDING_CASE`,
   `_STEP`, `_INNER` from a march run with `*_INNER_DUMP_ABOVE=1`; arms `3`, `2`, a field, `A/B` build vs
-  re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`). ⚠️ At most two arms per process on bfs3d (the
+  re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`; any arm `+component`, e.g. `p@drop+schur`, takes
+  that fitted component from a uniform-reach-3 re-fit on the same coarsening, `COMPONENTS` lists them).
+  `REACH_FOLDING_LEADING=cycles=8,pressure_sweeps=4` edits the leading `SimpleSmoothed` for every arm of
+  the process (`dataclasses.replace`; printed in the banner, not by `run_case.sh`), and each arm prints
+  its leading inverse's `|b − A L b|/|b|` against the block it was fitted to and the exact one (how
+  close `L` is to that block's inverse). ⚠️ At most two arms per process on bfs3d (the
   fifth died in LLVM's allocator on 15 GiB). ⚠️ It re-fits at the step's start, which matches the march
   only where the step re-fitted there (every ramp step does); a pitzDaily inner replay ran 4 cycles where
   its march logged 5, likely its post-setback tolerance. `mesh_anisotropy.py` (moved to `validation/`)
