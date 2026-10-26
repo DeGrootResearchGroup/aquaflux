@@ -207,9 +207,14 @@ branches.
   re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`; any arm `+component`, e.g. `p@drop+schur`, takes
   that fitted component from a uniform-reach-3 re-fit on the same coarsening, `COMPONENTS` lists them).
   `REACH_FOLDING_LEADING=cycles=8,pressure_sweeps=4` edits the leading `SimpleSmoothed` for every arm of
-  the process (`dataclasses.replace`; printed in the banner, not by `run_case.sh`), and each arm prints
-  its leading inverse's `|b − A L b|/|b|` against the block it was fitted to and the exact one (how
-  close `L` is to that block's inverse). ⚠️ At most two arms per process on bfs3d (the
+  the process (`dataclasses.replace`; printed in the banner, and `run_case.sh` records every `REACH_` setting), and each arm prints
+  its leading inverse's `|b − A L b|/|b|` against the block it was fitted to and each operator (how
+  close `L` is to that block's inverse). `REACH_FOLDING_OPERATORS=iterate,start,start-drop:p` solves each
+  arm's preconditioner against the march's operator, the exact one at the fit state, or that with the
+  probe's dropped entries removed; `REACH_FOLDING_FIT_AT=iterate` re-fits at the solve's iterate (no lag).
+  `validation/reach_research/dropped_census.py` counts a short probe's dropped entries per row field.
+  ⚠️ A component swap's readout is the largest per-leaf change: one norm over all leaves is ruled by an
+  inverted near-singular diagonal and read 4e-13 for a real change. ⚠️ At most two arms per process on bfs3d (the
   fifth died in LLVM's allocator on 15 GiB). ⚠️ It re-fits at the step's start, which matches the march
   only where the step re-fitted there (every ramp step does); a pitzDaily inner replay ran 4 cycles where
   its march logged 5, likely its post-setback tolerance. `mesh_anisotropy.py` (moved to `validation/`)
