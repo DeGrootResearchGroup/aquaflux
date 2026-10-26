@@ -44,15 +44,18 @@ solver:
   kind: CoupledMarch
   max_steps: 150
   convergence: {kind: Convergence, rtol: 0.0, atol: 1.0e-05}
-  # The field split of the materialized Jacobian, [u, v, w, p] then [k, omega]. Probed at a uniform
-  # reach of three: under this gradient every column carries couplings at distance three, so no column
-  # may be shortened. Re-fitted at the step's own shift (no floor), as on pitzDaily. Probing every column
-  # at reach 2 inside this pattern, as pitzDaily does, halves the probe but loses the march: with the
-  # pivot floor, three perturbed draws per arm took 17 steps every time at reach 3 against 21, 23 and 40
-  # at reach 2, same root (compare.py, BFS3D_COLUMN_REACH and BFS3D_NU_PERTURBATION, 2026-10-25). The
-  # pressure column is the one that matters, because this mesh's cells are stretched: across a thin
-  # cell the cell three faces away can couple more strongly than a face neighbour along its long side,
-  # so the short probe drops pressure couplings as large as ones it keeps (validation/reach_folding.py).
+  # The field split of the materialized Jacobian, [u, v, w, p] then [k, omega]. Re-fitted at the step's
+  # own shift (no floor), as on pitzDaily. The pattern stays at reach three; every column but pressure is
+  # probed at reach two inside it. Under this gradient every column carries couplings at distance three,
+  # but only the pressure column's matter, because this mesh's cells are stretched: across a thin cell the
+  # cell three faces away can couple more strongly than a face neighbour along its long side, so a short
+  # pressure probe drops couplings as large as ones it keeps (validation/reach_folding.py). Probing every
+  # column at reach two, as pitzDaily does, loses the march: with the pivot floor, three perturbed draws
+  # per arm took 17 steps every time at reach 3 against 21, 23 and 40 at reach 2 (2026-10-25). Pressure
+  # alone at reach three keeps the uniform probe's march -- 17 steps on all three draws, 146 restart
+  # cycles against 143, x_r/h 8.361 -- and halves the probe (about 23 s -> 10 s per fit), for a march
+  # 10-18 % shorter (1068-1203 s against 1276-1467 s; compare.py, BFS3D_COLUMN_REACH and
+  # BFS3D_NU_PERTURBATION 0 / +-1e-14, 4-core Linux, jax 0.12.0.1, 2026-10-26).
   preconditioner:
     kind: MaterializedJacobian
     inverse:
@@ -66,7 +69,7 @@ solver:
       # solves and the adjoint's preconditioner kept in double. Same steps, cycles and root as float64,
       # faster (bfs3d march 498 s against 599 s, #732).
       precision: float32
-    probe: {kind: JacobianProbeSpec, stencil_reach: 3}
+    probe: {kind: JacobianProbeSpec, stencil_reach: 3, column_reach: [2, 2, 2, 3, 2, 2]}
     # Near-zero k pivots are fitted at their row's pseudo-time diagonal, sign kept: without it a k pivot
     # near zero makes the float32 split wrong by order one around it and the step's direction rounding-
     # decided (bfs3d 38 -> 21 steps, pitzDaily unchanged at 21; 2026-10-18).

@@ -1489,6 +1489,73 @@
       and there are 183 of them; bfs3d drops them nearly everywhere. Not run: bfs3d on a less graded mesh
       (the causal test), and pitzDaily with a refined, stretched near-wall region.
 
+    - **✅ bfs3d: pressure alone at reach 3 (2026-10-26) — SHIPPED as `column_reach: [2, 2, 2, 3, 2, 2]`.**
+      Three perturbed draws per arm (`BFS3D_NU_PERTURBATION` 0 / +1e-14 / -1e-14), arms alternated in one
+      queue, `validation/bfs3d_openfoam/compare.py` through `run_case.sh`, shipped `case.yaml` otherwise
+      (pivot floor, float32 split, `refresh_on_cycles` 4, 12-station ramp), library as `45a9059` (the runs
+      sat on `bbe8a62`–`45a9059`, which differ in no `aquaflux/` file or case file), 4-core Linux, 15 GiB,
+      jax 0.12.0.1, glibc defaults, one job at a time:
+
+      | arm | steps | restart cycles | march time at step 17 (s), eps 0 / +1e-14 / -1e-14 | re-fit (probe) | final `\|R\|` | `x_r/h` |
+      |---|---|---|---|---|---|---|
+      | uniform reach 3 (`BFS3D_COLUMN_REACH=0`) | 17, 17, 17 | 143 each | 1467 / 1276 / 1277 | 28–35 s (19–24) | 4.77e-06 | 8.361 |
+      | p at 3, the rest at 2 | 17, 17, 17 | 146 each | 1203 / 1068 / 1147 | 18–23 s (9.5–11.6) | 5.71e-06 | 8.361 |
+
+      10–18 % shorter, paired by draw. The draws within an arm gave identical step tables (the pivot
+      floor's doing), so the spread is in seconds, not in path. ⚠️ The first uniform draw (eps 0) ran
+      first in the queue on a cold compilation cache; read its 1467 s against its siblings' ~1277 s. The
+      probe reaches 5 x 39 + 96 = 291 seeds per fit against uniform's 6 x 96 = 576. Logs were in a session
+      scratchpad, not kept.
+
+      The zero-shift adjoint at the end of the last pressure-only draw (`state-00017`, step 16, Euclidean
+      `|R|` 6.87e-05; `zero_shift_adjoint.py`, `77753ef`, same machine, GMRES(30), true relative residual
+      1e-8, preconditioner fitted at zero shift, operator a uniform reach-3 probe):
+
+      | preconditioner probe | forward applies | transposed applies |
+      |---|---|---|
+      | p at 3, the rest at 2 | 331 (7.7e-09) | 373 (8.4e-09) |
+      | uniform reach 3 | 335 (9.3e-09) | 383 (9.3e-09) |
+
+      Fitted at the session's default first-build shift instead (`floor None` arm: `build_beta` unset,
+      so β = 2), both probes stop at 20 restarts at 5–7e-04, still descending: the adjoint wants a
+      zero-shift fit, whichever probe.
+
+    - **WHY A REACH-2 PRESSURE FIT FAILS IN THE MARCH (2026-10-26).** Record:
+      `validation/reach_research/option4_diagnostic.md` (harness `reach_folding.py`, its
+      `REACH_FOLDING_OPERATORS` / `_FIT_AT` / `_LEADING` and `+component` arms; states from a uniform-reach-3
+      bfs3d march on `8dd92e7f`, 17 steps / 143 cycles, and a shipped pitzDaily march, 21 steps / 102).
+      - Stacking leading V-cycles does not approach the block inverse: the stacked map diverges as a
+        stationary iteration for every fit, reach 3 included (`|b − A L b|/|b|` 0.52 at 4 cycles, 4.48 at
+        16; the march's 6 cycles become 16, stagnant, at 2 V-cycles).
+      - At the state it was fitted at, the p-at-2 fit preconditions the exact reach-3 Jacobian as well as
+        the reach-3 fit (bfs3d step 5 inner 2: 3 against 3 cycles at rtol 0.3, 11 against 8 to 1e-5); fitted
+        at the solve's own iterate it is level again (3 / 1.0e-5 against 3 / 9.5e-6).
+      - What fails is the fit applied one or two inner solves after it was made: step 5 inner 2, reach 3
+        3 → 6 cycles, p at 2 3 → 16 stagnant; step 6 inner 1, 3 → 5 against 3 → 6. No lag (step 10 inner
+        0): one cycle. pitzDaily at its matched solve: every fit 4 cycles lagged, 3 unlagged.
+      - Attribution by swapping one fitted component from a reach-3 fit into the lagged p fit, same
+        coarsening: the coarse levels (Galerkin operators, coarse solve, their SIMPLE pieces) restore the
+        reach-3 count at both states (16 → 6, 6 → 5); no finest-level component does (level operator,
+        SIMPLE pieces, Schur diagonal alone, `C` alone, the coupling block). Null control (everything
+        swapped) reproduces reach 3. The two fits' coarse operators differ by 5.3e-2 (largest relative
+        change), their fine ones by 3.7e-3, at the same aggregates; that the dropped couplings take part in
+        a near-cancellation of the pressure rows' Galerkin sums is an inference, not measured.
+      - Leading-smoother screen on the lagged p fit (pressure weight 0.7 / 0.85, `pressure_sweeps` 4,
+        Frobenius off, each at `sweeps` 2 and 4): best 10 cycles (4 x 4 sweeps, ~2x the smoothing work)
+        against the bar of 9 and reach 3's 5–6; damping the pressure sweep makes it worse.
+      - Not run: any march, the adjoint, polyhedral meshes, timing.
+
+    - **A pressure probe coloured for a strength skeleton, `R2 + S(tau)` (2026-10-26).** Record:
+      `validation/reach_research/option1_audit.md` (harnesses `pressure_strength_skeleton.py`,
+      `reach_option1_audit.py`, `reach_folding.py`'s `p@S<tau>` arm; same states and library). The
+      skeleton is geometry only (multiple-correction gradient with zero boundary values, face conductances,
+      a geometric `V / a_P`); p column colours bfs3d 39 (reach 2) / 48 (`S(0.01)`) / 96 (reach 3).
+      Replays with p at `S(0.01)` or `S(0.03)` and the rest at 3: 6 cycles at step 5 inner 2 and 5 at step 6
+      inner 1, as uniform reach 3. The static bar (largest dropped entry over the row's weakest face
+      coupling ≤ ~3τ) passes for the p, k and ω rows and fails for u, v, w, largely through a normalization
+      that is structurally near zero in momentum rows. Not run: the rest at 2 (243 seeds per fit, against
+      the shipped 291), a march, step 15's hard solves.
+
 ### The residual reaching past stencil_reach — the gradient-sweep trap (2026-08-16)
 
       **⚠️ THE OTHER SIDE OF THE SAME TRAP: the RESIDUAL can reach past `stencil_reach`, and then EVERY
