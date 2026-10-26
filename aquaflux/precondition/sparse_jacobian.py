@@ -126,6 +126,11 @@ class ColumnProbePlan:
         Total directional derivatives one materialize costs.
     reach : tuple of int
         The stencil reach each column field is probed at.
+    pattern_reach : int
+        The stencil reach the assembly pattern covers, at least the widest of ``reach``.
+    edges : tuple of np.ndarray or None
+        The interior-face cell graph ``(owner, neighbour)`` the plan was coloured on, shape
+        ``(n_edges,)`` each, when its builder had it (:func:`column_probe_plan` does), else ``None``.
     in_reach : np.ndarray
         Per column field and pattern entry, whether that entry lies within the column's own reach;
         shape ``(n_fields, n_blocks)``. Entries outside it are **forced to zero** rather than read from
@@ -160,6 +165,8 @@ class ColumnProbePlan:
         reach: tuple[int, ...],
         in_reach: np.ndarray | None = None,
         active_rows: np.ndarray | None = None,
+        pattern_reach: int | None = None,
+        edges: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> None:
         self.n_cells = n_cells
         self.n_fields = n_fields
@@ -168,6 +175,8 @@ class ColumnProbePlan:
         self.colour = colour
         self.n_colours = n_colours
         self.reach = reach
+        self.pattern_reach = max(reach) if pattern_reach is None else int(pattern_reach)
+        self.edges = edges
         self.in_reach = (
             np.ones((n_fields, pattern_rows.shape[0]), dtype=bool) if in_reach is None else in_reach
         )
@@ -203,6 +212,74 @@ class ColumnProbePlan:
             (colouring.n_colours,) * n_fields,
             (colouring.reach,) * n_fields,
             active_rows=active_rows,
+            pattern_reach=colouring.reach,
+        )
+
+    def with_column_pattern(
+        self, field: int, rows: np.ndarray, cols: np.ndarray
+    ) -> ColumnProbePlan:
+        """This plan with column field ``field`` probed for the cell pattern ``(rows, cols)`` alone.
+
+        The column is given a colouring of its own, collision-free for that pattern
+        (:func:`_pattern_colouring`), and reads only the stored entries the pattern holds; the rest of
+        its stored entries are written as the explicit zeros a short-probed column's out-of-reach
+        entries are. The stored pattern, every other column and the active blocks are unchanged, so a
+        consumer of the materialized matrix sees the same sparsity. It is how a column is probed at a
+        short reach plus a chosen few couplings beyond it, which no single reach describes.
+
+        The column is recovered exactly only where its couplings lie inside the pattern; a coupling
+        outside it is folded onto a pattern entry sharing its colour, as for any short probe.
+
+        Parameters
+        ----------
+        field : int
+            The column field, counted over the per-cell fields.
+        rows, cols : np.ndarray
+            The pattern's cell coordinates ``(i, j)`` (row cell ``i`` couples to column cell ``j``),
+            shape ``(n_entries,)`` each; every pair must be in the stored pattern. Repeats are allowed.
+
+        Returns
+        -------
+        ColumnProbePlan
+            The plan.
+
+        Raises
+        ------
+        ValueError
+            If ``field`` is out of range or a pair lies outside the stored pattern.
+        """
+        if not 0 <= field < self.n_fields:
+            raise ValueError(f"column field {field} is not one of this plan's {self.n_fields}.")
+        n = self.n_cells
+        stored = self.pattern_rows.astype(np.int64) * n + self.pattern_cols
+        wanted = np.unique(np.asarray(rows, dtype=np.int64) * n + np.asarray(cols, dtype=np.int64))
+        in_stored = _members(wanted, np.sort(stored))
+        if not in_stored.all():
+            first = int(wanted[~in_stored][0])
+            raise ValueError(
+                f"the pattern couples cell {first // n} to cell {first % n}, which the stored pattern "
+                "does not hold; a column cannot be probed beyond the pattern it is assembled into."
+            )
+        pattern = sp.csr_matrix((np.ones(wanted.size), (wanted // n, wanted % n)), shape=(n, n))
+        colour, count = _pattern_colouring(pattern, n)
+        colours = np.array(self.colour, copy=True)
+        colours[field] = colour
+        n_colours = list(self.n_colours)
+        n_colours[field] = count
+        in_reach = np.array(self.in_reach, copy=True)
+        in_reach[field] = _members(stored, wanted)
+        return ColumnProbePlan(
+            n,
+            self.n_fields,
+            self.pattern_rows,
+            self.pattern_cols,
+            colours,
+            tuple(n_colours),
+            self.reach,
+            in_reach,
+            active_rows=self.active_rows,
+            pattern_reach=self.pattern_reach,
+            edges=self.edges,
         )
 
     def probe(self, index: int) -> tuple[int, int]:
@@ -373,10 +450,8 @@ def column_probe_plan(
     in_reach = np.empty((len(reaches), flat_pattern.size), dtype=bool)
     for field, r in enumerate(reaches):
         inner = by_reach[r]
-        flat_inner = np.sort(inner.pattern_rows.astype(np.int64) * n + inner.pattern_cols)
-        where = np.searchsorted(flat_inner, flat_pattern)
-        in_reach[field] = (where < flat_inner.size) & (
-            flat_inner[np.minimum(where, flat_inner.size - 1)] == flat_pattern
+        in_reach[field] = _members(
+            flat_pattern, np.sort(inner.pattern_rows.astype(np.int64) * n + inner.pattern_cols)
         )
     return ColumnProbePlan(
         n,
@@ -388,7 +463,17 @@ def column_probe_plan(
         reaches,
         in_reach,
         active_rows=active_rows,
+        pattern_reach=pattern_reach,
+        edges=(np.asarray(owner), np.asarray(nb)),
     )
+
+
+def _members(values: np.ndarray, sorted_set: np.ndarray) -> np.ndarray:
+    """Whether each of ``values`` is in ``sorted_set`` (ascending), as a boolean array like ``values``."""
+    if sorted_set.size == 0:
+        return np.zeros(values.shape, dtype=bool)
+    where = np.searchsorted(sorted_set, values)
+    return sorted_set[np.minimum(where, sorted_set.size - 1)] == values
 
 
 def block_stencil_colouring(
@@ -430,8 +515,16 @@ def block_stencil_colouring(
     require_valid_graph(n, owner, nb, "block_stencil_colouring")
     if reach < 1:
         raise ValueError(f"block_stencil_colouring: reach must be >= 1, got {reach}.")
-    owner, nb = np.asarray(owner), np.asarray(nb)
+    pattern = _stencil_pattern(owner, nb, n, reach)
+    colour, n_colours = _pattern_colouring(pattern, n)
 
+    coo = pattern.tocoo()
+    return BlockColouring(n, reach, colour, n_colours, coo.row, coo.col)
+
+
+def _stencil_pattern(owner: np.ndarray, nb: np.ndarray, n: int, reach: int) -> sp.csr_matrix:
+    """Every cell pair within graph distance ``reach`` on the interior-face graph, as a 0/1 CSR matrix."""
+    owner, nb = np.asarray(owner), np.asarray(nb)
     ones = np.ones(2 * owner.size + n)
     adjacency = sp.coo_matrix(
         (
@@ -448,14 +541,20 @@ def block_stencil_colouring(
     for _ in range(reach - 1):
         pattern = pattern @ adjacency
         pattern.data[:] = 1.0
+    return pattern
+
+
+def _pattern_colouring(pattern: sp.csr_matrix, n: int) -> tuple[np.ndarray, int]:
+    """A collision-free probe colouring of a 0/1 cell pattern (row cells couple to column cells).
+
+    Two column cells may share a colour only if no row cell couples to both, so the conflict graph is
+    ``pattern^T pattern``, coloured by saturation degree (:func:`_saturation_colouring`). Returns the
+    per-cell colour, shape ``(n,)``, and the number of colours.
+    """
     conflict = (pattern.T @ pattern).tocsr()
     conflict.data[:] = 1.0
-
     colour = _saturation_colouring(conflict, n)
-    n_colours = int(colour.max()) + 1 if n else 0
-
-    coo = pattern.tocoo()
-    return BlockColouring(n, reach, colour, n_colours, coo.row, coo.col)
+    return colour, int(colour.max()) + 1 if n else 0
 
 
 _WORD = 64

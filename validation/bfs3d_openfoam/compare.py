@@ -87,7 +87,7 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import Convergence, DualTimeLoop, LinearSolveSettings, MarchLogger, RetryPolicy, StateCheckpointer, combine_observers
-from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, PivotFloor, SimpleSmoothed
+from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, PivotFloor, SimpleSmoothed, StrongCouplings
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
@@ -514,6 +514,24 @@ else:
             f"BFS3D_COLUMN_REACH={_column_reach!r} gives {len(COLUMN_REACH)} reaches; this case has "
             f"six columns [u, v, w, p, k, omega]."
         )
+# `BFS3D_STRONG_COUPLINGS` takes `column:fraction` ("3:0.01"): probe that column at its column_reach plus
+# the couplings beyond it the Jacobian shows, at the first fit, to be at least `fraction` of their row's
+# weakest face coupling. `none` turns it off; unset, the case file's.
+_FILE_COUPLINGS = FILE_SOLVER.preconditioner.probe.strong_couplings
+_strong_couplings = os.environ.get("BFS3D_STRONG_COUPLINGS")
+if _strong_couplings is None:
+    STRONG_COUPLINGS = _FILE_COUPLINGS
+elif _strong_couplings == "none":
+    STRONG_COUPLINGS = None
+else:
+    try:
+        _column, _fraction = _strong_couplings.split(":")
+        STRONG_COUPLINGS = StrongCouplings(column=int(_column), fraction=float(_fraction))
+    except ValueError:
+        raise SystemExit(
+            f"BFS3D_STRONG_COUPLINGS={_strong_couplings!r} is not `column:fraction` (e.g. \"3:0.01\"), "
+            "nor \"none\"."
+        ) from None
 # Split the preconditioner's hierarchy in two -- the [u,v,w,p] saddle and the [k,omega] transported
 # scalars each get their own, with one triangle of the coupling between them retained exactly -- rather
 # than putting all six fields through one hierarchy with one smoother. ON, because it is measured 31%
@@ -785,7 +803,9 @@ PIVOT_FLOOR = (
 PRECONDITIONER = MaterializedJacobian(
     FieldSplit(LEADING_INVERSE, TRAILING_INVERSE, precision=SPLIT_PRECISION),
     probe=JacobianProbeSpec(
-        column_reach=COLUMN_REACH, stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach
+        column_reach=COLUMN_REACH,
+        stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach,
+        strong_couplings=STRONG_COUPLINGS,
     ),
     refit_beta_floor=PC_BETA_FLOOR,
     pivot_floor=PIVOT_FLOOR,
@@ -794,7 +814,7 @@ PRECONDITIONER = MaterializedJacobian(
 #: Where the session sends what the split's blocks produce: the leading hierarchy's build record, and --
 #: under `BFS3D_DUMP_TRAILING_BLOCK` -- every block the trailing inverse is about to consume.
 SESSION_OPTIONS = dict(
-    reports={"leading": _flush_print},
+    reports={"leading": _flush_print, "probe": _flush_print},
     inverse_wrapper=(
         (lambda role, factory: _dumping(factory) if role == "trailing" else factory)
         if DUMP_TRAILING_BLOCK
@@ -1346,6 +1366,12 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         (
             "probe column reach",
             "uniform 3" if COLUMN_REACH is None else "/".join(map(str, COLUMN_REACH)),
+        ),
+        (
+            "probe strong couplings",
+            "off"
+            if STRONG_COUPLINGS is None
+            else f"column {STRONG_COUPLINGS.column}, fraction {STRONG_COUPLINGS.fraction:g}",
         ),
         ("refresh on cycles", REFRESH_ON_CYCLES or "off"),
         ("Reynolds continuation points", N_POINTS),

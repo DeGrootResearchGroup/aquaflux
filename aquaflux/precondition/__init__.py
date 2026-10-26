@@ -56,7 +56,7 @@ from .host_preconditioner import (
 )
 from .jacobian_probe import JacobianProbe, jacobian_probe_plan
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
-from .materialized_session import MaterializedProblem, MaterializedSession
+from .materialized_session import CouplingSelection, MaterializedProblem, MaterializedSession
 from .materialized_spec import (
     MATERIALIZED_MAPPING,
     FieldSplit,
@@ -67,6 +67,7 @@ from .materialized_spec import (
 )
 from .monolithic_policy import MonolithicFactorShiftPolicy
 from .pivot_floor import PivotFloor
+from .strong_couplings import StrongCouplings
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -88,6 +89,7 @@ __all__ = [
     "AirReduction",
     "BlockInverse",
     "ConvectionDiffusionStencil",
+    "CouplingSelection",
     "FieldGroups",
     "FieldSplit",
     "FieldSplitInverse",
@@ -112,6 +114,7 @@ __all__ = [
     "SimpleSmoothed",
     "SimpleSmoothedInverse",
     "SmoothedHierarchy",
+    "StrongCouplings",
     "TracedCycle",
     "air_multigrid_cycles",
     "bordered_preconditioner",

@@ -26,6 +26,7 @@ from aquaflux.precondition import (
     MaterializedJacobian,
     MonolithicFactorShiftPolicy,
     SimpleSmoothed,
+    StrongCouplings,
 )
 from aquaflux.precondition.monolithic_policy import TracedFormShiftPolicy
 from aquaflux.precondition.traced_field_split import contains_host_callback
@@ -824,3 +825,34 @@ def test_a_re_fit_that_fails_after_the_early_release_leaves_the_session_to_fit_a
     rebuilt = session.build(state, dual_time=DualTimeLoop(inner_steps=3))
     r = jax.random.normal(jax.random.PRNGKey(3), (state.shape[0],))
     assert bool(jnp.all(jnp.isfinite(rebuilt.shift_policy.form.apply(r))))
+
+
+def test_a_coupled_session_chooses_its_pressure_pattern_at_the_first_fit_and_re_fits_with_it() -> (
+    None
+):
+    """The selection runs on the coupled residual's own products, the re-fit probes with the pattern it
+    chose rather than the case's short reach, and the ``probe`` report sink is told what it chose."""
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    n_fields = coupled.layout.n_fields
+    pressure = coupled.layout.field_offset("k") - 1  # the flow block's last field
+    lines = []
+    spec = MaterializedJacobian(
+        _SPLIT,
+        probe=JacobianProbeSpec(
+            column_reach=(2,) * n_fields,
+            strong_couplings=StrongCouplings(column=pressure, fraction=0.01),
+        ),
+    )
+    session = open_session(spec, coupled, reports={"probe": lines.append})
+    assert session.coupling_selection is None
+    _first_fit(session, state)
+    selection = session.coupling_selection
+    plan = session._probe.plan
+    assert selection.column == pressure
+    assert selection.reach_colours <= selection.colours == plan.n_colours[pressure]
+    assert selection.probes == plan.n_probes
+    assert session._refresh_hook()._probe is session._probe
+    assert len(lines) == 1 and lines[0].startswith(f"strong couplings: column {pressure} keeps")
+    with pytest.raises(TypeError, match="'leading' / 'trailing' / 'probe'"):
+        open_session(spec, coupled, reports={"bogus": lines.append})

@@ -17,6 +17,7 @@ The coupled RANS solve and the laminar flow solve each supply one.
 from __future__ import annotations
 
 import abc
+import dataclasses
 import time
 from collections.abc import Callable
 from typing import Protocol
@@ -39,7 +40,7 @@ from .monolithic_policy import (
     with_traced_form,
 )
 from .pivot_floor import PivotFloor
-from .sparse_jacobian import FieldwiseMatvec
+from .sparse_jacobian import FieldwiseMatvec, block_stencil_colouring, block_stencil_gather_map
 from .traced_cycle import OffersTracedCycle, TracedForm, TracedSingleBlock
 from .traced_field_split import offers_traced_split, traced_field_split
 
@@ -48,6 +49,7 @@ __all__ = [
     "PROBE_BATCH_SIZE",
     "VCYCLE_LINEAR_SOLVE",
     "BetaTrackingRefresh",
+    "CouplingSelection",
     "FieldwiseResidual",
     "MaterializedProblem",
     "MaterializedSession",
@@ -572,6 +574,31 @@ class BetaTrackingRefresh:
             self._observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
 
 
+@dataclasses.dataclass(frozen=True)
+class CouplingSelection:
+    """What a probe's :class:`~aquaflux.precondition.StrongCouplings` chose at the first fit.
+
+    Attributes
+    ----------
+    column : int
+        The column field.
+    kept : int
+        Cell pairs beyond the column's own reach kept as strong.
+    reach_colours : int
+        Colours the column took at its own reach alone.
+    colours : int
+        Colours it takes for the selected pattern.
+    probes : int
+        Directional derivatives one materialize now costs, every column included.
+    """
+
+    column: int
+    kept: int
+    reach_colours: int
+    colours: int
+    probes: int
+
+
 class MaterializedProblem(abc.ABC):
     """What a :class:`MaterializedSession` needs from a residual, and nothing more.
 
@@ -713,7 +740,8 @@ class MaterializedSession:
         ``(timing: RefreshTiming) -> None``, told what each refresh did and what it cost.
     reports : dict, optional
         Where each field-split block inverse sends its build record, keyed ``"leading"`` /
-        ``"trailing"``.
+        ``"trailing"``, and where a probe's strong-couplings selection is described, keyed
+        ``"probe"`` (:attr:`coupling_selection` holds it too).
     on_build : callable, optional
         ``step -> step``, applied to every step the session builds, for instrumenting a driver.
     precondition_wrapper : callable, optional
@@ -769,6 +797,9 @@ class MaterializedSession:
         self._inverse_wrapper = inverse_wrapper
         self._memory_trim = memory_trim
         self._probe: JacobianProbe | None = None
+        # Whether the strong-couplings column has been re-planned (once, at the first fit), and how.
+        self._couplings_chosen = False
+        self._selection: CouplingSelection | None = None
         self._hook: BetaTrackingRefresh | None = None
         self._preconditioner: object | None = None
         # The traced form of the fitted inverse, or `None` when it is applied on the host; taken once per
@@ -820,6 +851,14 @@ class MaterializedSession:
     def problem(self) -> MaterializedProblem:
         """The residual the session currently serves (it changes on :meth:`rebind`)."""
         return self._problem
+
+    @property
+    def coupling_selection(self) -> CouplingSelection | None:
+        """What the probe's :class:`~aquaflux.precondition.StrongCouplings` chose, once it has.
+
+        ``None`` before the first fit, or for a probe without one.
+        """
+        return self._selection
 
     @property
     def preconditioner(self) -> object | None:
@@ -937,7 +976,7 @@ class MaterializedSession:
     def _probe_for(self) -> JacobianProbe:
         if self._probe is None:
             self._probe = self._problem.probe(
-                self._spec.probe.settings(),
+                self._spec.probe.build_settings(),
                 # A probe feeding a split stores neither the triangle the split never reads nor the whole
                 # matrix: its entries are laid out by the split's blocks.
                 self._problem.groups() if isinstance(self._spec.inverse, FieldSplit) else None,
@@ -989,6 +1028,9 @@ class MaterializedSession:
         probe = self._probe_for()
         probed = probe.narrow(self._problem.assembler)
         frozen = jax.lax.stop_gradient(state)
+        if self._spec.probe.strong_couplings is not None and not self._couplings_chosen:
+            probe = self._probe = self._with_strong_couplings(probe, probed, frozen)
+            self._couplings_chosen = True
         matvec, batched_matvec = _probe_products(probed, frozen, self._by_field)
         build_beta = BUILD_BETA if self._spec.build_beta is None else self._spec.build_beta
         shift = frozen_shift_diagonal(base, build_beta, state)
@@ -1017,6 +1059,76 @@ class MaterializedSession:
             # Held as the traced split applies it, like the blocks' hierarchies.
             stored_precision=self._precision,
             **probing,
+        )
+
+    def _with_strong_couplings(
+        self, probe: JacobianProbe, probed: object, state: jnp.ndarray
+    ) -> JacobianProbe:
+        """``probe`` with the strong-couplings column re-planned from the Jacobian at ``state``.
+
+        The column is probed once at the reach the stored pattern covers, and every fit from here on
+        probes it for the pattern :meth:`StrongCouplings.pattern` keeps. The stored pattern is
+        unchanged, so the gather map is rebuilt only for the new colouring.
+        """
+        couplings = self._spec.probe.strong_couplings
+        layout = self._problem.layout
+        n_fields = layout.n_fields
+        fields = (couplings.column, *couplings.row_fields)
+        if max(fields) >= n_fields:
+            raise ValueError(
+                f"StrongCouplings names field {max(fields)}, and the state has {n_fields} fields."
+            )
+        plan = probe.plan
+        if plan.edges is None:
+            raise ValueError(
+                f"the probe {type(self._problem).__name__} built does not carry its cell graph, so "
+                "StrongCouplings cannot tell a face neighbour from a cell further away; build its plan "
+                "with column_probe_plan."
+            )
+        owner, nb = plan.edges
+        column = couplings.column
+        n = layout.n_cells
+        if self._by_field is not None:
+
+            def products(seeds):
+                return batched_field_jacobian_matvec(
+                    probed, layout, state, column, jnp.asarray(seeds)
+                )
+
+        else:
+            start = layout.field_dofs(column)
+
+            def products(seeds):
+                whole = jnp.zeros((seeds.shape[0], layout.size), dtype=state.dtype)
+                return batched_jacobian_matvec(
+                    probed, state, whole.at[:, start : start + n].set(jnp.asarray(seeds))
+                )
+
+        rows, cols, kept = couplings.pattern(
+            products,
+            {field: layout.field_dofs(field) for field in couplings.row_fields},
+            owner,
+            nb,
+            n,
+            plan.reach[column],
+            block_stencil_colouring(owner, nb, n, plan.pattern_reach),
+            batch=PROBE_BATCH_SIZE,
+        )
+        planned = plan.with_column_pattern(column, rows, cols)
+        self._selection = CouplingSelection(
+            column, kept, plan.n_colours[column], planned.n_colours[column], planned.n_probes
+        )
+        report = self._reports.get("probe")
+        if report is not None:
+            report(
+                f"strong couplings: column {column} keeps {kept} pairs beyond reach "
+                f"{plan.reach[column]}, {plan.n_colours[column]} -> {planned.n_colours[column]} "
+                f"colours, {planned.n_probes} probes per fit"
+            )
+        groups = self._problem.groups() if isinstance(self._spec.inverse, FieldSplit) else None
+        leading = None if groups is None else groups.n_leading_fields
+        return JacobianProbe(
+            planned, block_stencil_gather_map(planned, leading_fields=leading), probe.narrowing
         )
 
     def _block_inverse(self, role: str) -> Callable:

@@ -1556,6 +1556,27 @@
       that is structurally near zero in momentum rows. Not run: the rest at 2 (243 seeds per fit, against
       the shipped 291), a march, step 15's hard solves.
 
+    - **THE REACH-2 RACE (2026-10-26): option 1's pattern probe ties the shipped march and is ~5 % faster;
+      the re-fit proxy loses.** Three perturbed draws per arm (`BFS3D_NU_PERTURBATION` 0 / +1e-14 /
+      -1e-14), arms interleaved within each draw, one march at a time through `run_case.sh`, `7710ec4d`
+      (main `1eb68b48` plus the harness), shipped `case.yaml` otherwise (pivot floor, float32 split,
+      12-station ramp), 4-core Linux, 15 GiB, jax 0.12.0.1, glibc defaults:
+
+      | arm | steps | restart cycles | march time at the last step (s) | probe per fit | result |
+      |---|---|---|---|---|---|
+      | shipped `[2, 2, 2, 3, 2, 2]`, `refresh_on_cycles` 4 | 17 / 17 / 17 | 146 each | 994 / 927 / 904 | 8.7 s (291 seeds) | all converged |
+      | every column at 2, `refresh_on_cycles` 2 | 50 / 37 / 40 | 308 / 168 / 285 | 2422 / 1370 / 1950 | — (234 seeds) | all converged |
+      | every column at 2, `refresh_on_cycles` 3 | 35 / 25 / 51 | 227 / 173 / 429 | 1741 / 1318 / 2567 | — (234 seeds) | draw 0 failed (NaN at step 35) |
+      | p for `R2 + S(0.01)`, the rest at 2 (`pattern_probe_march.py`) | 17 / 17 / 17 | 144 each | 874 / 881 / 854 | 7.4 s (243 seeds) | all converged |
+
+      Every converged draw reached `x_r/h` 8.361. Paired by draw the pattern probe saves 12 / 5 / 6 %;
+      the first shipped draw ran first in the queue and likely paid compilation, so ~5 % is the fair
+      reading. The re-fit arms are a PROXY for re-fitting inside the inner loop, which the traced inner
+      loop cannot do without a library change: `refresh_on_cycles` ends the outer step to re-fit, so it
+      also re-anchors the pseudo-time step, and that, not the fit, may be what costs it. The true in-loop
+      re-fit is unmeasured. Not measured for the pattern arm: the zero-shift adjoint, other cases.
+      Logs were in a session scratchpad, not kept.
+
 ### The residual reaching past stencil_reach — the gradient-sweep trap (2026-08-16)
 
       **⚠️ THE OTHER SIDE OF THE SAME TRAP: the RESIDUAL can reach past `stencil_reach`, and then EVERY

@@ -88,12 +88,16 @@ USER_CONFIGURES = frozenset(
         "MonolithicFactorShiftPolicy",
         "MonotoneLineSearch",
         "RelaxedFarFromRoot",
+        # A probe setting a case file names by kind, read through the materialized spec's mapping.
+        "StrongCouplings",
         "SwitchedEvolutionRelaxation",
     }
 )
 USER_CALLS = frozenset(
     {
         # Functions a user calls, and what public drivers hand back.
+        # What a session's `coupling_selection` hands back after its first fit.
+        "CouplingSelection",
         "MarchResult",
         "RampWalk",
         # A shift control's carried state, as `MarchResult.control_state` hands it back, and its field.

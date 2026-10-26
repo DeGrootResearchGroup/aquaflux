@@ -22,6 +22,7 @@ from typing import ClassVar, Literal
 from ..solve import SettingsMapping, SettingsValue
 from .block_inverse import AirReduction, BlockInverse, JacobiSmoothed, SimpleSmoothed
 from .pivot_floor import PivotFloor
+from .strong_couplings import StrongCouplings
 
 __all__ = [
     "MATERIALIZED_MAPPING",
@@ -37,9 +38,10 @@ __all__ = [
 class JacobianProbeSpec(SettingsValue):
     """How a coupled Jacobian is materialized by coloured directional-derivative probing.
 
-    Each field is the keyword of the same name on :meth:`~aquaflux.precondition.JacobianProbe.build`
-    (see it for the meaning and default of each). Two settings of that builder are deliberately not
-    here: which field-pair blocks to skip follows from the inverse (a field split never reads one
+    Each field but ``strong_couplings`` is the keyword of the same name on
+    :meth:`~aquaflux.precondition.JacobianProbe.build` (see it for the meaning and default of each);
+    ``strong_couplings`` is applied by the session, which chooses that column's pattern at its first
+    fit. Two settings of that builder are deliberately not here: which field-pair blocks to skip follows from the inverse (a field split never reads one
     triangle), and whether the production viscosity is frozen follows from the operator the march
     differentiates -- neither is a free choice about the probe.
 
@@ -53,21 +55,46 @@ class JacobianProbeSpec(SettingsValue):
         case file is the same value as one given in code.
     gradient_sweeps : int or None
         Probe a copy of the residual whose corrected-gradient solve is capped at this many sweeps.
+    strong_couplings : StrongCouplings or None
+        Probe one column at its ``column_reach`` plus the couplings beyond it that the Jacobian shows,
+        at the first fit, to be strong (:class:`~aquaflux.precondition.StrongCouplings`). It needs
+        ``column_reach`` to give that column a reach shorter than ``stencil_reach``. ``None`` (default)
+        probes every column at its reach alone.
     """
 
     stencil_reach: int | None = None
     column_reach: tuple[int, ...] | None = None
     gradient_sweeps: int | None = None
+    strong_couplings: StrongCouplings | None = None
 
     #: The settings for which unset means the feature is off (read by the case-file schema).
     unset_means_off: ClassVar[tuple[str, ...]] = (
         "column_reach",
         "gradient_sweeps",
+        "strong_couplings",
     )
 
     def __post_init__(self) -> None:
         if self.column_reach is not None:
             object.__setattr__(self, "column_reach", tuple(int(r) for r in self.column_reach))
+        if self.strong_couplings is not None:
+            if not isinstance(self.strong_couplings, StrongCouplings):
+                raise TypeError(
+                    "JacobianProbeSpec.strong_couplings must be a StrongCouplings, got "
+                    f"{type(self.strong_couplings).__name__}."
+                )
+            if self.column_reach is None:
+                raise ValueError(
+                    "JacobianProbeSpec.strong_couplings selects couplings beyond its column's own "
+                    "reach, and with column_reach unset every column is probed at stencil_reach, so "
+                    "there is nothing beyond it. Give the column a shorter reach in column_reach."
+                )
+
+    def build_settings(self) -> dict:
+        """The set fields :meth:`~aquaflux.precondition.JacobianProbe.build` takes: all but ``strong_couplings``."""
+        settings = self.settings()
+        settings.pop("strong_couplings", None)
+        return settings
 
 
 #: The precisions a field split can be applied in (:attr:`FieldSplit.precision`).
@@ -206,6 +233,7 @@ MATERIALIZED_MAPPING = SettingsMapping(
         MaterializedJacobian,
         FieldSplit,
         JacobianProbeSpec,
+        StrongCouplings,
         PivotFloor,
         SimpleSmoothed,
         JacobiSmoothed,
