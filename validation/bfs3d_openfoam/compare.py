@@ -470,12 +470,13 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # 11 cycles to 8.474e-11 without. So they are pruned before the factorization sees them, which puts the
 # pressure column back in the configuration that diverges this case.
 #
-# Hence p stays at reach three. Only k and omega are shortened, and that split follows the SPLIT
-# PRECONDITIONER rather than the schemes: with the flow block leading, the field split applies
-# `d R_turb / d flow` and never `d R_flow / d turb`, so the turbulence COLUMNS are read only by the
-# turbulence ROWS -- whose hierarchy is smoothed by a per-cell block inverse that sees a cell's own 2x2
-# block and nothing else. Corruption confined to those columns cannot reach the saddle. The p column has
-# no such shelter: it feeds the [u, v, w, p] block, whose smoother is an incomplete LU.
+# Hence p stays at reach three. Under the multiple-correction gradient this case now runs, every column
+# reaches three, and the case file probes all but p at two. What decides it is no longer the
+# factorization (the leading smoother is a smoothed SIMPLE sweep, the pattern keeps reach three) but
+# the mesh: on this case's stretched cells the pressure column's distance-three couplings are as large
+# as the face couplings it keeps, and dropping them stalls the harder inner solves; the other columns'
+# far couplings are small enough to drop (validation/reach_folding.py, and the case file's comment
+# beside the probe).
 #
 # What shortening k and omega costs, measured: nothing at the shift the march runs at (every arm ties at
 # 4 restart cycles and 1.435e-13 at a step-initial state, preconditioner floored), and a factor of two at

@@ -90,7 +90,7 @@ solver:
     # this reach-3 pattern 123, and in a reach-4 pattern 121 -- the reach-4 pattern makes every refit's
     # refactor dearer and was ~10 % slower overall. The probe drops 4.3-5.8 s -> 2.5-3.4 s per refit.
     # It holds because this mesh's cells are nearly square (1.5 % stretched beyond 10:1): on a stretched
-    # cell the dropped pressure couplings can be as large as kept ones, which is why bfs3d keeps reach 3.
+    # cell the dropped pressure couplings can be as large as kept ones, which is why bfs3d probes p at 3.
     # Re-measure before refining the near-wall grading (validation/reach_folding.py).
     probe: {kind: JacobianProbeSpec, stencil_reach: 3, column_reach: [2, 2, 2, 2, 2]}
     # Near-zero k pivots are fitted at their row's pseudo-time diagonal, sign kept: without it a k pivot

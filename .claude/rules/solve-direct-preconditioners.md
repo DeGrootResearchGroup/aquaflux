@@ -224,12 +224,14 @@ bare block inverse).
 - **Probe colouring reach is a per-case choice, set by measurement; the pattern stays at reach 3.**
   pitzDaily probes every column at reach 2 inside a reach-3 pattern (`column_reach: [2, 2, 2, 2, 2]`,
   2026-10-14: same 18 steps / 123 cycles / `x_r/h` 8.0686, probe per refit 4.3–5.8 → 2.5–3.4 s; at zero
-  shift 7 % more forward applies, none transposed). bfs3d keeps uniform reach 3: with the pivot floor,
-  three perturbed draws per arm (`BFS3D_NU_PERTURBATION` 0 / ±1e-14, shipped `case.yaml`, `fc802f5`,
-  4-core Linux, jax 0.12.0.1, 2026-10-25), uniform reach 3 took 17 steps / 147 cycles every draw
-  (1519–1632 s) and the reach-2 colouring 21 / 23 / 40 steps, 194–384 cycles (1957–3870 s), all to
-  `x_r/h` 8.3611. The probe halves (~18.5 → ~8.6 s per fit), the march does not pay it back. Table:
-  log, "Probe colouring reach 2 — pitzDaily and bfs3d".
+  shift 7 % more forward applies, none transposed). bfs3d probes pressure at reach 3 and every other
+  column at 2 (`column_reach: [2, 2, 2, 3, 2, 2]`, since 2026-10-26): three perturbed draws per arm
+  (`BFS3D_NU_PERTURBATION` 0 / ±1e-14, pivot floor, 4-core Linux, jax 0.12.0.1, `45a9059`) gave 17 steps
+  / 146 cycles every draw against uniform reach 3's 17 / 143, probe ~23 → ~10 s per fit, march
+  1068–1203 s against 1276–1467 s (10–18 % shorter), all to `x_r/h` 8.361. Every column at reach 2 took
+  21 / 23 / 40 steps, 194–384 cycles (2026-10-25). Tables: log, "Probe colouring reach 2 — pitzDaily and
+  bfs3d" and "bfs3d: pressure alone at reach 3". ⚠️ Not yet measured under it: the adjoint (zero-shift)
+  solve.
 
   The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
   cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor
@@ -250,8 +252,11 @@ bare block inverse).
   at 2 reproduces bfs3d's failure, which is a stagnant solve at the harder inner iterates, not a slower
   one; the drop alone stagnates it, the fold alone does not, and neither the coarsening nor float32 is
   involved. A block-norm measure of the fold (bfs3d 2x pitzDaily) cannot predict this. Re-measure on
-  any case with strongly graded cells before shortening p. Untested: shortening only bfs3d's k, omega
-  or velocity columns (each alone left the solves unchanged at step 5 and 10). pitzDaily arms and the
+  any case with strongly graded cells before shortening p. Why a short pressure probe fails only
+  in the march: a fit made from it is as good as reach 3's at the state it was fitted at, but loses
+  heavily one or two inner solves later, and the part that loses is its coarse levels (Galerkin sums
+  over pressure rows that nearly cancel), not the fine smoother; no fine-level smoother setting rescues
+  it (log, "Why a reach-2 pressure fit fails in the march"; `validation/reach_research/`). pitzDaily arms and the
   reach-4 pattern: log, "Probe colouring reach 2 — pitzDaily and bfs3d"; the aspect-ratio measurements:
   same section, "WHY bfs3d NEEDS REACH 3".
 - **Keep the materialized pattern at reach 3 even where a column is probed shorter.** A reach-2 pattern

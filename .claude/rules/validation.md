@@ -195,13 +195,13 @@ branches.
   or read it as a spread over perturbed residuals.
 - **A per-column probe reach is licensed by the gradient scheme, the split AND the mesh's cell aspect
   ratio; re-audit it when any changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships
-  `MultipleCorrectionGradient` at a uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond
-  reach 2, and a reach-2 colouring cost it 17 → 21–40 steps over three perturbed draws per arm with the
-  pivot floor (2026-10-25, `BFS3D_NU_PERTURBATION`; uniform reach 3 gave 17 steps on every draw).
-  pitzDaily deliberately probes every column at reach 2 inside its reach-3 pattern: its march is
-  unchanged and the probe 40 % cheaper (2026-10-14). The difference is the pressure column on stretched
-  cells (spacing ratio above 10:1: bfs3d 41 %, pitzDaily 1.5 %; `solve-direct-preconditioners.md`, probe
-  colouring).
+  `MultipleCorrectionGradient` with the pressure column at reach 3 and every other at 2 inside a reach-3
+  pattern (`column_reach: [2, 2, 2, 3, 2, 2]`, 2026-10-26): with the pivot floor, three perturbed draws
+  per arm (`BFS3D_NU_PERTURBATION` 0 / ±1e-14) gave 17 steps on every draw both uniform and pressure-only,
+  and a reach-2 colouring of every column 21–40 (2026-10-25). pitzDaily probes every column at reach 2:
+  its march is unchanged and the probe 40 % cheaper (2026-10-14). The difference is the pressure column
+  on stretched cells (spacing ratio above 10:1: bfs3d 41 %, pitzDaily 1.5 %; `solve-direct-preconditioners.md`,
+  probe colouring).
 - **`reach_folding.py` replays one inner solve of either step case per probe arm** (`REACH_FOLDING_CASE`,
   `_STEP`, `_INNER` from a march run with `*_INNER_DUMP_ABOVE=1`; arms `3`, `2`, a field, `A/B` build vs
   re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`, `p@S<tau>` (p coloured for `R2 + S(tau)`, the rest at 3, the probe built in the harness and

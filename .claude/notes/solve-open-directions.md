@@ -1012,6 +1012,23 @@ identical step table. The kernel bound that motivated it (`validation/spmv_kerne
 the measurements: `solve-amg-multigrid-log.md`, "The fused level product (2026-10-25)". Still unmeasured: the
 Mac, where Numba's pip wheels usually offer only the `workqueue` layer, which keeps XLA's form.
 
+## 16. A cheaper pressure probe on stretched meshes (bfs3d, 2026-10-26)
+
+bfs3d ships pressure at reach 3, the rest at 2 (291 seeds per fit, ~10 s probe; uniform reach 3 was 576,
+~23 s). A reach-2 pressure probe (234 seeds) fails because its fit's COARSE levels go stale fast across
+the inner loop (`solve-refuted-directions.md`, the 2026-10-26 entry). Three unmeasured ways to keep
+the reach-2 probe or something near it, each to be judged on perturbed bfs3d marches against the shipped
+probe on wall clock, and on the zero-shift adjoint:
+- **a. Re-fit inside the inner loop at reach 2.** The failure needs the lag; fitted at the iterate the
+  reach-2 fit matched reach 3 at both states measured. Cost: more re-fits at the cheaper probe.
+- **b. Exact coarse operators.** Form the coarse Galerkin operators from exact products `Pᵀ (J P)`
+  through the frozen aggregates (one colour per aggregate-level column), keeping the fine level from the
+  reach-2 probe. The only direction aimed at the component that fails; cost unknown, most new code.
+- **c. A pressure colouring for `R2 + S(tau)`** (a static strength skeleton, geometry only): 48 colours
+  against reach 3's 96, so 243 seeds with the rest at 2. Replays with the rest at 3 matched uniform reach
+  3; the target with the rest at 2 is unreplayed, and its saving over the shipped 291 is small.
+Records: `validation/reach_research/option4_diagnostic.md`, `option1_audit.md`.
+
 ## Smaller housekeeping
 
 - **Compile on the critical path — CLOSED (2026-10-10), nothing station-specific to overlap.** See the

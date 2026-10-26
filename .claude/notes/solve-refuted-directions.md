@@ -1877,3 +1877,18 @@ reproduce the step.
 an account of why the Arnoldi decode is hoisted (XLA's pass order or its size rule) that predicts a
 construct which shares it.
 
+## Rescuing a reach-2 pressure probe on bfs3d through the fine-level smoother, or by stacking leading V-cycles — REFUTED (2026-10-26)
+
+bfs3d step 5 inner 2 (and step 6 inner 1), a uniform-reach-3 march's states on `8dd92e7f`, shipped
+float32 split and pivot floor, the fit made at the step's start as the march makes it. A preconditioner
+fitted with the pressure column probed at reach 2 stagnates there (16 cycles, row-scaled 2.48) where
+reach 3 takes 6. **Smoother settings do not rescue it**: pressure smoother weight 0.7 / 0.85,
+`pressure_sweeps` 4, Frobenius off, each at `sweeps` 2 and 4 — best 10 cycles at ~2x the smoothing work,
+and damping the pressure sweep makes it worse. **Swapping any finest-level component from a reach-3 fit
+does not either** (level operator, SIMPLE pieces, Schur diagonal, `C`, the coupling); swapping the
+coarse levels alone does (16 → 6). **Stacking leading V-cycles diverges** for every fit, reach 3
+included (2 V-cycles: 6 → 16 stagnant), so "raise the cycles until the leading inverse is exact" is not
+available. The failure needs the lag between fit and iterate: fitted at the iterate, the reach-2 fit
+matches reach 3. What is left open is in `solve-open-directions.md`, entry 16. Detail:
+`validation/reach_research/option4_diagnostic.md`; log `solve-direct-preconditioners-log.md`, "WHY A
+REACH-2 PRESSURE FIT FAILS IN THE MARCH".
