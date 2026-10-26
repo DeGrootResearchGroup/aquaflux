@@ -1103,6 +1103,40 @@ defaults; one run per arm, back to back; peak sampled every 20 s.
 - **Without the floor the ranking was 5 < 4 < 3 (failed)**; with it, 4 < 3 < 5. The unfloored ranking was
   rounding's, as PR #766's diagnosis predicts.
 
+### A week of memory and time work, paired on one machine (2026-10-25/26)
+
+`main` `1290aa11` (2026-10-19 evening: #763's peak cut and #768's cadence 4 in, nothing from #780 on)
+against `main` `af118f90` (#832), back to back on one container. **4-core Intel Xeon @ 2.80 GHz** (not
+the 2.1 GHz of the entries above), 15 GiB, no swap, glibc 2.39 defaults, THP `madvise`; jax 0.12.0.1,
+numpy 2.5.4, scipy 1.18.1, numba 0.68.0, Python 3.13.17; one venv per checkout. Shipped `case.yaml`
+(identical at both commits), `validation/run_case.sh validation/bfs3d_openfoam/compare.py --wait`, no
+OpenFOAM fields (comparison skipped), a cold compilation cache of its own per arm
+(`AQUAFLUX_COMPILATION_CACHE_DIR`), nothing else running. Memory: `/proc/<pid>/status` `VmHWM`/`VmRSS`
+and `/proc/<pid>/stat` minor faults and CPU time of the case process, every 15 s. One run per arm.
+
+| | `1290aa11` | `af118f90` | change |
+|---|---|---|---|
+| peak `VmHWM` | 8.81 GiB | **4.43 GiB** | −50 % |
+| coupled solve | 2112 s | **1417 s** | −33 % |
+| steps 2–17 (step 1 is 364 s in both: compilation) | 1722 s | 1022 s | −41 % |
+| re-fits (13 full + 1 cost in both) | 825 s (58.9 s each) | 440 s (31.4 s each) | −47 % |
+| probe over the march | 628 s | 294 s | −53 % |
+| refactor over the march | 196 s | 142 s | −28 % |
+| steps without their re-fit | 1261 s | 946 s | −25 % |
+| minor faults / CPU time | 245 M / 4466 s | 124 M / 3263 s | −50 % / −27 % |
+| steps / cycles / final `R` / `x_r/h` | 17 / 143 / 4.61e-06 / 8.361 | 17 / 143 / 4.77e-06 / 8.361 | |
+
+- **The paths are the same class, so the columns are cost**: equal steps, cycles, re-fits and root; final
+  `R` differs in the second digit (rounding).
+- **The new peak arrives early and holds**: 4.43 GiB by step 5 (~570 s) and flat after; the old march
+  was at 8.5 GiB by step 4 and crept to 8.81 GiB during step 16 (~2025 s).
+- **Attribution is by phase, not by PR**: the probe's halving is consistent with #780's per-field programs
+  and the device fits (#804–#808); the steps outside the re-fit with the padded-row products (#832, #834).
+  No arm isolates a single PR.
+- **Do not set these seconds beside the 2026-10-19 entry's** (1526 s, 8.46 GiB: #763's branch head
+  `6161f715`, warm-ish cache, 2.1 GHz). The same week-old code took 2112 s here on a faster clock, cold
+  cache; the difference is not explained. The peaks agree within 4 %. Logs not kept in the repository.
+
 ## `sozzi_radiation/adaptive_grid.py`: the adaptive octree against uniform grids (2026-10-16, #726)
 
 Linux x86_64, 4 cores, jax 0.11.2, Python 3.13.16; lamp 25,876 facets (chord 5e-5, facet 4 mm), 35.417 W;
