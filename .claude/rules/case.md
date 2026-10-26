@@ -301,7 +301,9 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 - **Provenance**: the output's `case.yaml` is the spec as it ran (`solver_for(spec)` written out, every path
   re-based by `relocated`, `outputs.directory` `"."`); `run.yaml` records case path, version, commit and
   dirty flag, times, solver kind, convergence, steps, last residual, message, what was written, `initial`,
-  and for radiation `results`.
+  for radiation `results`, and `padded_products` (`precondition.padded_product_path()`: the form this
+  process's padded-row products took, fused or gathered, and why; absent when the run formed none), which
+  the log also states after the solve. It is decided at the first product, so it cannot head the log.
 - ⚠️ The two-cell slab fixture leaves the default `MultipleCorrectionGradient` underdetermined — tests on it
   state `CompactGreenGauss`.
 

@@ -48,6 +48,15 @@ transport and stiff coupling require double precision. This is global JAX state:
 other JAX code in the same process will use float64 afterward.
 ```
 
+```{note}
+On macOS, the threaded loop that runs the preconditioner's sparse products on the
+CPU needs the OpenMP runtime, which Numba's macOS wheel does not include. Without
+it aquaflux runs XLA's own form of those products, which is correct but slower on
+wide operators. To enable the loop: `brew install libomp && brew link --force libomp`
+(or use a conda environment, whose Numba brings its own). A run's `run.yaml`
+records which form it took under `padded_products`.
+```
+
 ## The mesh
 
 Everything the solver does is assembled over a {class}`~aquaflux.mesh.Mesh`: a
