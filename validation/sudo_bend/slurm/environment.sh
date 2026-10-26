@@ -10,6 +10,10 @@ fi
 # shellcheck disable=SC1091
 source "${SUDO_VENV:-$HOME/venvs/aquaflux}/bin/activate"
 
+# The jobs ask for no GPU; an environment with JAX's CUDA plugin would otherwise probe for one and
+# print a traceback (CUDA_ERROR_NO_DEVICE) before falling back to the CPU.
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
+
 # Numba and the BLAS libraries size their pools by the node's cores, not the job's, unless told.
 threads="${SLURM_CPUS_PER_TASK:-1}"
 export OMP_NUM_THREADS="$threads" OPENBLAS_NUM_THREADS="$threads" MKL_NUM_THREADS="$threads"

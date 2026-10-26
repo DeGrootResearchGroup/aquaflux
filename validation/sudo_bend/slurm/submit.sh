@@ -36,7 +36,7 @@ mkdir -p "$logs"
 # The jobs' environment must run aquaflux's command line (its own dependencies, not only the
 # source): a broken install fails here, before any job queues, rather than minutes into each one.
 python="${SUDO_VENV:-$HOME/venvs/aquaflux}/bin/python"
-(cd "$root" && "$python" -m aquaflux --help >/dev/null) || {
+(cd "$root" && JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" "$python" -m aquaflux --help >/dev/null) || {
   echo "$python cannot run aquaflux; in that environment: pip install -e \"$root\"" >&2; exit 2; }
 
 ids=()
