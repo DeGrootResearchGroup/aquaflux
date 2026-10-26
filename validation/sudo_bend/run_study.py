@@ -24,11 +24,16 @@ Settings (environment):
 * ``SUDO_GRIDS`` -- the grids, comma-separated (default all three, coarse to fine);
 * ``SUDO_REDO`` -- ``1`` to redo steps whose output is already there (default ``0``);
 * ``SUDO_FORCE`` -- ``1`` to start a bend whose memory estimate exceeds what is available
-  (default ``0``).
+  (default ``0``);
+* ``SUDO_GCI`` -- ``0`` to leave the GCI to someone else, as a batch job per grid does (default
+  ``1``: run it once all three bends have converged).
+
+On a cluster, ``slurm/submit.sh`` submits one job per grid and a GCI job after them.
 
 The bend's march holds its whole materialized Jacobian: about 10.5 GB on ``round36``, and an
 estimated 20 GB on ``round48`` and 45 GB on ``round64`` (about 200 KB a cell). Before each bend the
-script prints that estimate beside the machine's available memory, and refuses a bend whose estimate
+script prints that estimate beside the memory available to it (a batch job's or a container's
+limit where one applies), and refuses a bend whose estimate
 exceeds it -- one swapping or killed half-way costs more than not starting -- unless ``SUDO_FORCE=1``
 (the estimate is scaled from the coarse grid, not measured on the others).
 """
@@ -59,11 +64,50 @@ def _say(message: str) -> None:
 
 
 def _available_gib() -> float:
+    """The memory this process may still take: the machine's available memory, or less where a
+    control group (a Slurm job's ``--mem``, a container's limit) caps the process's group.
+
+    The cap is the tightest limit from the process's own group up to the root, less what that
+    group already uses; cgroup v2 (``memory.max``) and v1 (``memory.limit_in_bytes``) alike.
+    """
     with open("/proc/meminfo") as meminfo:
-        for line in meminfo:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) / 2**20
-    return float("nan")
+        available = next(
+            int(line.split()[1]) * 1024 for line in meminfo if line.startswith("MemAvailable:")
+        )
+    for limit, usage in _cgroup_limits():
+        available = min(available, max(limit - usage, 0))
+    return available / 2**30
+
+
+def _cgroup_limits() -> list[tuple[int, int]]:
+    """``(limit, usage)`` in bytes of each memory control group holding this process, up to the root."""
+    try:
+        lines = Path("/proc/self/cgroup").read_text().splitlines()
+    except OSError:
+        return []
+    found = []
+    for line in lines:
+        _, controllers, path = line.split(":", 2)
+        if controllers == "":  # cgroup v2
+            root, limit_file, usage_file = Path("/sys/fs/cgroup"), "memory.max", "memory.current"
+        elif "memory" in controllers.split(","):  # cgroup v1
+            root = Path("/sys/fs/cgroup/memory")
+            limit_file, usage_file = "memory.limit_in_bytes", "memory.usage_in_bytes"
+        else:
+            continue
+        group = root / path.lstrip("/")
+        while True:
+            try:
+                limit = (group / limit_file).read_text().strip()
+                usage = int((group / usage_file).read_text())
+            except (OSError, ValueError):
+                limit = None
+            if limit not in (None, "max") and int(limit) < 2**60:
+                found.append((int(limit), usage))
+            if group == root or root not in group.parents:
+                break
+            group = group.parent
+    return found
 
 
 def _converged(run_yaml: Path) -> bool:
@@ -135,12 +179,13 @@ def main() -> int:
     redo = os.environ.get("SUDO_REDO", "0") == "1"
     force = os.environ.get("SUDO_FORCE", "0") == "1"
     _say(
-        f"grids {grids}; redo {redo}, force {force}; {os.cpu_count()} cores, "
+        f"grids {grids}; redo {redo}, force {force}; {len(os.sched_getaffinity(0))} cores, "
         f"{_available_gib():.1f} GiB available"
     )
     done = {grid: run_grid(grid, redo, force) for grid in grids}
     _say("bends converged: " + ", ".join(f"{g} {'yes' if ok else 'NO'}" for g, ok in done.items()))
-    if all(_converged(GRIDS / g / "work" / "results" / "run.yaml") for g in DEFAULT_GRIDS):
+    gci = os.environ.get("SUDO_GCI", "1") == "1"
+    if gci and all(_converged(GRIDS / g / "work" / "results" / "run.yaml") for g in DEFAULT_GRIDS):
         _say("all three bends converged: the GCI")
         return run_forwarded([sys.executable, "-u", str(HERE / "gci.py")]).returncode
     return 0 if all(done.values()) else 1

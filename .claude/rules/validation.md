@@ -368,6 +368,12 @@ inlet to outlet through the bend (`meshing.md`, "Runs").
   `converged: true`), refusing a bend whose ~200 KB/cell estimate exceeds `MemAvailable`, then `gci.py` once
   all three bends converged. Checked 2026-10-26: skips, the refusal, a real step, and `kill <pid>` leaving
   no child.
+- **On Slurm (the project owner runs on Nibi, 2026-10-26)**: `slurm/submit.sh <account> [grids]` submits a
+  `grid.sbatch` per grid (`SUDO_GCI=0`, per-grid cores/`--mem`/time in the script) and `gci.sbatch` with
+  `--dependency=afterok`; `environment.sh` loads `SUDO_MODULES` (default `python/3.12`), activates
+  `SUDO_VENV` (default `~/venvs/aquaflux`) and sizes the thread pools to `SLURM_CPUS_PER_TASK`.
+  `run_study.py`'s memory check is cgroup-aware (v1 and v2, tightest limit up to the root) so a job's
+  `--mem` is what it sees. Checked against a stand-in `sbatch`; not yet run on Nibi.
 - **The precursors stop at rtol 1e-6** (project owner, 2026-10-23: enough on other cases); 1e-6 came at
   steps 42 / 55 / 72 on the three grids, the fine one at ~140-345 s a step (README).
 - **Memory**: the bend's materialized march held ~10.5 GB of 15 on round36 (≥ 4.3 GB free, 15 steps, 42

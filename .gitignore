@@ -69,3 +69,4 @@ validation/pitzdaily_openfoam/seed_study/
 validation/tubular_reactor/work/
 # The bend's mesh, made from its tracked drawing and mesh file by `aquaflux mesh`.
 validation/sudo_bend/grids/*/work/
+validation/sudo_bend/slurm/logs/

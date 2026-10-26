@@ -190,3 +190,41 @@ and `run_case.sh` forwards a hangup to the case. Starting it inside `tmux` or `s
 all three), `SUDO_REDO=1` (redo steps already done), `SUDO_FORCE=1` (start a bend the memory estimate
 refuses). Measured here: the coarse grid's precursor and bend take 16 and 39 minutes on 4 cores; the
 fine precursor's steps took 2.5 to 6 minutes each on 4 cores.
+
+### On a Slurm cluster
+
+`slurm/submit.sh` submits one job per grid -- each runs `run_study.py` for its grid, its cores,
+memory and time sized to it -- and a GCI job that starts once all three have succeeded
+(`--dependency=afterok`). A job's memory check reads its own `--mem` (the control group Slurm puts it
+in), not the node's free memory. Once, on a login node (a module system such as the Alliance's; on a
+cluster without one, any Python 3.11 to 3.13):
+
+```
+module load python/3.12
+virtualenv --no-download ~/venvs/aquaflux && source ~/venvs/aquaflux/bin/activate
+git clone https://github.com/DeGrootResearchGroup/aquaflux.git && cd aquaflux   # or fetch, if cloned
+git checkout claude/test-case-suggestions-21unai
+pip install -e ".[cad,meshing,ui]"
+```
+
+then, from the repository:
+
+```
+validation/sudo_bend/slurm/submit.sh def-<pi>         # all three grids, then the GCI
+squeue -u $USER
+tail -f validation/sudo_bend/slurm/logs/sudo-*.out
+```
+
+`SUDO_VENV` and `SUDO_MODULES` (in the environment `sbatch` passes on) name another virtual
+environment or other modules. The requested resources are in `submit.sh`:
+
+| grid | cores | memory | time |
+|---|---|---|---|
+| `round36` | 8 | 24 GB | 6 h |
+| `round48` | 12 | 48 GB | 1 day |
+| `round64` | 16 | 96 GB | 3 days |
+
+The memory is the estimate with room to spare; the times are guesses from the coarse grid's runs on
+4 cores, not measured on these grids or this many cores. A grid job that runs out of time resumes
+when resubmitted (`submit.sh def-<pi> round64`): its meshes and converged runs are kept, but a run cut
+off part-way starts again.
