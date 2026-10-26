@@ -85,7 +85,6 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import ClassVar
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -102,7 +101,6 @@ import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition import (  # noqa: E402
     FieldSplit,
-    JacobianProbe,
     materialize_block_jacobian,
 )
 from aquaflux.precondition import sparse_jacobian as sparse_jacobian_module  # noqa: E402
@@ -115,7 +113,6 @@ from aquaflux.precondition.probe_layout import ProbedBlocks  # noqa: E402
 from aquaflux.precondition.sparse_jacobian import (  # noqa: E402
     ColumnProbePlan,
     block_stencil_colouring,
-    block_stencil_gather_map,
     column_probe_plan,
 )
 from aquaflux.solve import ConstantRelaxation, solve_linear  # noqa: E402
@@ -127,14 +124,10 @@ from aquaflux.turbulence import (  # noqa: E402
     scale_both_blocks,
     scale_momentum_only,
 )
-from aquaflux.turbulence.coupled import _CoupledNarrowing, coupled_scaled_norm  # noqa: E402
+from aquaflux.turbulence.coupled import coupled_scaled_norm  # noqa: E402
 from jax.experimental import sparse as jsparse  # noqa: E402
 from mesh_anisotropy import spacing_ratio  # noqa: E402
-from pressure_strength_skeleton import (  # noqa: E402
-    PressureSkeleton,
-    pattern_colouring,
-    pattern_probe_plan,
-)
+from pressure_strength_skeleton import pattern_jacobian_probe  # noqa: E402
 
 LADDER = (1.0, 0.5, 0.25, 0.125, 1 / 32)
 #: The fixed seed of the random right-hand side the leading inverse's own convergence is read on.
@@ -271,47 +264,17 @@ def _parse_arm(token, n_fields, names):
 class PatternProbe:
     """A probe whose column ``field`` is coloured for ``R2 + S(tau)``; every other column at reach 3.
 
-    Built in this harness, never by the library: :meth:`probe` makes the plan from the case mesh's
-    strength skeleton (``pressure_strength_skeleton.py``, built once per process) and the library's
-    colouring, and wraps it in a :class:`JacobianProbe` laid out for ``groups``, with the case's own
-    narrowing. :meth:`StepRebuild.fitted` installs it as the session's probe before the session builds.
+    Built in this harness, never by the library: :meth:`probe` is
+    :func:`pressure_strength_skeleton.pattern_jacobian_probe`. :meth:`StepRebuild.fitted` installs it
+    as the session's probe before the session builds.
     """
-
-    _skeletons: ClassVar[dict] = {}
 
     def __init__(self, field, tau):
         self.field, self.tau = field, tau
 
     def probe(self, coupled, groups, gradient_sweeps, production_viscosity):
-        mesh = coupled.momentum.mesh
-        skeleton = self._skeletons.get(id(mesh))
-        if skeleton is None:
-            skeleton = self._skeletons[id(mesh)] = PressureSkeleton.of(mesh)
-        n, n_fields = coupled.layout.n_cells, coupled.layout.n_fields
-        pattern = skeleton.pattern(self.tau)
-        colour, count = pattern_colouring(pattern)
-        plan = pattern_probe_plan(
-            skeleton.owner,
-            skeleton.nb,
-            n,
-            n_fields,
-            self.field,
-            pattern,
-            colour,
-            count,
-            active_rows=None if groups is None else groups.active_rows(),
-        )
-        print(
-            f"[probe] column {self.field} coloured for R2 + S({self.tau:g}): {count} colours, "
-            f"{plan.n_probes} probes per fit (kept distance-3 entries per row "
-            f"{skeleton.strong_distance_three(self.tau).nnz / n:.2f})",
-            flush=True,
-        )
-        leading = None if groups is None else groups.n_leading_fields
-        return JacobianProbe(
-            plan,
-            block_stencil_gather_map(plan, leading_fields=leading),
-            _CoupledNarrowing(gradient_sweeps, production_viscosity),
+        return pattern_jacobian_probe(
+            coupled, groups, self.field, self.tau, gradient_sweeps, production_viscosity
         )
 
 

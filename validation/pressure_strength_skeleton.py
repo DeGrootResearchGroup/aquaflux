@@ -49,13 +49,17 @@ sys.path.insert(0, str(ROOT / "validation"))
 import aquaflux  # noqa: F401,E402
 import jax  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
+from aquaflux.precondition import JacobianProbe  # noqa: E402
 from aquaflux.precondition.sparse_jacobian import (  # noqa: E402
     ColumnProbePlan,
     _saturation_colouring,
     block_stencil_colouring,
+    block_stencil_gather_map,
+    column_probe_plan,
 )
 from aquaflux.schemes import MultipleCorrectionGradient  # noqa: E402
 from aquaflux.schemes.interpolation import interpolation_factor  # noqa: E402
+from aquaflux.turbulence.coupled import _CoupledNarrowing  # noqa: E402
 from mesh_anisotropy import MESHES, spacing_ratio  # noqa: E402
 
 #: Seeds per batched gradient evaluation when the gradient operator is probed.
@@ -288,12 +292,15 @@ def pattern_colouring(pattern):
     return colour, n_colours
 
 
-def pattern_probe_plan(owner, nb, n, n_fields, field, pattern, colour, n_colours, active_rows=None):
+def pattern_probe_plan(
+    owner, nb, n, n_fields, field, pattern, colour, n_colours, active_rows=None, others_reach=3
+):
     """A reach-3 probe plan in which column ``field`` is probed with ``colour``, reading ``pattern`` only.
 
-    The stored pattern and every other column are the uniform reach-3 plan's. Column ``field`` reads
-    the reach-3 entries that lie in ``pattern`` (which must lie inside reach 3) and writes the rest as
-    explicit zeros, as a short-probed column's out-of-reach entries are.
+    The stored pattern is the uniform reach-3 plan's; every other column is probed as the library's
+    per-column plan probes it at ``others_reach``. Column ``field`` reads the reach-3 entries that lie
+    in ``pattern`` (which must lie inside reach 3) and writes the rest as explicit zeros, as a
+    short-probed column's out-of-reach entries are.
 
     Parameters
     ----------
@@ -311,12 +318,17 @@ def pattern_probe_plan(owner, nb, n, n_fields, field, pattern, colour, n_colours
         Colours that colouring uses.
     active_rows : np.ndarray, optional
         Field-pair blocks to store, shape ``(n_fields, n_fields)``, as in ``ColumnProbePlan``.
+    others_reach : int
+        The reach every other column is probed at, ``2`` or ``3``.
 
     Returns
     -------
     ColumnProbePlan
         The plan.
     """
+    if others_reach not in (2, 3):
+        raise ValueError(f"others_reach={others_reach}: the other columns are probed at 2 or 3")
+    others = column_probe_plan(owner, nb, n, [others_reach] * n_fields, pattern_reach=3)
     wide = block_stencil_colouring(owner, nb, n, 3)
     flat_wide = wide.pattern_rows.astype(np.int64) * n + wide.pattern_cols
     coo = _binary(pattern).tocoo()
@@ -327,13 +339,16 @@ def pattern_probe_plan(owner, nb, n, n_fields, field, pattern, colour, n_colours
     inside = (where < flat_pattern.size) & (
         flat_pattern[np.minimum(where, flat_pattern.size - 1)] == flat_wide
     )
-    in_reach = np.ones((n_fields, flat_wide.size), dtype=bool)
+    # The library plan stores the same reach-3 pattern, in the same order, so its rows line up.
+    assert np.array_equal(others.pattern_rows, wide.pattern_rows)
+    assert np.array_equal(others.pattern_cols, wide.pattern_cols)
+    in_reach = np.array(others.in_reach, copy=True)
     in_reach[field] = inside
-    colours = np.broadcast_to(wide.colour, (n_fields, n)).copy()
+    colours = np.array(others.colour, copy=True)
     colours[field] = colour
-    counts = [wide.n_colours] * n_fields
+    counts = list(others.n_colours)
     counts[field] = n_colours
-    reach = [3] * n_fields
+    reach = list(others.reach)
     reach[field] = 2  # the plan's label only; the entries read are ``in_reach``'s
     return ColumnProbePlan(
         n,
@@ -345,6 +360,52 @@ def pattern_probe_plan(owner, nb, n, n_fields, field, pattern, colour, n_colours
         tuple(reach),
         in_reach,
         active_rows=active_rows,
+    )
+
+
+_SKELETONS: dict = {}
+
+
+def pattern_jacobian_probe(
+    coupled, groups, field, tau, gradient_sweeps, production_viscosity, others_reach=3
+):
+    """A coupled-RANS probe whose column ``field`` is coloured for ``R2 + S(tau)``.
+
+    The plan is :func:`pattern_probe_plan` over the case mesh's skeleton (built once per mesh in this
+    process), the other columns at ``others_reach``; it is wrapped in a :class:`JacobianProbe` laid out
+    for ``groups`` (a field split's, or ``None``), with the coupled residual's own narrowing, so it can
+    stand where a session would have built its probe from the case's settings.
+    """
+    mesh = coupled.momentum.mesh
+    skeleton = _SKELETONS.get(id(mesh))
+    if skeleton is None:
+        skeleton = _SKELETONS[id(mesh)] = PressureSkeleton.of(mesh)
+    n, n_fields = coupled.layout.n_cells, coupled.layout.n_fields
+    pattern = skeleton.pattern(tau)
+    colour, count = pattern_colouring(pattern)
+    plan = pattern_probe_plan(
+        skeleton.owner,
+        skeleton.nb,
+        n,
+        n_fields,
+        field,
+        pattern,
+        colour,
+        count,
+        active_rows=None if groups is None else groups.active_rows(),
+        others_reach=others_reach,
+    )
+    print(
+        f"[probe] column {field} coloured for R2 + S({tau:g}), the rest at {others_reach}: {count} "
+        f"colours, {plan.n_probes} probes per fit (kept distance-3 entries per row "
+        f"{skeleton.strong_distance_three(tau).nnz / n:.2f})",
+        flush=True,
+    )
+    leading = None if groups is None else groups.n_leading_fields
+    return JacobianProbe(
+        plan,
+        block_stencil_gather_map(plan, leading_fields=leading),
+        _CoupledNarrowing(gradient_sweeps, production_viscosity),
     )
 
 
