@@ -1,6 +1,6 @@
 # Option 4, Step 0: can a preconditioner fitted from the reach-2-probed Jacobian work on bfs3d?
 
-Status: in progress (2026-10-26). Measurement record for the project owner; not yet reflected in the
+Status: complete (2026-10-26). Measurement record for the project owner; not yet reflected in the
 rules or notes.
 
 ## The question
@@ -86,19 +86,22 @@ to (on the solve's own right-hand side, and on a seeded random one).
 |---|---|---|---|---|
 | 1 | `3` | 6 | 1.35e-4 | 0.92 / 2.18 |
 | 1 | `p@drop` | 14 | 8.74e-2 | 0.93 / 2.18 |
-| 4 | `3` | **16, stagnant** | 2.77 | 0.52 / 0.90 |
+| 2 | `3` | **16, stagnant** | 2.87 | 0.74 / 1.46 |
+| 2 | `p@drop` | 16, stagnant | 3.13 | 0.75 / 1.46 |
+| 4 | `3` | 16, stagnant | 2.77 | 0.52 / 0.90 |
 | 4 | `p@drop` | 16, stagnant | 2.73 | 0.53 / 0.91 |
+| 16 | `3` | 16, stagnant | 3.24 | **4.48 / 18.4** |
 
 **Reading against the pre-registration: neither H1 nor H2; the sweep cannot be read.** Arm `3`'s count
-does not fall with cycles: four V-cycles break the shipped arm itself (16, stagnant, residual above the
-right-hand side). And the stacked V-cycle is not approaching the inverse of its own fitted block: four
-cycles leave half the right-hand side (0.52), where the H2 reading needed ≤ 1e-3 at sixteen. A likely
-reading (an inference, not measured mode by mode): the one-cycle leading map is a useful preconditioner
-but a poorly contracting stationary iteration, and repeating it spreads the eigenvalues of
-`I − A L` that lie near or outside the unit circle into outliers the outer GMRES cannot absorb. Either
-way, "raise the cycles until `L ≈ J_p⁻¹`" is not available with this smoother, on either arm, and the
-proposal's 0a premise ("at 16 cycles the leading inverse is close to `J_p⁻¹`") does not hold here
-(16 cycles: see the arm-`3` follow-up below).
+does not fall with cycles: two V-cycles already break the shipped arm itself (16, stagnant, residual
+above the right-hand side). And the stacked V-cycle does not approach the inverse of its own fitted
+block: as a stationary iteration it **diverges** — its residual against the block it was fitted to falls
+to 0.52 at four cycles and then grows to 4.48 (18.4 on a random right-hand side) at sixteen, so the
+error propagator `I − L A` has modes growing faster than one per cycle. The one-cycle map is a good
+preconditioner only because GMRES absorbs those modes; repeating it multiplies them into outliers it
+cannot. So "raise the cycles until `L ≈ J_p⁻¹`" is not available with this smoother, on either arm, and
+the proposal's 0a premise ("at 16 cycles the leading inverse is close to `J_p⁻¹`") is false on this
+tree.
 
 ## The question re-posed: which operator does each fit precondition? (step 5, inner 2)
 
@@ -251,4 +254,74 @@ On pitzDaily the lag costs every fit the same one cycle, and the reach-2 fits lo
 the drop does not make its fit lag-sensitive there. (The march logged 5 for this solve, 6 raw, after two inner solves at α
 0.25; the replay's 4 is at rtol 0.3, not the post-setback 0.1, as the earlier record also found.)
 
-(Continued below.)
+## Verdict
+
+**Neither H1 nor H2 as posed. The reach-2 fit is not a bad preconditioner for `J₃`, and its hierarchy
+is not fragile at the state it was fitted at; what fails is a reach-2 fit used one or two inner solves
+after it was made, and the part of it that fails is the coarse levels.**
+
+- 0a, as designed, cannot discriminate: stacking leading V-cycles diverges for every fit, the reach-3
+  one included (2 cycles: 6 → 16 stagnant), so `J_p⁻¹` is not reachable that way.
+- Re-posed (vary the operator and the fit state, not the cycles), at bfs3d step 5 inner 2: the `p` fit
+  (the reach-2 pressure column, drop and fold) preconditions the exact `J₃` at its own fit state as
+  well as the reach-3 fit (3 against 3 cycles at rtol 0.3; 11 against 8 cycles to 1e-5), and fitted at
+  the solve's own iterate it is level with it again (3 / 1.03e-5 against 3 / 9.5e-6). That refutes H2
+  for the fitted preconditioner. It is not H1 either: the hierarchy fitted from `J_p` works at its
+  state. The exact `J_drop⁻¹` was not formed; `J_drop` itself is hard for both fits (both stagnate near
+  0.13 on it), so the fitted hierarchy works *because* it does not follow `J_drop` closely.
+- The march's failure is **lag × reach 2**: a fit made at the step's start and applied to the operator
+  two inner iterates on costs the reach-3 fit 3 → 6 cycles and the reach-2 `p` fit 3 → 16, stagnant
+  (step 5 inner 2); one iterate on, 3 → 5 against 3 → 6 (step 6 inner 1; `p@drop` 4 → 8). With no lag
+  (step 10 inner 0) the drop costs one cycle. pitzDaily, at its matched solve, shows no such
+  interaction (every fit 4 cycles lagged, 3 unlagged).
+- **Attribution: the coarse levels.** Putting the reach-3 fit's coarse levels (Galerkin operators,
+  coarse solve, their SIMPLE pieces) into the lagged `p` fit restores arm `3`'s count at both states
+  (step 5 inner 2: 16 → 6, arm `3` 6; step 6 inner 1: 6 → 5, arm `3` 5). No finest-level component
+  does: not the level operator (16, 1.72), not the SIMPLE pieces or the Schur diagonal alone (16,
+  unchanged — so H1-a is not it), not the coupling block (16, 1.08). The reach-2 fit's coarse
+  operators differ from the reach-3 fit's by 5.3e-2 at the same aggregates against 3.7e-3 on the fine
+  level, which fits the reading that the dropped couplings took part in the cancellation the Galerkin
+  sums rely on.
+- **Settings screen:** no smoother setting rescues the lagged `p` fit (best: 4 sweeps × 4 pressure sweeps,
+  10 cycles against arm `3`'s 5, at ~2x the smoothing work); damping the pressure sweep makes it worse.
+
+**What this means for option 4.** Making the fine-level smoother robust on stretched cells (the P2/P3
+line relaxation and ℓ1-Jacobi/Chebyshev Schur proposals, and the H1-a damping) is aimed at a component
+this attribution clears. The component that carries the failure is the coarse operator a reach-2 probe
+induces: the proposal's **P1** (coarse levels probed exactly through the frozen aggregates) is the one
+direction pointing at it, and the obvious form is to form the coarse Galerkin operators from exact
+products `Pᵀ (J P)` — a probe with one colour per aggregate-level column rather than per fine column,
+whose cost against the reach-3 fine probe is unmeasured. A second, different lever this study exposes:
+the failure needs the lag, so a re-fit inside the inner loop (at reach 2's cheaper probe) also removes
+it at both states measured; whether that pays in wall clock against a reach-3 probe per step is
+unmeasured.
+
+## What this does NOT establish
+
+- Only three bfs3d states (step 5 inner 2, step 6 inner 1, step 10 inner 0) and one pitzDaily state;
+  one replay each (the replays are deterministic, and the step 5 / step 10 replays reproduce the
+  march's counts). No march was run with any change.
+- Why the reach-2 fit is so much more lag-sensitive than the reach-3 one. The coarse attribution says
+  where, not why; the cancellation reading of the 14x coarse-versus-fine difference is an inference.
+  Nor is it separated whether the drop makes the fit sensitive to *any* change of operator or to the
+  particular change across the inner loop.
+- That exact coarse operators would suffice inside a march, or what they would cost. The swap uses the
+  reach-3 fit's coarse levels, i.e. what a reach-3 probe gives.
+- Whether the exact `J_drop⁻¹` (not the fitted hierarchy) would precondition `J₃` badly (H2 in its
+  strict form). Not measured; the fitted preconditioner, which is what a march uses, does not.
+- The proposal's attribution items (1) fine-level products in `mf:` mode and (3) coarse operators against
+  `Pᵀ J₃ P` were realized as swaps from a reach-3 fit (the materialized reach-3 Jacobian, which is the
+  exact one to the reach-3 pattern), not through `compact_jacobian_screen.py`'s `mf:` machinery.
+- The adjoint, polyhedral meshes, other cases, wall clock.
+
+## Reproducing
+
+Harness `validation/reach_folding.py` (this branch): `REACH_FOLDING_ARMS` (`3`, `p`, `p@drop`, and
+`+component` arms), `REACH_FOLDING_LEADING` (`cycles=N`, smoother edits), `REACH_FOLDING_OPERATORS`
+(`iterate`, `start`, `start-drop:p`), `REACH_FOLDING_FIT_AT` (`start`, `iterate`), with
+`REACH_FOLDING_CASE`, `_STEP`, `_INNER`, `_CHECKPOINTS` and `REACH_FOLDING_SKIP_MATRIX=1`, at most two
+arms per process, each process through `validation/run_case.sh validation/reach_folding.py --wait`.
+The study's run-files did not record the `REACH_FOLDING_*` settings (each log's `[configuration]`
+banner does); `run_case.sh` records the `REACH_` prefix from this branch's last commit on.
+The census: `validation/reach_research/dropped_census.py`. The checkpoints are not in the repository;
+recapture them with the two march commands in the configuration section (about 20 and 5 minutes).
