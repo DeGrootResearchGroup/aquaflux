@@ -372,7 +372,8 @@ inlet to outlet through the bend (`meshing.md`, "Runs").
   `grid.sbatch` per grid (`SUDO_GCI=0`, per-grid cores/`--mem`/time in the script) and `gci.sbatch` with
   `--dependency=afterok`; `environment.sh` loads `SUDO_MODULES` (default `python/3.12`), activates
   `SUDO_VENV` (default `~/venvs/aquaflux`) and sizes the thread pools to `SLURM_CPUS_PER_TASK`.
-  `run_study.py`'s memory check is cgroup-aware (v1 and v2, tightest limit up to the root) so a job's
+  `SUDO_WORK_ROOT` moves each grid's `work/` there and links it back (the `.gitignore` entry has no
+  trailing slash so the link is ignored too). `run_study.py`'s memory check is cgroup-aware (v1 and v2, tightest limit up to the root) so a job's
   `--mem` is what it sees. Checked against a stand-in `sbatch`; not yet run on Nibi.
 - **The precursors stop at rtol 1e-6** (project owner, 2026-10-23: enough on other cases); 1e-6 came at
   steps 42 / 55 / 72 on the three grids, the fine one at ~140-345 s a step (README).

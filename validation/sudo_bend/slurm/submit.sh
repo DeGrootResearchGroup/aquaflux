@@ -5,7 +5,11 @@
 #
 # <account> is the allocation to charge (def-<pi>, rrg-<pi>, ...); the grids default to all three.
 # Run from anywhere in the repository; every job runs from its root and writes into the grids'
-# work/ directories, its own output to validation/sudo_bend/slurm/logs/<name>-<job id>.out. A grid job
+# work/ directories, its own output to validation/sudo_bend/slurm/logs/<name>-<job id>.out.
+#
+# SUDO_WORK_ROOT puts the work/ directories on another file system (a cluster's scratch, say):
+# each grid's work/ becomes a link to $SUDO_WORK_ROOT/<grid>, its contents (meshes, finished runs)
+# moved there first. Everything a job writes but its log goes through work/. A grid job
 # that runs out of time resumes when resubmitted: meshes and converged runs are kept, but a run
 # that was cut off starts again from its beginning.
 #
@@ -32,6 +36,19 @@ mkdir -p "$logs"
 ids=()
 for grid in "${grids[@]}"; do
   [ -n "${cores[$grid]-}" ] || { echo "unknown grid $grid (round36, round48, round64)" >&2; exit 2; }
+  if [ -n "${SUDO_WORK_ROOT-}" ]; then
+    work="$root/validation/sudo_bend/grids/$grid/work" target="$SUDO_WORK_ROOT/$grid"
+    mkdir -p "$target"
+    if [ -d "$work" ] && [ ! -L "$work" ]; then
+      # -n: never overwrite what the target already holds; anything left behind stops the move.
+      [ -z "$(ls -A "$work")" ] || mv -n "$work"/* "$target"/
+      rmdir "$work" || { echo "$work: not everything moved to $target; sort it out first" >&2; exit 2; }
+    fi
+    [ -L "$work" ] || ln -s "$target" "$work"
+    [ "$(readlink "$work")" = "$target" ] || {
+      echo "$work links to $(readlink "$work"), not $target" >&2; exit 2; }
+    echo "$grid: work/ -> $target"
+  fi
   id=$(sbatch --parsable --account="$account" --chdir="$root" \
     --job-name="sudo-$grid" --output="$logs/%x-%j.out" \
     --cpus-per-task="${cores[$grid]}" --mem="${memory[$grid]}" --time="${walltime[$grid]}" \

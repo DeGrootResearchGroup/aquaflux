@@ -205,10 +205,16 @@ module load python/3.12
 virtualenv --no-download ~/venvs/aquaflux && source ~/venvs/aquaflux/bin/activate
 git clone https://github.com/DeGrootResearchGroup/aquaflux.git && cd aquaflux   # or fetch, if cloned
 git checkout claude/test-case-suggestions-21unai
-pip install -e ".[cad,meshing,ui]"
+pip install -e .
 ```
 
-then, from the repository:
+The meshing extras (`cad`, `meshing`) are not in the Alliance's wheelhouse, which is all its `pip`
+reads. Either make the meshes elsewhere and copy each grid's `work/*.aqmesh` across (the study skips
+a mesh that is there), or install those two from PyPI on a login node:
+`PIP_NO_INDEX=false pip install --index-url https://pypi.org/simple "cadquery-ocp-novtk==8.0.1.0.0"
+"netgen-mesher==6.2.2608"` (built against other libraries than the cluster's; not tried there).
+
+Then, from the repository:
 
 ```
 validation/sudo_bend/slurm/submit.sh def-<pi>         # all three grids, then the GCI
@@ -217,7 +223,10 @@ tail -f validation/sudo_bend/slurm/logs/sudo-*.out
 ```
 
 `SUDO_VENV` and `SUDO_MODULES` (in the environment `sbatch` passes on) name another virtual
-environment or other modules. The requested resources are in `submit.sh`:
+environment or other modules. `SUDO_WORK_ROOT=$SCRATCH/sudo_bend` puts the runs on scratch:
+`submit.sh` moves each grid's `work/` (meshes and finished runs included) to
+`$SUDO_WORK_ROOT/<grid>` and leaves a link in its place, so the case files are unchanged; only the
+job logs stay in the repository. Scratch is purged of old files, so copy back what you keep. The requested resources are in `submit.sh`:
 
 | grid | cores | memory | time |
 |---|---|---|---|
