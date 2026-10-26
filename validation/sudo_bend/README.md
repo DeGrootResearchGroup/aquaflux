@@ -162,3 +162,29 @@ and 72 (3.1 h) on `round64`; the last was stopped at step 82 (2.4e-7) and wrote 
 The bend's march holds the whole materialized Jacobian: the coarse grid used about 10.5 GB of this
 container's 15, so the medium (about 20 GB) and the fine (about 45 GB) grids are solved on a larger
 machine, from the same files.
+
+## Running the study on another machine
+
+`run_study.py` runs every step for each grid in turn -- the two meshes, the precursor, the bend --
+then `gci.py` once all three bends have converged. A step whose output is already there is skipped
+(a mesh that exists, a run whose `run.yaml` says it converged), so a study that stopped resumes where
+it left off. Each step is a process of its own, its output in the grid's `work/<step>.log`, and one
+line per step goes to the study's log. Before each bend it compares the march's memory, estimated at
+about 200 KB a cell from the coarse grid (18 GiB on `round48`, 41 GiB on `round64`), with what is
+available, and does not start a bend that would not fit unless `SUDO_FORCE=1`.
+
+On a Linux machine with aquaflux checked out:
+
+```
+git fetch origin && git checkout claude/test-case-suggestions-21unai
+pip install -e ".[cad,meshing,ui]"        # the CAD kernel and Netgen for meshing, PyVista for gci.py
+validation/run_case.sh validation/sudo_bend/run_study.py
+tail -f validation/sudo_bend/run-*.log    # one line per step
+```
+
+`run_case.sh` returns at once; the study runs on with the terminal closed. `validation/run_case.sh
+--status` says what is running and since when, and `kill <pid>` (the `pid=` it printed, never `kill
+-9`) stops the study and the step it is on. Settings: `SUDO_GRIDS=round48,round64` (the grids, default
+all three), `SUDO_REDO=1` (redo steps already done), `SUDO_FORCE=1` (start a bend the memory estimate
+refuses). Measured here: the coarse grid's precursor and bend take 16 and 39 minutes on 4 cores; the
+fine precursor's steps took 2.5 to 6 minutes each on 4 cores.

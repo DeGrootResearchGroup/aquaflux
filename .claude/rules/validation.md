@@ -362,6 +362,12 @@ inlet to outlet through the bend (`meshing.md`, "Runs").
   value 0.02 U_b under a 1e-7 m mesh change (degenerate on the graded rows), k-nearest centroids by distance
   all fell in one row's cross-section, and one nearest cell flipped on the axis (0.007 U_b); now two coarse
   solves 0.1 µm apart agree to 1e-7.
+- **`run_study.py` runs the whole study** through `run_case.sh` (`SUDO_GRIDS`, `SUDO_REDO`, `SUDO_FORCE`;
+  `SUDO_` is in `run_case.sh`'s capture line): per grid the two meshes, the precursor and the bend, each a
+  `run_forwarded` child logging to `work/<step>.log`, skipping what is done (an `.aqmesh` there, `run.yaml`
+  `converged: true`), refusing a bend whose ~200 KB/cell estimate exceeds `MemAvailable`, then `gci.py` once
+  all three bends converged. Checked 2026-10-26: skips, the refusal, a real step, and `kill <pid>` leaving
+  no child.
 - **The precursors stop at rtol 1e-6** (project owner, 2026-10-23: enough on other cases); 1e-6 came at
   steps 42 / 55 / 72 on the three grids, the fine one at ~140-345 s a step (README).
 - **Memory**: the bend's materialized march held ~10.5 GB of 15 on round36 (≥ 4.3 GB free, 15 steps, 42
