@@ -230,8 +230,8 @@ bare block inverse).
   / 146 cycles every draw against uniform reach 3's 17 / 143, probe ~23 → ~10 s per fit, march
   1068–1203 s against 1276–1467 s (10–18 % shorter), all to `x_r/h` 8.361. Every column at reach 2 took
   21 / 23 / 40 steps, 194–384 cycles (2026-10-25). Tables: log, "Probe colouring reach 2 — pitzDaily and
-  bfs3d" and "bfs3d: pressure alone at reach 3". ⚠️ Not yet measured under it: the adjoint (zero-shift)
-  solve.
+  bfs3d" and "bfs3d: pressure alone at reach 3". The zero-shift adjoint ties: 331 / 373 applications
+  (forward / transposed) to 1e-8 against uniform's 335 / 383 (`zero_shift_adjoint.py`, `state-00017`).
 
   The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
   cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor

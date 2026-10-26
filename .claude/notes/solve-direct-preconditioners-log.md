@@ -1507,6 +1507,19 @@
       probe reaches 5 x 39 + 96 = 291 seeds per fit against uniform's 6 x 96 = 576. Logs were in a session
       scratchpad, not kept.
 
+      The zero-shift adjoint at the end of the last pressure-only draw (`state-00017`, step 16, Euclidean
+      `|R|` 6.87e-05; `zero_shift_adjoint.py`, `77753ef`, same machine, GMRES(30), true relative residual
+      1e-8, preconditioner fitted at zero shift, operator a uniform reach-3 probe):
+
+      | preconditioner probe | forward applies | transposed applies |
+      |---|---|---|
+      | p at 3, the rest at 2 | 331 (7.7e-09) | 373 (8.4e-09) |
+      | uniform reach 3 | 335 (9.3e-09) | 383 (9.3e-09) |
+
+      Fitted at the session's default first-build shift instead (`floor None` arm: `build_beta` unset,
+      so β = 2), both probes stop at 20 restarts at 5–7e-04, still descending: the adjoint wants a
+      zero-shift fit, whichever probe.
+
     - **WHY A REACH-2 PRESSURE FIT FAILS IN THE MARCH (2026-10-26).** Record:
       `validation/reach_research/option4_diagnostic.md` (harness `reach_folding.py`, its
       `REACH_FOLDING_OPERATORS` / `_FIT_AT` / `_LEADING` and `+component` arms; states from a uniform-reach-3
