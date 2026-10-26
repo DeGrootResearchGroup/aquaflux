@@ -216,7 +216,9 @@ numerics:
 
 # bfs3d's march (validation/bfs3d_openfoam/case.yaml, where each setting's measurement is recorded),
 # unchanged: the field split of the materialized Jacobian, the dual-time loop, the step control and
-# the viscosity ramp from 100 times the fluid's viscosity.
+# the viscosity ramp from 100 times the fluid's viscosity. The probe reaches as bfs3d's does: the
+# pressure column (u, v, w, p, k, omega) at 3, whose couplings at distance 3 matter on stretched
+# cells, and the rest at 2, which halved bfs3d's probe without losing steps; not measured here.
 solver:
   kind: CoupledMarch
   max_steps: 150
@@ -231,7 +233,7 @@ solver:
       trailing: {{kind: JacobiSmoothed, max_coarse: 200, aggressive_levels: 0, equilibrate: false, avoid_singletons: false,
         strength_threshold: 0.25, max_levels: 20, frozen_coarsening: true}}
       precision: float32
-    probe: {{kind: JacobianProbeSpec, stencil_reach: 3}}
+    probe: {{kind: JacobianProbeSpec, stencil_reach: 3, column_reach: [2, 2, 2, 3, 2, 2]}}
     pivot_floor: {{kind: PivotFloor, threshold: 0.15}}
   dual_time: {{kind: DualTimeLoop, inner_steps: 5, inner_tol: 0.01, cycle_budget: 42, refresh_on_cycles: 4}}
   linear_solve: {{kind: LinearSolveSettings, rtol: 0.3, restart: 15, max_restarts: 14, stop: residual}}

@@ -376,6 +376,9 @@ inlet to outlet through the bend (`meshing.md`, "Runs").
   `--mem` is what it sees. Checked against a stand-in `sbatch`; not yet run on Nibi.
 - **The precursors stop at rtol 1e-6** (project owner, 2026-10-23: enough on other cases); 1e-6 came at
   steps 42 / 55 / 72 on the three grids, the fine one at ~140-345 s a step (README).
+- **The bend marches with bfs3d's solver section, probe reach included** (`column_reach: [2, 2, 2, 3,
+  2, 2]`, pressure at 3, as bfs3d on `main` since #839; project owner, 2026-10-26). Carry a later
+  change to bfs3d's section into `write_grids.py`'s template.
 - **Memory**: the bend's materialized march held ~10.5 GB of 15 on round36 (≥ 4.3 GB free, 15 steps, 42
   min); round48 (~20 GB) and round64 (~45 GB, estimated at ~200 KB/cell) are solved on a larger machine.
 - The station list and digitized profiles are still to be taken from the paper (the project owner is

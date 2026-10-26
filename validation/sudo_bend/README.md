@@ -107,9 +107,10 @@ units against the log law, and `k` and `omega` against the radius.
 ## The solve
 
 `case.yaml` marches the bend with bfs3d's settings unchanged (the field split of the materialized
-Jacobian, the dual-time loop and the viscosity ramp from 100 times the fluid's viscosity in 12
-stations). Measured (2026-10-23, the tracked files, `main` at `7fe27d07` merged, 4-core Linux
-container with 15 GB, one run): converged in 15 steps and 42 min (2514 s) to 1.1e-7 in the
+Jacobian, the dual-time loop, the viscosity ramp from 100 times the fluid's viscosity in 12
+stations, and the Jacobian probe's reach: the pressure column at 3, the others at 2). Measured
+(2026-10-23, the probe then at a reach of 3 in every column, `main` at `7fe27d07` merged, 4-core
+Linux container with 15 GB, one run): converged in 15 steps and 42 min (2514 s) to 1.1e-7 in the
 row-scaled measure, at least 4.3 GB of memory free throughout. The inlet admits 0.998 of
 `U_b` times its area (the faces take the profile at their own radius, the table holds cell means).
 
