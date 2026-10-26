@@ -599,9 +599,16 @@ jobs:
   # radiation test, 16.3 s against 23.7 s for another -- and a split built from them left the
   # slowest shard exactly where the count split had it (15.9 against 15.7 min, py3.11). The same
   # tests also ran 15.8 min on py3.11 and 9.6 min on py3.12, so even CI-recorded (py3.12)
-  # durations balance the py3.11 shards only approximately. Like the job
-  # above, it records into a fresh path, so its own split is even by count: about 9-16 min a
-  # shard on 2026-10-08.
+  # durations balance the py3.11 shards only approximately.
+  #
+  # ITS OWN SPLIT IS BY THE COMMITTED DURATIONS, LIKE THE UNIT JOB'S. pytest-split reads the split
+  # from `--durations-path` as well as writing it there, so each shard's file is seeded with
+  # `.test_durations` first, and `--clean-durations` makes the file it writes hold this shard's
+  # tests alone (otherwise it would also carry every other test's committed value, and the merge
+  # below would let a stale copy overwrite another shard's fresh one). Recording into a fresh path
+  # split it by count instead: 9-16 min a shard at three shards (2026-10-08), but at four
+  # (2026-10-25, PR #835) shards 1, 2 and 4 took 11.5 / 15.3 / 8.6 min while shard 3 reached the
+  # 30-minute cap twice, the unit job's duration-split shards taking 18-20 min on the same py3.12.
   refresh-unit-durations:
     name: refresh unit test-durations (shard ${{ matrix.group }}/4)
     if: >-
@@ -627,11 +634,13 @@ jobs:
         run: pip install -e ".[test]"
 
       - name: Record this shard's durations
-        run: >-
-          pytest tests/unit -m "$UNIT_MARKERS" -q -n 2
-          --splits 4 --group ${{ matrix.group }}
-          --store-durations --durations-path durations-unit-${{ matrix.group }}.json
-          --timeout=900 --timeout-method=thread --max-worker-restart=0
+        run: |
+          cp .test_durations durations-unit-${{ matrix.group }}.json
+          pytest tests/unit -m "$UNIT_MARKERS" -q -n 2 \
+            --splits 4 --group ${{ matrix.group }} \
+            --store-durations --clean-durations \
+            --durations-path durations-unit-${{ matrix.group }}.json \
+            --timeout=900 --timeout-method=thread --max-worker-restart=0
 
       - name: Upload shard durations
         uses: actions/upload-artifact@v4
