@@ -54,6 +54,10 @@ same frozen coarsening. A component carries the failure if swapping it alone bri
   `x_r/h` 8.3611, as recorded before. The solve replayed is **step 5, inner solve 2** (station 4,
   β 0.00617, linearized at the iterate after inner 1), re-fitted at the step's start φ as the ramp march
   does, unless a table says otherwise.
+- Replay check against the capture march's log: arm `3` replays step 5 inner 2 at the march's own 6 raw
+  cycles (logged 5) and step 10 inner 0 at its 4 (logged 3). Step 6 inner 1 replays at 5 where the
+  march ran 6: its inner 0 took α 0.5, so the march solved inner 1 at the post-setback tolerance 0.1,
+  which the harness does not reproduce (it solves every arm at 0.3, so arms stay comparable).
 - Cycles are raw restart cycles (the march log prints one fewer). "Row-scaled" is the step's own
   measure, `|A d + g| / |g|`. "Tight" is the same solve at rtol 1e-5, read after its cycles.
 
@@ -229,5 +233,22 @@ No smoother setting brings the lagged `p` fit within the bar (≤ 9); the best, 
 pressure sweeps, reaches 10 at about twice the fine-level smoothing work per application. Damping the
 pressure sweep (the H1-a remedy) makes it worse at both sweep counts. Arm `3` is insensitive to all of
 it. This agrees with the attribution: the fine-level smoother is not where the failure lives.
+
+## pitzDaily control (step 5, inner 2)
+
+States from a shipped pitzDaily march captured for this study (`PITZ_CHECKPOINT_KEEP=60
+PITZ_INNER_DUMP_ABOVE=1`, 2026-10-26, same tree): 21 steps, `cum 102`, `x_r/h` 8.069 (OpenFOAM 7.741);
+its figure step then failed for want of matplotlib, after the march. pitzDaily ships every column at
+reach 2 (`column_reach (2, 2, 2, 2, 2)`). Step 5 is station 4, β 0.00617, solved at the iterate after
+inner 1 (2 cycles, α 0.25). Cycles at rtol 0.3 / tight row-scaled after 16.
+
+| fit | `3` | `2` (shipped) | `p` | `p@drop` |
+|---|---|---|---|---|
+| at φ (march) | 4 / 2.92e-4 | 4 / 3.03e-4 | 4 / 2.88e-4 | 4 / 2.99e-4 |
+| at the iterate | 3 / 1.01e-5 | 3 / 1.09e-5 | — | — |
+
+On pitzDaily the lag costs every fit the same one cycle, and the reach-2 fits lose nothing either way:
+the drop does not make its fit lag-sensitive there. (The march logged 5 for this solve, 6 raw, after two inner solves at α
+0.25; the replay's 4 is at rtol 0.3, not the post-setback 0.1, as the earlier record also found.)
 
 (Continued below.)
