@@ -63,7 +63,10 @@ viscosity-ramp step does (each changes station); ``REACH_FOLDING_ATTEMPT`` names
 
 Environment: ``REACH_FOLDING_CASE`` (``bfs3d_openfoam`` or ``pitzdaily_openfoam``), ``REACH_FOLDING_STEP``
 (one-based), ``REACH_FOLDING_CHECKPOINTS`` (default the case's ``checkpoints/``), ``REACH_FOLDING_ARMS``,
-``REACH_FOLDING_INNER`` (default 0), ``REACH_FOLDING_ATTEMPT``, ``REACH_FOLDING_TIGHT_RTOL`` (default 1e-5), ``REACH_FOLDING_SKIP_MATRIX=1`` to run the solves only.
+``REACH_FOLDING_INNER`` (default 0), ``REACH_FOLDING_ATTEMPT``, ``REACH_FOLDING_TIGHT_RTOL`` (default 1e-5),
+``REACH_FOLDING_SKIP_MATRIX=1`` to run the solves only, ``REACH_FOLDING_LEADING`` to edit the leading block
+inverse (:func:`leading_overrides`), and ``REACH_FOLDING_OPERATORS`` to solve each arm's preconditioner
+against other operators than the march's (:func:`operator_names`).
 """
 
 from __future__ import annotations
@@ -104,7 +107,7 @@ from aquaflux.precondition.sparse_jacobian import (  # noqa: E402
     block_stencil_colouring,
     column_probe_plan,
 )
-from aquaflux.solve import ConstantRelaxation  # noqa: E402
+from aquaflux.solve import ConstantRelaxation, solve_linear  # noqa: E402
 from aquaflux.solve.continuation import _shifted_solve  # noqa: E402
 from aquaflux.solve.linear import in_progress_measure, with_relative_tolerance  # noqa: E402
 from aquaflux.turbulence import (  # noqa: E402
@@ -114,6 +117,7 @@ from aquaflux.turbulence import (  # noqa: E402
     scale_momentum_only,
 )
 from aquaflux.turbulence.coupled import coupled_scaled_norm  # noqa: E402
+from jax.experimental import sparse as jsparse  # noqa: E402
 from mesh_anisotropy import spacing_ratio  # noqa: E402
 
 LADDER = (1.0, 0.5, 0.25, 0.125, 1 / 32)
@@ -470,16 +474,17 @@ class StepRebuild:
         return g, shift, term.make_preconditioner(strength)
 
 
-def leading_report(session, apply_a, g, n_leading):
+def leading_report(session, operators, g, n_leading):
     """How close the fitted leading inverse is to the inverse of its fitted block, and of the exact one.
 
     For ``x = L b`` (``L`` the split's leading block inverse at the arm's cycle count), the relative
     residual ``|b - A x| / |b|`` against two leading blocks: the one ``L`` was fitted to (the shifted,
     probed block it holds as its finest level operator, so this falls toward the fit's rounding as
     ``L`` approaches that block's inverse) and the exact shifted leading block of the operator, applied
-    by a Jacobian-vector product with the trailing part of ``x`` zero. Read on a random right-hand side
-    (seeded) and on the leading rows of the solve's own right-hand side. Euclidean, so read it beside
-    the solve's row-scaled numbers rather than against them.
+    by a Jacobian-vector product with the trailing part of ``x`` zero, once for each of ``operators``
+    (``name -> (v -> A v)`` over the whole state). Read on a random right-hand side (seeded) and on the
+    leading rows of the solve's own right-hand side. Euclidean, so read it beside the solve's row-scaled
+    numbers rather than against them.
     """
     leading = session.preconditioner.inverse.leading
     fitted = leading._hierarchy.levels[0].operator.to_scipy().astype(np.float64)
@@ -493,13 +498,53 @@ def leading_report(session, apply_a, g, n_leading):
         ("solve rhs", np.asarray(g[:n_leading])),
     ):
         x = leading.apply(b)
-        exact = np.asarray(apply_a(jnp.zeros(n_dofs).at[:n_leading].set(x)))[:n_leading]
+        whole = jnp.zeros(n_dofs).at[:n_leading].set(x)
         size = np.linalg.norm(b)
-        parts.append(
-            f"{tag}: fitted {np.linalg.norm(b - fitted @ x) / size:.2e}, exact "
-            f"{np.linalg.norm(b - exact) / size:.2e}"
-        )
+        text = f"{tag}: fitted {np.linalg.norm(b - fitted @ x) / size:.2e}"
+        for name, apply in operators.items():
+            product = np.asarray(apply(whole))[:n_leading]
+            text += f", {name} {np.linalg.norm(b - product) / size:.2e}"
+        parts.append(text)
     return "  leading inverse |b - A L b| / |b| (" + "; ".join(parts) + ")"
+
+
+def operator_names():
+    """The operators each arm's preconditioner is solved against (``REACH_FOLDING_OPERATORS``).
+
+    ``iterate`` (the default) is the march's own: the exact shifted Jacobian at the solve's iterate.
+    ``start`` is the exact shifted Jacobian at the step's start, where every arm is fitted.
+    ``start-drop:X`` is ``start`` with the couplings probe ``X`` drops (its out-of-reach entries, as
+    :class:`ScaledFold` reads them) removed: the operator an ``X@drop`` arm is fitted to, so a solve
+    against it asks how well that fit inverts its own operator. The right-hand side is the march's in
+    every case.
+    """
+    return os.environ.get("REACH_FOLDING_OPERATORS", "iterate").split(",")
+
+
+class DroppedPart:
+    """The couplings a short probe drops, at one state, applied as a device sparse product.
+
+    ``J3 - J3 * [JX != 0]``: every entry of the uniform reach-3 Jacobian that probe ``X`` leaves exactly
+    zero, which is what :class:`ScaledFold`'s ``"drop"`` mix zeroes. Materialized once on the host from
+    both probes (each the whole Jacobian, freed before returning), then held as a sparse matrix.
+    """
+
+    def __init__(self, coupled, state, column_reach):
+        mesh = coupled.momentum.mesh
+        n, n_fields = coupled.layout.n_cells, coupled.layout.n_fields
+        owner, nb, _ = mesh.face_cells.interior_edges()
+        owner, nb = np.asarray(owner), np.asarray(nb)
+        j3 = materialize(coupled, state, owner, nb, n, n_fields, None)
+        jx = materialize(coupled, state, owner, nb, n, n_fields, column_reach)
+        dropped = (j3 - j3.multiply(jx != 0)).tocsr()
+        dropped.eliminate_zeros()
+        del j3, jx
+        gc.collect()
+        self.nnz = dropped.nnz
+        self.matrix = jsparse.BCOO.from_scipy_sparse(dropped)
+
+    def __call__(self, v):
+        return self.matrix @ v
 
 
 #: Cells whose faces' normal distances span more than this ratio count as stretched.
@@ -508,7 +553,7 @@ STRETCHED = 10.0
 ANISOTROPY_BINS = ((1.0, 2.0), (2.0, STRETCHED), (STRETCHED, np.inf))
 
 
-def solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy):
+def solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy, dropped):
     started = time.time()
     active, session = rebuild.fitted(*reaches)
     if reaches[3]:
@@ -529,7 +574,16 @@ def solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy):
     phi, p = rebuild.phi, rebuild.iterate
     g, shift, preconditioner = rebuild.shift_and_preconditioner(active)
     norm = active.residual_norm
-    apply_a = jax.jit(lambda v: jax.jvp(residual_fn, (p,), (v,))[1] + shift * v)
+
+    def at(state):
+        return jax.jit(lambda v: jax.jvp(residual_fn, (state,), (v,))[1] + shift * v)
+
+    operators = {"iterate": at(p), "start": at(phi)}
+    for name, part in dropped.items():
+        start = operators["start"]
+        operators[f"start-drop:{name}"] = jax.jit(
+            lambda v, part=part, start=start: start(v) - part(v)
+        )
     G = jax.jit(lambda x: residual_fn(x) + shift * (x - phi))
     base_solver = active.linear_solver()
     project = active.step_projection
@@ -537,47 +591,55 @@ def solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy):
         f"[arm] {label}: fitted in {time.time() - started:.0f} s, floored rows {floored_text}",
         flush=True,
     )
-    print(leading_report(session, apply_a, g, rebuild.n_leading), flush=True)
-    for tag, solver in (
-        ("march rtol", base_solver),
-        (f"rtol {tight_rtol:g}", with_relative_tolerance(base_solver, tight_rtol)),
-    ):
-        solver = in_progress_measure(solver, norm)
-        t0 = time.time()
-        d, cycles = _shifted_solve(residual_fn, p, g, shift, preconditioner, solver)
-        linear = apply_a(d) + g
-        line = (
-            f"  {tag:11s} cycles {int(cycles):3d}  Euclidean "
-            f"{float(jnp.linalg.norm(linear) / jnp.linalg.norm(g)):.2e}  row-scaled "
-            f"{float(norm(linear) / norm(g)):.3e}  ({time.time() - t0:.0f} s)"
-        )
-        # Which row fields the unsolved residual sits in, in the step's measure (each field's rows alone).
-        shares = [
-            float(norm(jnp.where(jnp.arange(linear.size) // n == f, linear, 0.0)) / norm(g))
-            for f in range(len(names))
-        ]
-        line += "\n              by row field " + " ".join(
-            f"{names[f]} {shares[f]:.2e}" for f in range(len(names))
-        )
-        # The continuity rows' part held by stretched cells, against their share of the cells.
-        pressure = len(names) - 3
-        stretched_rows = jnp.asarray(
-            np.concatenate(
-                [np.zeros(pressure * n, bool), anisotropy > STRETCHED, np.zeros(2 * n, bool)]
+    print(leading_report(session, operators, g, rebuild.n_leading), flush=True)
+    for operator in operator_names():
+        apply_a = operators[operator]
+        for tag, solver in (
+            ("march rtol", base_solver),
+            (f"rtol {tight_rtol:g}", with_relative_tolerance(base_solver, tight_rtol)),
+        ):
+            solver = in_progress_measure(solver, norm)
+            t0 = time.time()
+            if operator == "iterate":
+                d, cycles = _shifted_solve(residual_fn, p, g, shift, preconditioner, solver)
+            else:
+                d, cycles = solve_linear(
+                    apply_a, -g, solver=solver, preconditioner=preconditioner, throw=False
+                )
+            linear = apply_a(d) + g
+            line = (
+                f"  {operator:9s} {tag:11s} cycles {int(cycles):3d}  Euclidean "
+                f"{float(jnp.linalg.norm(linear) / jnp.linalg.norm(g)):.2e}  row-scaled "
+                f"{float(norm(linear) / norm(g)):.3e}  ({time.time() - t0:.0f} s)"
             )
-        )
-        in_stretched = float(norm(jnp.where(stretched_rows, linear, 0.0)) / norm(g))
-        line += (
-            f"\n              p rows in cells above {STRETCHED:g}:1 ({np.mean(anisotropy > STRETCHED):.0%} of "
-            f"cells): {in_stretched:.2e} of p's {shares[pressure]:.2e}"
-        )
-        if tag == "march rtol":
-            v = project(p, d) if project is not None else d
-            ladder = [float(norm(G(p + a * v))) / float(norm(g)) for a in LADDER]
-            line += "\n              ladder " + " ".join(f"{r:.3f}" for r in ladder)
-        print(line, flush=True)
+            # Which row fields the unsolved residual sits in, in the step's measure (each field's rows).
+            shares = [
+                float(norm(jnp.where(jnp.arange(linear.size) // n == f, linear, 0.0)) / norm(g))
+                for f in range(len(names))
+            ]
+            line += "\n              by row field " + " ".join(
+                f"{names[f]} {shares[f]:.2e}" for f in range(len(names))
+            )
+            # The continuity rows' part held by stretched cells, against their share of the cells.
+            pressure = len(names) - 3
+            stretched_rows = jnp.asarray(
+                np.concatenate(
+                    [np.zeros(pressure * n, bool), anisotropy > STRETCHED, np.zeros(2 * n, bool)]
+                )
+            )
+            in_stretched = float(norm(jnp.where(stretched_rows, linear, 0.0)) / norm(g))
+            line += (
+                f"\n              p rows in cells above {STRETCHED:g}:1 "
+                f"({np.mean(anisotropy > STRETCHED):.0%} of cells): {in_stretched:.2e} of p's "
+                f"{shares[pressure]:.2e}"
+            )
+            if tag == "march rtol" and operator == "iterate":
+                v = project(p, d) if project is not None else d
+                ladder = [float(norm(G(p + a * v))) / float(norm(g)) for a in LADDER]
+                line += "\n              ladder " + " ".join(f"{r:.3f}" for r in ladder)
+            print(line, flush=True)
     shift = np.asarray(shift)
-    del active, session, preconditioner, apply_a, G
+    del active, session, preconditioner, operators, G
     gc.collect()
     return shift
 
@@ -841,12 +903,22 @@ def main():
         f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, split precision "
         f"{compare.SOLVER.preconditioner.inverse.precision}, file probe "
         f"{compare.SOLVER.preconditioner.probe}, leading edits {leading_overrides() or 'none'}, "
+        f"operators {operator_names()}, "
         f"jax {jax.__version__}",
         flush=True,
     )
+    dropped = {}
+    for operator in operator_names():
+        if operator.startswith("start-drop:"):
+            name = operator.split(":", 1)[1]
+            _label, reach = probe_reach(name, n_fields, names)
+            dropped[name] = DroppedPart(coupled, phi, reach)
+            print(f"[operator] {operator}: {dropped[name].nnz} dropped entries", flush=True)
+        elif operator not in ("iterate", "start"):
+            raise SystemExit(f"REACH_FOLDING_OPERATORS: unknown operator {operator!r}")
     shift = None
     for label, reaches in arms(n_fields, names).items():
-        arm_shift = solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy)
+        arm_shift = solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy, dropped)
         shift = arm_shift if shift is None else shift
     if os.environ.get("REACH_FOLDING_SKIP_MATRIX") != "1":
         folding_report(coupled, rebuild.iterate, shift, names)
