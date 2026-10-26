@@ -238,7 +238,8 @@ bare block inverse).
   footprint (re-fit 48.7 → 39.7 s at `state-00032`; a cadence-5 march without the pivot floor 2439 → 2180 s, peak 12.63 → 12.15 GiB), the retaining allocators are not usable for a march
   in 15 GiB: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container" and the subsection after it.
 
-  **What decides it is cell aspect ratio, through the pressure column** (2026-10-26, `validation/reach_folding.py`).
+  **What decides it is cell aspect ratio, through the pressure column** (2026-10-26, `validation/reach_folding.py`);
+  the distance-3 couplings exist at all because bfs3d is graded (the gradient's second pass, `schemes.md`).
   Reach is graph distance; across a stretched cell the cell three faces away can couple more strongly
   than the face neighbour along its long side, so dropping the distance-3 pressure couplings removes some
   as large as couplings kept. bfs3d's largest dropped `|C_ij|` is 1.3x the row's weakest face coupling at
