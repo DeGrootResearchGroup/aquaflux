@@ -25,8 +25,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE))
 
 import compare  # noqa: E402
-from aquaflux.precondition import FieldSplit  # noqa: E402
-from aquaflux.precondition.materialized_session import MaterializedSession  # noqa: E402
+from aquaflux.precondition import FieldSplit, MaterializedSession  # noqa: E402
 from pressure_strength_skeleton import pattern_jacobian_probe  # noqa: E402
 
 #: The skeleton's strength threshold for the pressure column's distance-3 pairs.

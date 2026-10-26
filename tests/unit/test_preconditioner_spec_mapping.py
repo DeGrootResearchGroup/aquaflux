@@ -28,6 +28,7 @@ from aquaflux.precondition import (
     MaterializedJacobian,
     PivotFloor,
     SimpleSmoothed,
+    StrongCouplings,
 )
 from aquaflux.precondition.multigrid import _PROLONGATION_SMOOTHING
 from aquaflux.solve import SettingsMapping
@@ -60,6 +61,13 @@ _SPECS = [
     MaterializedJacobian(SimpleSmoothed(), build_beta=0.5),
     MaterializedJacobian(SimpleSmoothed(), refit_beta_floor=0.05),
     MaterializedJacobian(SimpleSmoothed(), pivot_floor=PivotFloor(threshold=0.2)),
+    MaterializedJacobian(
+        SimpleSmoothed(),
+        probe=JacobianProbeSpec(
+            column_reach=(2, 2, 2, 2, 2, 2),
+            strong_couplings=StrongCouplings(column=3, fraction=0.01, rows=(3,)),
+        ),
+    ),
     MaterializedJacobian(
         FieldSplit(
             SimpleSmoothed(sweeps=2, strength_threshold=0.25, frozen_coarsening=True),
@@ -113,7 +121,7 @@ def _public_value_classes() -> set[type]:
         and not inspect.isabstract(cls)
     }
     spec_classes = {BlockDiagonal, MaterializedJacobian, FieldSplit}
-    return nested | spec_classes | {JacobianProbeSpec, PivotFloor}
+    return nested | spec_classes | {JacobianProbeSpec, PivotFloor, StrongCouplings}
 
 
 def test_the_mapping_accepts_every_public_value_a_spec_can_hold() -> None:
