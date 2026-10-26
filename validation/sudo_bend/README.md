@@ -178,11 +178,13 @@ On a Linux machine with aquaflux checked out:
 ```
 git fetch origin && git checkout claude/test-case-suggestions-21unai
 pip install -e ".[cad,meshing,ui]"        # the CAD kernel and Netgen for meshing, PyVista for gci.py
-validation/run_case.sh validation/sudo_bend/run_study.py
+setsid validation/run_case.sh validation/sudo_bend/run_study.py
 tail -f validation/sudo_bend/run-*.log    # one line per step
 ```
 
-`run_case.sh` returns at once; the study runs on with the terminal closed. `validation/run_case.sh
+`run_case.sh` returns at once. `setsid` starts it in a session of its own, so closing the terminal
+(or an SSH connection dropping) does not stop it: a terminal's hangup reaches the jobs of its session,
+and `run_case.sh` forwards a hangup to the case. Starting it inside `tmux` or `screen` does as well. `validation/run_case.sh
 --status` says what is running and since when, and `kill <pid>` (the `pid=` it printed, never `kill
 -9`) stops the study and the step it is on. Settings: `SUDO_GRIDS=round48,round64` (the grids, default
 all three), `SUDO_REDO=1` (redo steps already done), `SUDO_FORCE=1` (start a bend the memory estimate
