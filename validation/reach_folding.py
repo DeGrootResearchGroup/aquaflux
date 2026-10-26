@@ -65,7 +65,8 @@ Environment: ``REACH_FOLDING_CASE`` (``bfs3d_openfoam`` or ``pitzdaily_openfoam`
 (one-based), ``REACH_FOLDING_CHECKPOINTS`` (default the case's ``checkpoints/``), ``REACH_FOLDING_ARMS``,
 ``REACH_FOLDING_INNER`` (default 0), ``REACH_FOLDING_ATTEMPT``, ``REACH_FOLDING_TIGHT_RTOL`` (default 1e-5),
 ``REACH_FOLDING_SKIP_MATRIX=1`` to run the solves only, ``REACH_FOLDING_LEADING`` to edit the leading block
-inverse (:func:`leading_overrides`), and ``REACH_FOLDING_OPERATORS`` to solve each arm's preconditioner
+inverse (:func:`leading_overrides`), ``REACH_FOLDING_FIT_AT=iterate`` to re-fit at the solve's iterate
+instead of the step's start, and ``REACH_FOLDING_OPERATORS`` to solve each arm's preconditioner
 against other operators than the march's (:func:`operator_names`).
 """
 
@@ -379,6 +380,13 @@ class StepRebuild:
         self.coupled, self.phi, self.beta = coupled, phi, beta
         #: Where the solve linearizes: the step's start, or a later inner iterate of the same step.
         self.iterate = phi if iterate is None else iterate
+        #: Where every arm is re-fitted: the step's start, as the march does, or, with
+        #: ``REACH_FOLDING_FIT_AT=iterate``, the iterate the solve linearizes at (a preconditioner with no
+        #: lag behind its operator; the shift is the step's either way).
+        fit_at = os.environ.get("REACH_FOLDING_FIT_AT", "start")
+        if fit_at not in ("start", "iterate"):
+            raise SystemExit(f"REACH_FOLDING_FIT_AT={fit_at!r}: start or iterate")
+        self.fit_state = self.iterate if fit_at == "iterate" else phi
         solver_spec = compare.SOLVER
         self.spec = solver_spec
         ramp = solver_spec.continuation
@@ -450,14 +458,14 @@ class StepRebuild:
         swap = None
         if components:
             with ScaledFold(*probes(), 0.0):
-                session.refresh_preconditioner(active, self.phi, due=True)
+                session.refresh_preconditioner(active, self.fit_state, due=True)
             swap = ComponentSwap(session.preconditioner.inverse, components)
         with swap if swap is not None else contextlib.nullcontext():
             if mix is None:
-                update = session.refresh_preconditioner(active, self.phi, due=True)
+                update = session.refresh_preconditioner(active, self.fit_state, due=True)
             else:
                 with ScaledFold(*probes(), mix):
-                    update = session.refresh_preconditioner(active, self.phi, due=True)
+                    update = session.refresh_preconditioner(active, self.fit_state, due=True)
         if update is not None:
             active = update(active)
         active = active.with_norm(coupled_scaled_norm(self.coupled, active.shift_policy, self.phi))
@@ -903,7 +911,7 @@ def main():
         f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, split precision "
         f"{compare.SOLVER.preconditioner.inverse.precision}, file probe "
         f"{compare.SOLVER.preconditioner.probe}, leading edits {leading_overrides() or 'none'}, "
-        f"operators {operator_names()}, "
+        f"operators {operator_names()}, fitted at {os.environ.get('REACH_FOLDING_FIT_AT', 'start')}, "
         f"jax {jax.__version__}",
         flush=True,
     )
