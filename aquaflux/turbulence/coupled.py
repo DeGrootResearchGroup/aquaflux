@@ -2242,8 +2242,8 @@ def open_session(
         ``(timing: RefreshTiming) -> None``, told what each refresh of a materialized inverse did and
         what it cost.
     reports : dict, optional
-        Where each field-split block inverse sends its build record, keyed ``"leading"`` /
-        ``"trailing"``. Only for a :class:`FieldSplit` whose inverse keeps a record.
+        Where each :class:`FieldSplit` block inverse keeping a record sends it (``"leading"``,
+        ``"trailing"``), and where the probe's strong-couplings selection is described (``"probe"``).
     on_build : callable, optional
         ``step -> step``, applied to every step the session builds, for instrumenting a driver.
     precondition_wrapper : callable, optional
@@ -2304,11 +2304,11 @@ def open_session(
             "reports and inverse_wrapper address field-split block inverses, and "
             f"{type(spec.inverse).__name__} has none."
         )
-    unknown = sorted(set(reports) - {"leading", "trailing"})
+    unknown = sorted(set(reports) - {"leading", "trailing", "probe"})
     if unknown:
-        raise TypeError(f"reports are keyed 'leading' / 'trailing', got {unknown}.")
-    for role, sink in reports.items():
-        getattr(spec.inverse, role).bound(report=sink)  # refuse a family with no record now
+        raise TypeError(f"reports are keyed 'leading' / 'trailing' / 'probe', got {unknown}.")
+    for role in sorted(set(reports) - {"probe"}):  # a block family with no record is refused now
+        getattr(spec.inverse, role).bound(report=reports[role])
     return MaterializedSession(
         spec,
         _CoupledProblem(coupled, jacobian_production_viscosity),
