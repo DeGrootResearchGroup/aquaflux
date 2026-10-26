@@ -150,7 +150,9 @@ def arms(n_fields, names):
             if part not in ("drop", "fold"):
                 raise SystemExit(f"REACH_FOLDING_ARMS: {token!r}: the part after @ is drop or fold")
             label, reach = probe_reach(name, n_fields, names)
-            out[f"uniform 3 with only the {part}ed part of {label}"] = (None, reach, part)
+            out[
+                f"uniform 3 with only the {'dropped' if part == 'drop' else 'folded'} part of {label}"
+            ] = (None, reach, part)
         elif token == "each":
             for name in names:
                 label, reach = probe_reach(name, n_fields, names)
@@ -444,7 +446,7 @@ def folding_report(coupled, phi, shift, names):
             flush=True,
         )
     schur_report(j3, j2, shift, n, n_fields)
-    pressure_entry_report(j3, e, n, n_fields, conductance_ratio(mesh, mesh.geometry()))
+    pressure_entry_report(j3, e, n, n_fields, conductance_ratio(mesh, mesh.geometry()), (owner, nb))
     del j2, j3, e
     gc.collect()
 
@@ -462,7 +464,7 @@ def schur_parts(jacobian, shift, n, n_fields):
     return c, dmg, (c - dmg).tocsr()
 
 
-def pressure_entry_report(j3, e, n, n_fields, anisotropy):
+def pressure_entry_report(j3, e, n, n_fields, anisotropy, edges):
     """Entry by entry, how far the fold moves the pressure couplings it touches.
 
     A block-norm ratio is set by a block's strongest couplings, so it cannot see a fold that is small
@@ -524,6 +526,35 @@ def pressure_entry_report(j3, e, n, n_fields, anisotropy):
                 f"    {low:g}-{high:g}:1  {int(cells.sum()):6d} cells  largest dropped "
                 f"{np.median(dropped[cells]):.2e} / {np.quantile(dropped[cells], 0.99):.2e}  largest folded "
                 f"{np.median(folded[cells]):.2e} / {np.quantile(folded[cells], 0.99):.2e}",
+                flush=True,
+            )
+
+    # Graph distance is not physical distance: across a thin cell, a cell three faces away can couple
+    # more strongly than the face neighbour along the cell's long side. So read each continuity row's
+    # largest DROPPED pressure coupling against the row's WEAKEST face-neighbour coupling in C.
+    c3 = j3[pressure, pressure].tocsr()
+    owner, nb = edges
+    face_values = np.abs(
+        np.concatenate([np.asarray(c3[owner, nb]).ravel(), np.asarray(c3[nb, owner]).ravel()])
+    )
+    face_rows = np.concatenate([owner, nb])
+    weakest = np.full(n, np.inf)
+    np.minimum.at(weakest, face_rows, np.where(face_values > 0, face_values, np.inf))
+    kept_c = (c3 + e[pressure, pressure]) != 0
+    dropped_c = abs(c3 - c3.multiply(kept_c)).max(axis=1).toarray().ravel()
+    ratio = dropped_c / np.where(weakest > 0, weakest, np.inf)
+    print(
+        "  C rows: largest dropped |C_ij| / weakest face-neighbour |C_ij|, by the cell's conductance ratio "
+        "(median / p90 / p99; share of rows above 0.1):",
+        flush=True,
+    )
+    for low, high in ANISOTROPY_BINS:
+        cells = (anisotropy >= low) & (anisotropy < high)
+        if cells.any():
+            r = ratio[cells]
+            print(
+                f"    {low:g}-{high:g}:1  {int(cells.sum()):6d} cells  {np.median(r):.2e} / "
+                f"{np.quantile(r, 0.9):.2e} / {np.quantile(r, 0.99):.2e}; {np.mean(r > 0.1):.1%}",
                 flush=True,
             )
 
