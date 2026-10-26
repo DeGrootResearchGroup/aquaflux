@@ -1014,19 +1014,20 @@ Mac, where Numba's pip wheels usually offer only the `workqueue` layer, which ke
 
 ## 16. A cheaper pressure probe on stretched meshes (bfs3d, 2026-10-26)
 
-bfs3d ships pressure at reach 3, the rest at 2 (291 seeds per fit, ~10 s probe; uniform reach 3 was 576,
-~23 s). A reach-2 pressure probe (234 seeds) fails because its fit's COARSE levels go stale fast across
-the inner loop (`solve-refuted-directions.md`, the 2026-10-26 entry). Three unmeasured ways to keep
-the reach-2 probe or something near it, each to be judged on perturbed bfs3d marches against the shipped
-probe on wall clock, and on the zero-shift adjoint:
-- **a. Re-fit inside the inner loop at reach 2.** The failure needs the lag; fitted at the iterate the
-  reach-2 fit matched reach 3 at both states measured. Cost: more re-fits at the cheaper probe.
-- **b. Exact coarse operators.** Form the coarse Galerkin operators from exact products `Pᵀ (J P)`
-  through the frozen aggregates (one colour per aggregate-level column), keeping the fine level from the
-  reach-2 probe. The only direction aimed at the component that fails; cost unknown, most new code.
-- **c. A pressure colouring for `R2 + S(tau)`** (a static strength skeleton, geometry only): 48 colours
-  against reach 3's 96, so 243 seeds with the rest at 2. Replays with the rest at 3 matched uniform reach
-  3; the target with the rest at 2 is unreplayed, and its saving over the shipped 291 is small.
+bfs3d ships pressure at reach 3, the rest at 2 (291 seeds per fit). A reach-2 pressure probe (234 seeds)
+fails because its fit's COARSE levels go stale fast across the inner loop (`solve-refuted-directions.md`,
+the 2026-10-26 entries). Raced on three perturbed bfs3d draws per arm (log, "THE REACH-2 RACE"):
+- **c. MEASURED, not built — a pressure colouring for `R2 + S(tau)`** (a static strength skeleton,
+  geometry only), the rest at 2: 243 seeds, the same 17 steps and 144 cycles on every draw, ~5 % less
+  wall time than the shipped probe. Shipping it needs the skeleton and a pattern-driven plan in the
+  library (`validation/pressure_strength_skeleton.py` and `bfs3d_openfoam/pattern_probe_march.py` are
+  the harness form); unmeasured: the zero-shift adjoint, pitzDaily, other meshes.
+- **a. Re-fit inside the inner loop at reach 2 — the proxy LOST, the real thing is unmeasured.**
+  `refresh_on_cycles` 2 or 3 with every column at 2 took 25–51 steps and failed once. A real in-loop
+  re-fit (the session re-fitting between inner iterates without ending the step) needs the traced inner
+  loop broken on the host; not built.
+- **b. Exact coarse operators** through the frozen aggregates, the fine level from a reach-2 probe.
+  Unmeasured; the only direction aimed at the component that fails.
 Records: `validation/reach_research/option4_diagnostic.md`, `option1_audit.md`.
 
 ## Smaller housekeeping

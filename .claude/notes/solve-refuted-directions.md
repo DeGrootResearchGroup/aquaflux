@@ -1892,3 +1892,12 @@ available. The failure needs the lag between fit and iterate: fitted at the iter
 matches reach 3. What is left open is in `solve-open-directions.md`, entry 16. Detail:
 `validation/reach_research/option4_diagnostic.md`; log `solve-direct-preconditioners-log.md`, "WHY A
 REACH-2 PRESSURE FIT FAILS IN THE MARCH".
+
+## Ending the step to re-fit a reach-2 probe more often (`refresh_on_cycles` 2 / 3) on bfs3d — LOST (2026-10-26)
+
+Every column probed at reach 2 on bfs3d, with the step ended for a re-fit once an inner solve cost 2 or
+3 restart cycles (the shipped probe keeps pressure at 3 and re-fits at 4): 37–50 steps at 2, 25–51 at 3
+with one of three draws failing on a NaN, against the shipped 17 on every draw (1318–2567 s against
+904–994 s). It was raced as a stand-in for re-fitting inside the inner loop; because it also ends the
+outer step, it does not settle whether a true in-loop re-fit would work (`solve-open-directions.md`,
+entry 16a). Detail: `solve-direct-preconditioners-log.md`, "THE REACH-2 RACE".

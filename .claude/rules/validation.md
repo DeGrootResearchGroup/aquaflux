@@ -233,6 +233,11 @@ branches.
   `reach_folding.py` state and reads every (row field, p) block row by row against it: the largest
   dropped distance-3 `|J_ij|` over the row's weakest face coupling, and the fold the pattern probe adds,
   binned by spacing ratio. One state per process.
+  **`bfs3d_openfoam/pattern_probe_march.py`** runs bfs3d's march with that probe (`BFS3D_PATTERN_TAU`,
+  default 0.01; `BFS3D_PATTERN_OTHERS`, the other columns' reach, default 2), installed in place of the
+  session's own (`MaterializedSession._probe_for`); everything else is `compare.py`'s. ⚠️ Its march log's
+  `probe column reach` line prints the case file's, not the probe in force: the run log's `[probe]` line
+  names it.
 
 ## Machine contention and run records
 

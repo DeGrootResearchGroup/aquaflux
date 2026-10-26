@@ -232,6 +232,9 @@ bare block inverse).
   21 / 23 / 40 steps, 194–384 cycles (2026-10-25). Tables: log, "Probe colouring reach 2 — pitzDaily and
   bfs3d" and "bfs3d: pressure alone at reach 3". The zero-shift adjoint ties: 331 / 373 applications
   (forward / transposed) to 1e-8 against uniform's 335 / 383 (`zero_shift_adjoint.py`, `state-00017`).
+  A pressure probe coloured for a geometry-only strength skeleton (`R2 + S(0.01)`, 243 seeds) with the
+  rest at 2 kept the 17 steps on three draws and ran ~5 % faster; it is a harness, not library code
+  (log, "THE REACH-2 RACE"; `solve-open-directions.md` entry 16).
 
   The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
   cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor
