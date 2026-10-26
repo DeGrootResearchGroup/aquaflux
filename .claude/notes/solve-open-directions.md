@@ -1017,11 +1017,11 @@ Mac, where Numba's pip wheels usually offer only the `workqueue` layer, which ke
 bfs3d ships pressure at reach 3, the rest at 2 (291 seeds per fit). A reach-2 pressure probe (234 seeds)
 fails because its fit's COARSE levels go stale fast across the inner loop (`solve-refuted-directions.md`,
 the 2026-10-26 entries). Raced on three perturbed bfs3d draws per arm (log, "THE REACH-2 RACE"):
-- **c. MEASURED, not built — a pressure colouring for `R2 + S(tau)`** (a static strength skeleton,
-  geometry only), the rest at 2: 243 seeds, the same 17 steps and 144 cycles on every draw, ~5 % less
-  wall time than the shipped probe. Shipping it needs the skeleton and a pattern-driven plan in the
-  library (`validation/pressure_strength_skeleton.py` and `bfs3d_openfoam/pattern_probe_march.py` are
-  the harness form); unmeasured: the zero-shift adjoint, pitzDaily, other meshes.
+- **c. BUILT, off by default, a wash on bfs3d — the strong couplings chosen from the Jacobian**
+  (`precondition.StrongCouplings`, `JacobianProbeSpec.strong_couplings`), the library form of the
+  raced geometric skeleton: 243 seeds, the same 17 steps on every draw, ~1 % of wall time (log,
+  "`StrongCouplings` (library, 2026-10-26)"). bfs3d stays on `[2, 2, 2, 3, 2, 2]`. Unmeasured: the
+  zero-shift adjoint under it, pitzDaily, other meshes.
 - **a. Re-fit inside the inner loop at reach 2 — the proxy LOST, the real thing is unmeasured.**
   `refresh_on_cycles` 2 or 3 with every column at 2 took 25–51 steps and failed once. A real in-loop
   re-fit (the session re-fitting between inner iterates without ending the step) needs the traced inner

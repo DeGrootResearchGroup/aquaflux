@@ -1556,8 +1556,8 @@
       that is structurally near zero in momentum rows. Not run: the rest at 2 (243 seeds per fit, against
       the shipped 291), a march, step 15's hard solves.
 
-    - **THE REACH-2 RACE (2026-10-26): option 1's pattern probe ties the shipped march and is ~5 % faster;
-      the re-fit proxy loses.** Three perturbed draws per arm (`BFS3D_NU_PERTURBATION` 0 / +1e-14 /
+    - **THE REACH-2 RACE (2026-10-26): option 1's pattern probe ties the shipped march; the re-fit proxy
+      loses.** Three perturbed draws per arm (`BFS3D_NU_PERTURBATION` 0 / +1e-14 /
       -1e-14), arms interleaved within each draw, one march at a time through `run_case.sh`, `7710ec4d`
       (main `1eb68b48` plus the harness), shipped `case.yaml` otherwise (pivot floor, float32 split,
       12-station ramp), 4-core Linux, 15 GiB, jax 0.12.0.1, glibc defaults:
@@ -1569,13 +1569,31 @@
       | every column at 2, `refresh_on_cycles` 3 | 35 / 25 / 51 | 227 / 173 / 429 | 1741 / 1318 / 2567 | — (234 seeds) | draw 0 failed (NaN at step 35) |
       | p for `R2 + S(0.01)`, the rest at 2 (`pattern_probe_march.py`) | 17 / 17 / 17 | 144 each | 874 / 881 / 854 | 7.4 s (243 seeds) | all converged |
 
-      Every converged draw reached `x_r/h` 8.361. Paired by draw the pattern probe saves 12 / 5 / 6 %;
-      the first shipped draw ran first in the queue and likely paid compilation, so ~5 % is the fair
-      reading. The re-fit arms are a PROXY for re-fitting inside the inner loop, which the traced inner
+      Every converged draw reached `x_r/h` 8.361. Paired by draw the pattern probe saved 12 / 5 / 6 %,
+      but the re-race below ran the shipped arm at 789–856 s on the same machine: most of that was
+      the machine drifting between runs, and the probe's own saving is ~1.3 s per fit (~2 %). The re-fit arms are a PROXY for re-fitting inside the inner loop, which the traced inner
       loop cannot do without a library change: `refresh_on_cycles` ends the outer step to re-fit, so it
       also re-anchors the pseudo-time step, and that, not the fit, may be what costs it. The true in-loop
       re-fit is unmeasured. Not measured for the pattern arm: the zero-shift adjoint, other cases.
       Logs were in a session scratchpad, not kept.
+
+    - **`StrongCouplings` (library, 2026-10-26): the same march, ~1 % — a wash; BUILT, OFF by default.**
+      `JacobianProbeSpec(column_reach=[2, 2, 2, 2, 2, 2], strong_couplings=StrongCouplings(column=3,
+      fraction=0.01))` against the shipped probe, three perturbed draws per arm, interleaved, the new
+      arm first in each draw, `6d7826c3` (`BFS3D_STRONG_COUPLINGS=3:0.01`), same machine and settings as
+      the race above. The selection read the real Jacobian at the first fit: 56 408 pressure pairs beyond
+      reach 2 (2.45 per cell, as the skeleton's), 39 -> 48 colours, 243 probes per fit.
+
+      | arm | steps | restart cycles | march time (s), eps 0 / +1e-14 / -1e-14 | probe per fit |
+      |---|---|---|---|---|
+      | strong couplings, the rest at 2 | 17 / 17 / 17 | 146 each | 875 / 802 / 796 | 6.6–7.4 s |
+      | shipped `[2, 2, 2, 3, 2, 2]` | 17 / 17 / 17 | 146 each | 856 / 822 / 789 | 7.4–8.2 s |
+
+      Identical step tables; paired +2 / -2 / +1 %, within the noise. The ~0.8 s probe saving over 14
+      fits is ~1 % of a march, and the first fit's extra full-reach pressure probe takes part of it back,
+      so bfs3d keeps `[2, 2, 2, 3, 2, 2]` (project owner, 2026-10-26). Not measured: the zero-shift
+      adjoint under it, pitzDaily, other meshes. It is the tool for a case where the probe is a larger
+      share of the march. Logs were in a session scratchpad, not kept.
 
 ### The residual reaching past stencil_reach — the gradient-sweep trap (2026-08-16)
 

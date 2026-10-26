@@ -196,7 +196,8 @@ branches.
 - **A per-column probe reach is licensed by the gradient scheme, the split AND the mesh's cell aspect
   ratio; re-audit it when any changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships
   `MultipleCorrectionGradient` with the pressure column at reach 3 and every other at 2 inside a reach-3
-  pattern (`column_reach: [2, 2, 2, 3, 2, 2]`, 2026-10-26): with the pivot floor, three perturbed draws
+  pattern (`column_reach: [2, 2, 2, 3, 2, 2]`, 2026-10-26; `BFS3D_STRONG_COUPLINGS=column:fraction` tries
+  `StrongCouplings`, unset the file's, `none` off): with the pivot floor, three perturbed draws
   per arm (`BFS3D_NU_PERTURBATION` 0 / ±1e-14) gave 17 steps on every draw both uniform and pressure-only,
   and a reach-2 colouring of every column 21–40 (2026-10-25). pitzDaily probes every column at reach 2:
   its march is unchanged and the probe 40 % cheaper (2026-10-14). The difference is the pressure column
