@@ -112,6 +112,12 @@ FIGS = HERE / "figures"
 # The operating point (0.orig/ and constant/): U_in = 10 m/s, nu = 1e-5, h = 0.01 -> Re_h = 10000.
 # k_in = 0.375 (5% turbulence intensity), omega_in = 1600 (length scale 0.07 H1). rho = 1.
 RHO, NU = 1.0, 1e-5
+#: A relative perturbation of the molecular viscosity (`BFS3D_NU_PERTURBATION`, default 0): `NU` becomes
+#: `1e-5 * (1 + eps)`. It exists to draw a SPREAD of marches rather than one. A last-bit change like
+#: `eps = 1e-14` moves nothing physical, but this march's rounding-decided steps make one run a single
+#: draw, so an A/B between two settings is read over several draws per arm (`eps` in 0, +-1e-14, ...).
+NU_PERTURBATION = float(os.environ.get("BFS3D_NU_PERTURBATION", "0"))
+NU *= 1.0 + NU_PERTURBATION
 U_IN, K_IN, OMEGA_IN = 10.0, 0.375, 1600.0
 H = 0.01  # step height
 WALLS = ["upperWall", "lowerWall", "sideWalls"]
@@ -406,6 +412,20 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # velocity columns reach four through the eddy viscosity under this scheme). Everything below was
 # measured under the corrected Green-Gauss scheme and holds only for it.
 #
+# The march agrees. With the pivot floor (2026-10-25, the shipped file otherwise, 4-core Linux, jax
+# 0.12.0.1), three draws per arm at `BFS3D_NU_PERTURBATION` 0 / +1e-14 / -1e-14: the uniform reach-three
+# probe took 17 steps / 147 restart cycles on every draw (1519-1632 s); every column at reach two took
+# 40 / 21 / 23 steps and 384 / 205 / 194 cycles (1957-3870 s), all to mid-span `x_r/h` 8.3611. The
+# probe per fit halves (~18.5 s -> ~8.6 s); the extra steps, each with its own refit, cost more than that.
+#
+# Why this case and not pitzDaily: the pressure column, on stretched cells. Reach is graph distance, and
+# across a cell this mesh grades thin, the cell three faces away can couple more strongly than the face
+# neighbour along the long side -- so dropping the distance-three pressure couplings removes some as
+# large as couplings kept (the largest dropped one is 1.3x a row's weakest face coupling at the median
+# in the 41 % of cells above 10:1; pitzDaily has 1.5 % of its cells there). Probing pressure alone at
+# reach two stalls the harder inner solves outright; the other columns alone change nothing
+# (`validation/reach_folding.py`, 2026-10-26).
+#
 # The coloured probe costs one directional derivative per
 # (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
 # 39 at two, 94 at three on this mesh -- so probing a column further than it reaches is pure cost. The
@@ -420,7 +440,7 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # schemes -- first-order upwind on k/omega with a non-orthogonal diffusion correction reaches two, while
 # the velocity columns carry the limited second-order upwind reconstruction out to three -- so it must be
 # re-measured for any case that changes them, NOT inherited. Shortening a column that does carry far
-# couplings corrupts its near entries rather than truncating them.
+# couplings both drops them and corrupts its near entries with them.
 #
 # Shortening all three would be 564 probes -> 399 (-29%), and the two Jacobians agree to 5.7e-16 relative
 # Frobenius, i.e. float64 rounding. The value shipped under that scheme shortened only k and omega:
@@ -465,7 +485,7 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 #
 # One caution that survives all of it: shortening a column is only sound where its mass beyond the
 # shortened reach is negligible AT EVERY STATE THE MARCH VISITS, and a short-probed column with far
-# couplings has its NEAR entries corrupted rather than its far entries dropped -- a colouring is
+# couplings has its far entries dropped AND its NEAR entries corrupted -- a colouring is
 # collision-free only for the pattern it was built from, so two cells sharing a reach-two colour can
 # both couple to one row at distance three and the response is charged entirely to the near one.
 # Measured structurally, that aliasing touches 53% of the entries of every shortened column here; it
@@ -1345,6 +1365,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # Printed unconditionally, including at its default: a damping ratio is invisible in a march
         # log otherwise, and two differently-damped runs would produce identical banners.
         ("turbulence damping", f"{TURB_DAMPING:g}"),
+        # A perturbed draw's banner must say so: two draws are otherwise configured identically.
+        ("viscosity perturbation", f"{NU_PERTURBATION:g}"),
         # Both are swept, so both must be printed: without them two differently-configured runs produce
         # identical banners, which is the failure this table exists to prevent.
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL:g}"),

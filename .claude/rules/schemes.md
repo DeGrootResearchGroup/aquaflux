@@ -217,8 +217,14 @@ closure); exactly linear in the field (tangent is an unrolled apply).
   reach 3 is exact. ⚠️ **The coupled pitzDaily RANS residual reaches 4 under it** (the velocity
   gradient feeds `ν_t` and the face viscosity); the shipped probe at reach 3 folds ~1e-6 into the `u`,
   `v` columns. Whether that costs Krylov cycles is unmarched; a per-column plan `(4,4,3,4,3)` would be
-  exact (`validation/pitzdaily_openfoam/probe_reach_check.py`). On orthogonal `bfs3d` the second pass
-  vanishes, but its p/k/omega columns still need a uniform reach 3.
+  exact (`validation/pitzdaily_openfoam/probe_reach_check.py`).
+- **The second pass is active wherever the spacing varies, orthogonal or not.** It contributes
+  `gradient_defect . hessian`, and the defect is zero only on uniform spacing (a centred Green–Gauss
+  gradient is exact for quadratics there): interior `|defect| / V^(1/3)` is 0 on uniform cubes, ~1e-15 on
+  uniform 10:1 cells, 5.2e-2 on a 1.25-graded box and 5.0e-2 on bfs3d, every cell of which is graded 1.22
+  wall-normal; boundary cells carry ~0.1–0.3 on any mesh (the closure). So aspect ratio alone does not
+  extend the reach and grading does, which is why bfs3d's p/k/omega columns reach 3 (2026-10-26,
+  `validation/gradient_defect_by_grading.py`; log, "Where the second pass is active").
 - **The boundary closure must reproduce linear fields exactly** — the corrections absorb what a
   closure does to quadratics but never an error at linear order. `OwnerGradient` (default) is exact on
   quad/hex; `SkewCorrectedGradient` is needed where a tetrahedron owns **two or more** boundary faces

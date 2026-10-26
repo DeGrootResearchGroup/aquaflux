@@ -177,8 +177,7 @@ branches.
   move (2026-10-15, PR #721).
 - ⚠️ **A single bfs3d march is one draw from a wide spread: judge a change on several perturbed draws per
   arm** (failure count and step spread). A last-bit viscosity change (`1 ± 1e-14`) moves it from ~20 to ~80
-  steps or to a failure, so a one-run-per-arm bfs3d A/B -- the 2026-10-14 guard choice, PR #722's reach-2
-  cost, #742's "doubling" -- cannot rank arms closer than that. The cause: wall cells whose shifted `k`
+  steps or to a failure, so a one-run-per-arm bfs3d A/B -- the 2026-10-14 guard choice, #742's "doubling" -- cannot rank arms closer than that. The cause: wall cells whose shifted `k`
   pivot nears zero make the **float32** field split's `A·M` wrong by order one around them, so the
   step's solve stalls at its cap and its direction is decided by rounding. `BFS3D_PIVOT_FLOOR=0.15` /
   `PITZ_PIVOT_FLOOR` (`MaterializedJacobian.pivot_floor`, `solve.md`) removes it: 21 steps both at `1 ± 0`
@@ -194,11 +193,25 @@ branches.
   previous one returned (#761), and a freshly evaluated one differs at round-off, which flipped one such
   step from descent to a tenfold rise. Reproduce such a step from a capture of its `_march_step` arguments,
   or read it as a spread over perturbed residuals.
-- **A per-column probe reach is licensed by the gradient scheme and the split; re-audit it when either
-  changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships `MultipleCorrectionGradient` at a
-  uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond reach 2, and a reach-2 colouring
-  cost it 18→21 steps / 137→216 cycles (PR #722; one run per arm, so a single draw -- see the ensemble bullet above). pitzDaily deliberately probes every column at reach 2
-  inside its reach-3 pattern: its march is unchanged and the probe 40 % cheaper (2026-10-14).
+- **A per-column probe reach is licensed by the gradient scheme, the split AND the mesh's cell aspect
+  ratio; re-audit it when any changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships
+  `MultipleCorrectionGradient` at a uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond
+  reach 2, and a reach-2 colouring cost it 17 → 21–40 steps over three perturbed draws per arm with the
+  pivot floor (2026-10-25, `BFS3D_NU_PERTURBATION`; uniform reach 3 gave 17 steps on every draw).
+  pitzDaily deliberately probes every column at reach 2 inside its reach-3 pattern: its march is
+  unchanged and the probe 40 % cheaper (2026-10-14). The difference is the pressure column on stretched
+  cells (spacing ratio above 10:1: bfs3d 41 %, pitzDaily 1.5 %; `solve-direct-preconditioners.md`, probe
+  colouring).
+- **`reach_folding.py` replays one inner solve of either step case per probe arm** (`REACH_FOLDING_CASE`,
+  `_STEP`, `_INNER` from a march run with `*_INNER_DUMP_ABOVE=1`; arms `3`, `2`, a field, `A/B` build vs
+  re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`). ⚠️ At most two arms per process on bfs3d (the
+  fifth died in LLVM's allocator on 15 GiB). ⚠️ It re-fits at the step's start, which matches the march
+  only where the step re-fitted there (every ramp step does); a pitzDaily inner replay ran 4 cycles where
+  its march logged 5, likely its post-setback tolerance. `mesh_anisotropy.py` (moved to `validation/`)
+  gives the per-cell spacing ratio it bins by (`spacing_ratio`, max/min `|d.n|`) and the conductance
+  ratio (`conductance_ratio`, max/min `|S_f|/|d.n|`, roughly its square). ⚠️ Before 2026-10-26
+  `conductance_ratio` returned the spacing ratio (a norm over the per-face scalar area), so a
+  "conductance ratio" quoted from it before then is a spacing ratio.
 
 ## Machine contention and run records
 
