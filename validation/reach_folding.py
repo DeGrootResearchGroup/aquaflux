@@ -68,6 +68,8 @@ Environment: ``REACH_FOLDING_CASE`` (``bfs3d_openfoam`` or ``pitzdaily_openfoam`
 
 from __future__ import annotations
 
+import ast
+import contextlib
 import dataclasses
 import gc
 import inspect
@@ -115,6 +117,38 @@ from aquaflux.turbulence.coupled import coupled_scaled_norm  # noqa: E402
 from mesh_anisotropy import spacing_ratio  # noqa: E402
 
 LADDER = (1.0, 0.5, 0.25, 0.125, 1 / 32)
+#: The fixed seed of the random right-hand side the leading inverse's own convergence is read on.
+LEADING_SEED = 0
+
+
+def leading_overrides():
+    """The ``REACH_FOLDING_LEADING`` edits of the leading block inverse, as ``{field: value}``.
+
+    A comma-separated list of ``field=value`` (``cycles=8,pressure_sweeps=4``), each a field of the
+    case's leading :class:`~aquaflux.precondition.SimpleSmoothed`; values are Python literals, ``true``
+    and ``false`` read as booleans. Every arm of the process runs under the same edits, which replace
+    the file's settings with ``dataclasses.replace`` and change no library default.
+    """
+    text = os.environ.get("REACH_FOLDING_LEADING", "").strip()
+    if not text:
+        return {}
+    leading = type(compare.SOLVER.preconditioner.inverse.leading)
+    fields = {f.name for f in dataclasses.fields(leading)}
+    out = {}
+    for item in text.split(","):
+        name, _, value = item.partition("=")
+        name = name.strip()
+        if name not in fields:
+            raise SystemExit(
+                f"REACH_FOLDING_LEADING: {name!r} is not a field of {leading.__name__} ({sorted(fields)})"
+            )
+        value = value.strip()
+        out[name] = {"true": True, "false": False}.get(value.lower(), None)
+        if out[name] is None:
+            out[name] = ast.literal_eval(value)
+    return out
+
+
 #: A diagonal counts as moved when the fold shifts it by more than this share of the shifted diagonal.
 MOVED = 1e-6
 
@@ -138,38 +172,71 @@ def probe_reach(token, n_fields, names):
     raise SystemExit(f"REACH_FOLDING_ARMS: unknown probe {token!r} (3, 2, a field name, or !field)")
 
 
+#: The fitted components an arm can take from a uniform reach-3 fit instead (``arm+component``): the
+#: leading block's finest level operator (the smoother's residual products), its finest-level SIMPLE
+#: pieces whole or one at a time, the coarse levels with their pieces, and the split's coupling.
+COMPONENTS = {
+    "fine": "the finest leading level operator (the smoother's residual products)",
+    "pieces": "every finest-level SIMPLE piece",
+    "schur": "the finest Schur diagonal inverse (from S's diagonal and row norms)",
+    "C": "the finest pressure block C",
+    "D": "the finest divergence block D",
+    "MG": "the finest velocity correction M G",
+    "F": "the finest velocity predictor (diagonal and per-cell block inverse)",
+    "coarse": "every coarse level (Galerkin operators, coarse solve) and its SIMPLE pieces",
+    "coupling": "the split's trailing-by-leading coupling block",
+}
+
+
 def arms(n_fields, names):
-    """``label -> (build column_reach, refit column_reach, mix)`` for ``REACH_FOLDING_ARMS``.
+    """``label -> (build column_reach, refit column_reach, mix, components)`` for ``REACH_FOLDING_ARMS``.
 
     The mix is ``None`` except for an ``X*t`` or ``X@part`` arm, whose refit probe is ``X``'s, mixed with
-    a uniform reach-3 probe as :class:`ScaledFold` describes.
+    a uniform reach-3 probe as :class:`ScaledFold` describes. Any arm may end in ``+component`` (several
+    allowed, ``p@drop+schur+C``; :data:`COMPONENTS`): those fitted components are then taken from a
+    re-fit at a uniform reach 3 on the same coarsening, and everything else from the arm's own fit.
     """
     out = {}
-    for token in os.environ.get("REACH_FOLDING_ARMS", "3,2,each").split(","):
-        if "*" in token:
-            name, scale = token.split("*")
-            label, reach = probe_reach(name, n_fields, names)
-            out[f"uniform 3 + {float(scale):g} x fold of {label}"] = (None, reach, float(scale))
-        elif "@" in token:
-            name, part = token.split("@")
-            if part not in ("drop", "fold"):
-                raise SystemExit(f"REACH_FOLDING_ARMS: {token!r}: the part after @ is drop or fold")
-            label, reach = probe_reach(name, n_fields, names)
-            out[
-                f"uniform 3 with only the {'dropped' if part == 'drop' else 'folded'} part of {label}"
-            ] = (None, reach, part)
-        elif token == "each":
-            for name in names:
-                label, reach = probe_reach(name, n_fields, names)
-                out[label] = (reach, reach, None)
-        elif "/" in token:
-            (built, build), (fitted, refit) = (
-                probe_reach(t, n_fields, names) for t in token.split("/")
+    for whole in os.environ.get("REACH_FOLDING_ARMS", "3,2,each").split(","):
+        token, *components = whole.split("+")
+        unknown = [c for c in components if c not in COMPONENTS]
+        if unknown:
+            raise SystemExit(
+                f"REACH_FOLDING_ARMS: {whole!r}: unknown component(s) {unknown} ({sorted(COMPONENTS)})"
             )
-            out[f"coarsened {built}, re-fitted {fitted}"] = (build, refit, None)
-        else:
-            label, reach = probe_reach(token, n_fields, names)
+        suffix = "".join(f", {c} from uniform 3" for c in components)
+        for label, reaches in _parse_arm(token, n_fields, names).items():
+            out[label + suffix] = (*reaches, tuple(components))
+    return out
+
+
+def _parse_arm(token, n_fields, names):
+    """``label -> (build column_reach, refit column_reach, mix)`` for one token, without components."""
+    out = {}
+    if "*" in token:
+        name, scale = token.split("*")
+        label, reach = probe_reach(name, n_fields, names)
+        out[f"uniform 3 + {float(scale):g} x fold of {label}"] = (None, reach, float(scale))
+    elif "@" in token:
+        name, part = token.split("@")
+        if part not in ("drop", "fold"):
+            raise SystemExit(f"REACH_FOLDING_ARMS: {token!r}: the part after @ is drop or fold")
+        label, reach = probe_reach(name, n_fields, names)
+        out[
+            f"uniform 3 with only the {'dropped' if part == 'drop' else 'folded'} part of {label}"
+        ] = (None, reach, part)
+    elif token == "each":
+        for name in names:
+            label, reach = probe_reach(name, n_fields, names)
             out[label] = (reach, reach, None)
+    elif "/" in token:
+        (built, build), (fitted, refit) = (
+            probe_reach(t, n_fields, names) for t in token.split("/")
+        )
+        out[f"coarsened {built}, re-fitted {fitted}"] = (build, refit, None)
+    else:
+        label, reach = probe_reach(token, n_fields, names)
+        out[label] = (reach, reach, None)
     return out
 
 
@@ -221,6 +288,86 @@ class ScaledFold:
         sparse_jacobian_module.materialize_blocks = self.original
 
 
+def _copied(tree):
+    """``tree`` with every array copied, so a later re-fit's release of the originals cannot reach it."""
+    return jax.tree.map(
+        lambda leaf: jnp.array(leaf, copy=True) if eqx.is_array(leaf) else leaf, tree
+    )
+
+
+class ComponentSwap:
+    """While active, each re-fit of ``inverse`` (a field split) puts back the named components held now.
+
+    Made right after a re-fit from a uniform reach-3 probe, it copies what that fit holds; the next
+    re-fit runs as usual and then has the named components (:data:`COMPONENTS`) replaced by the copies,
+    before the session takes the split's traced form from it. Every swap is between two fits on the same
+    frozen coarsening, so each replaced array has the shape and the pattern of the one it replaces.
+    Values only: the index arrays stay the new fit's own. The hook is an instance attribute shadowing
+    the split's own ``refactor_blocks``, removed on exit; the library is not touched.
+    """
+
+    def __init__(self, inverse, components):
+        self.inverse, self.components = inverse, tuple(components)
+        leading = inverse.leading
+        self.hierarchy = _copied(leading._hierarchy)
+        self.extras = _copied(dict(leading._extras))
+        self.coupling = jnp.array(inverse._coupling.values, copy=True)
+
+    def _put_back(self):
+        leading, held = self.inverse.leading, self.hierarchy
+        levels, extras = list(leading._hierarchy.levels), dict(leading._extras)
+        fine = levels[0].n
+        piece = extras[fine]
+        fields = {
+            "schur": ("schur_diagonal_inverse",),
+            "F": ("f_diagonal_inverse", "f_block_inverse"),
+        }
+        operators = {"C": "pressure", "D": "divergence", "MG": "dg"}
+        for component in self.components:
+            if component == "fine":
+                levels[0] = eqx.tree_at(
+                    lambda level: level.operator.values, levels[0], held.levels[0].operator.values
+                )
+            elif component == "coarse":
+                levels[1:] = held.levels[1:]
+                for level in held.levels[1:]:
+                    if level.n in self.extras:
+                        extras[level.n] = self.extras[level.n]
+            elif component == "pieces":
+                piece = self.extras[fine]
+            elif component in fields:
+                for name in fields[component]:
+                    value = getattr(self.extras[fine], name)
+                    if value is not None:
+                        piece = eqx.tree_at(lambda p, name=name: getattr(p, name), piece, value)
+            elif component in operators:
+                name = operators[component]
+                piece = eqx.tree_at(
+                    lambda p, name=name: getattr(p, name).values,
+                    piece,
+                    getattr(self.extras[fine], name).values,
+                )
+            elif component == "coupling":
+                held_pattern = self.inverse._coupling.pattern
+                self.inverse._coupling = type(self.inverse._coupling)(held_pattern, self.coupling)
+        extras[fine] = piece
+        leading._hierarchy = eqx.tree_at(lambda h: h.levels, leading._hierarchy, tuple(levels))
+        leading._extras = extras
+
+    def __enter__(self):
+        original = type(self.inverse).refactor_blocks
+
+        def refactor_blocks(blocks):
+            original(self.inverse, blocks)
+            self._put_back()
+
+        self.inverse.refactor_blocks = refactor_blocks
+        return self
+
+    def __exit__(self, *exc):
+        del self.inverse.refactor_blocks
+
+
 class StepRebuild:
     """The march's step at a checkpoint, rebuilt per preconditioner spec as the viscosity ramp builds it."""
 
@@ -245,22 +392,36 @@ class StepRebuild:
         self.anchor = assembler_for(0)
         self.seed = self.anchor.state_from_physical(*hybrid_initialize(self.anchor))
         self.station = min(step_number - 1, ramp.stations)
+        #: The leading group's degrees of freedom: every field but the two transported scalars.
+        self.n_leading = (coupled.layout.n_fields - 2) * coupled.layout.n_cells
         self.assembler = assembler_for(self.station)
 
-    def fitted(self, build_reach, refit_reach, mix=None):
+    def fitted(self, build_reach, refit_reach, mix=None, components=()):
         """The step's state after the re-fit, and its session.
 
         The session is built (which fixes the frozen coarsening) under a probe of ``build_reach`` and
         re-fitted (which supplies every value) under one of ``refit_reach`` -- or, given ``mix``, from
-        the :class:`ScaledFold` mix of a uniform reach-3 probe and ``refit_reach``'s. Swapping the probe between the two reaches into the session's
-        private spec and probe, which this harness may do and the library never does.
+        the :class:`ScaledFold` mix of a uniform reach-3 probe and ``refit_reach``'s. Swapping the probe
+        between the two reaches goes into the session's private spec and probe, which this harness may
+        do and the library never does. Given ``components``, the session is first re-fitted from a
+        uniform reach-3 probe on the same coarsening and those components are kept
+        (:class:`ComponentSwap`), then re-fitted as the arm says with them put back.
         """
         settings = self.spec.settings()
         file_pc = settings["preconditioner"]
 
+        inverse = file_pc.inverse
+        overrides = leading_overrides()
+        if overrides:
+            inverse = dataclasses.replace(
+                inverse, leading=dataclasses.replace(inverse.leading, **overrides)
+            )
+
         def with_reach(reach):
             return dataclasses.replace(
-                file_pc, probe=dataclasses.replace(file_pc.probe, column_reach=reach)
+                file_pc,
+                inverse=inverse,
+                probe=dataclasses.replace(file_pc.probe, column_reach=reach),
             )
 
         allowed = inspect.signature(coupled_step).parameters
@@ -275,15 +436,24 @@ class StepRebuild:
         active = eqx.tree_at(
             lambda s: s.relaxation_schedule, base, ConstantRelaxation(jnp.asarray(self.beta))
         )
-        if mix is None:
-            update = session.refresh_preconditioner(active, self.phi, due=True)
-        else:
-            problem = session._problem
-            groups = problem.groups() if isinstance(file_pc.inverse, FieldSplit) else None
+        problem = session._problem
+        groups = problem.groups() if isinstance(file_pc.inverse, FieldSplit) else None
+
+        def probes():
             uniform = problem.probe(with_reach(None).probe.settings(), groups)
-            folded = problem.probe(with_reach(refit_reach).probe.settings(), groups)
-            with ScaledFold(uniform, folded, mix):
+            return uniform, problem.probe(with_reach(refit_reach).probe.settings(), groups)
+
+        swap = None
+        if components:
+            with ScaledFold(*probes(), 0.0):
+                session.refresh_preconditioner(active, self.phi, due=True)
+            swap = ComponentSwap(session.preconditioner.inverse, components)
+        with swap if swap is not None else contextlib.nullcontext():
+            if mix is None:
                 update = session.refresh_preconditioner(active, self.phi, due=True)
+            else:
+                with ScaledFold(*probes(), mix):
+                    update = session.refresh_preconditioner(active, self.phi, due=True)
         if update is not None:
             active = update(active)
         active = active.with_norm(coupled_scaled_norm(self.coupled, active.shift_policy, self.phi))
@@ -300,6 +470,38 @@ class StepRebuild:
         return g, shift, term.make_preconditioner(strength)
 
 
+def leading_report(session, apply_a, g, n_leading):
+    """How close the fitted leading inverse is to the inverse of its fitted block, and of the exact one.
+
+    For ``x = L b`` (``L`` the split's leading block inverse at the arm's cycle count), the relative
+    residual ``|b - A x| / |b|`` against two leading blocks: the one ``L`` was fitted to (the shifted,
+    probed block it holds as its finest level operator, so this falls toward the fit's rounding as
+    ``L`` approaches that block's inverse) and the exact shifted leading block of the operator, applied
+    by a Jacobian-vector product with the trailing part of ``x`` zero. Read on a random right-hand side
+    (seeded) and on the leading rows of the solve's own right-hand side. Euclidean, so read it beside
+    the solve's row-scaled numbers rather than against them.
+    """
+    leading = session.preconditioner.inverse.leading
+    fitted = leading._hierarchy.levels[0].operator.to_scipy().astype(np.float64)
+    if getattr(leading._hierarchy, "equilibration", None) is not None:
+        return "  leading inverse: hierarchy equilibrated, block residual not read"
+    n_dofs = g.size
+    rng = np.random.default_rng(LEADING_SEED)
+    parts = []
+    for tag, b in (
+        ("random", rng.standard_normal(n_leading)),
+        ("solve rhs", np.asarray(g[:n_leading])),
+    ):
+        x = leading.apply(b)
+        exact = np.asarray(apply_a(jnp.zeros(n_dofs).at[:n_leading].set(x)))[:n_leading]
+        size = np.linalg.norm(b)
+        parts.append(
+            f"{tag}: fitted {np.linalg.norm(b - fitted @ x) / size:.2e}, exact "
+            f"{np.linalg.norm(b - exact) / size:.2e}"
+        )
+    return "  leading inverse |b - A L b| / |b| (" + "; ".join(parts) + ")"
+
+
 #: Cells whose faces' normal distances span more than this ratio count as stretched.
 STRETCHED = 10.0
 #: The bins the pressure fold is reported over, by a cell's spacing (aspect) ratio.
@@ -309,6 +511,11 @@ ANISOTROPY_BINS = ((1.0, 2.0), (2.0, STRETCHED), (STRETCHED, np.inf))
 def solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy):
     started = time.time()
     active, session = rebuild.fitted(*reaches)
+    if reaches[3]:
+        print(
+            "[components] from uniform 3: " + "; ".join(COMPONENTS[c] for c in reaches[3]),
+            flush=True,
+        )
     n = rebuild.coupled.layout.n_cells
     floored = getattr(getattr(session, "_hook", None), "floored_rows", None)
     floored_text = (
@@ -330,6 +537,7 @@ def solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy):
         f"[arm] {label}: fitted in {time.time() - started:.0f} s, floored rows {floored_text}",
         flush=True,
     )
+    print(leading_report(session, apply_a, g, rebuild.n_leading), flush=True)
     for tag, solver in (
         ("march rtol", base_solver),
         (f"rtol {tight_rtol:g}", with_relative_tolerance(base_solver, tight_rtol)),
@@ -632,7 +840,8 @@ def main():
         f"[configuration] case {CASE_NAME}, {n} cells, step {step_number} (station {rebuild.station}) from "
         f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, split precision "
         f"{compare.SOLVER.preconditioner.inverse.precision}, file probe "
-        f"{compare.SOLVER.preconditioner.probe}, jax {jax.__version__}",
+        f"{compare.SOLVER.preconditioner.probe}, leading edits {leading_overrides() or 'none'}, "
+        f"jax {jax.__version__}",
         flush=True,
     )
     shift = None
