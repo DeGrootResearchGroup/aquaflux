@@ -300,6 +300,18 @@ def _copied(tree):
     )
 
 
+def _relative_change(old, new):
+    """``|new - old| / |old|`` over every floating array leaf of two pytrees of one structure."""
+    pairs = [
+        (np.asarray(a, np.float64), np.asarray(b, np.float64))
+        for a, b in zip(jax.tree.leaves(old), jax.tree.leaves(new), strict=True)
+        if eqx.is_array(a) and jnp.issubdtype(a.dtype, jnp.floating)
+    ]
+    size = sum(float(np.sum(a * a)) for a, _ in pairs)
+    change = sum(float(np.sum((b - a) ** 2)) for a, b in pairs)
+    return np.sqrt(change / size) if size else 0.0
+
+
 class ComponentSwap:
     """While active, each re-fit of ``inverse`` (a field split) puts back the named components held now.
 
@@ -323,6 +335,7 @@ class ComponentSwap:
         levels, extras = list(leading._hierarchy.levels), dict(leading._extras)
         fine = levels[0].n
         piece = extras[fine]
+        before = self._parts(levels, extras, self.inverse._coupling.values)
         fields = {
             "schur": ("schur_diagonal_inverse",),
             "F": ("f_diagonal_inverse", "f_block_inverse"),
@@ -358,6 +371,26 @@ class ComponentSwap:
         extras[fine] = piece
         leading._hierarchy = eqx.tree_at(lambda h: h.levels, leading._hierarchy, tuple(levels))
         leading._extras = extras
+        after = self._parts(levels, extras, self.inverse._coupling.values)
+        # How far the swap moved each part: zero where nothing was swapped, and where something was,
+        # how far the reach-3 fit's values sit from the arm's own (a swap that moved nothing is inert).
+        print(
+            "[components] relative change: "
+            + ", ".join(
+                f"{name} {_relative_change(before[name], after[name]):.2e}" for name in before
+            ),
+            flush=True,
+        )
+
+    @staticmethod
+    def _parts(levels, extras, coupling):
+        fine = levels[0].n
+        return {
+            "fine operator": levels[0].operator.values,
+            "fine pieces": extras[fine],
+            "coarse levels": (levels[1:], {n: e for n, e in extras.items() if n != fine}),
+            "coupling": coupling,
+        }
 
     def __enter__(self):
         original = type(self.inverse).refactor_blocks
