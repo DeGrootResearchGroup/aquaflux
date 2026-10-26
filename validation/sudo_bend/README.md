@@ -112,7 +112,10 @@ stations, and the Jacobian probe's reach: the pressure column at 3, the others a
 (2026-10-23, the probe then at a reach of 3 in every column, `main` at `7fe27d07` merged, 4-core
 Linux container with 15 GB, one run): converged in 15 steps and 42 min (2514 s) to 1.1e-7 in the
 row-scaled measure, at least 4.3 GB of memory free throughout. The inlet admits 0.998 of
-`U_b` times its area (the faces take the profile at their own radius, the table holds cell means).
+`U_b` times its area (the faces take the profile at their own radius, the table holds cell means). At the
+current reach (2026-10-26, same container and grid, one run): 15 steps again, 1.2e-7, 106 Krylov
+cycles against 101; the 13 refits took 516 s against 721 (the probe is cheaper), but the whole march
+took the same 39 minutes (2348 s against 2339; its last minute shared the machine with a short test).
 
 `render_flow.py` draws `figures/flow_sections.png` (the axial velocity and the cross-flow at the
 stations: the pair of Dean vortices, the core thrown to the outer wall by 90 degrees, slow fluid
