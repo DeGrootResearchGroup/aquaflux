@@ -141,4 +141,64 @@ Three readings, each from this one state:
    change of operator, or to the specific change across the inner loop (the iterate moved `k` enough
    that the pivot floor moved 85 `k` rows there against 32 at φ).
 
+### The same at other states, and for the arm the reach-2 probe actually gives (`p`, drop and fold)
+
+Cycles at rtol 0.3; tight row-scaled after 16 cycles unless a count is given.
+
+| state | arm | fit at φ (march), operator iterate | fit at φ, operator `J₃(φ)` | fit at iterate (no lag) |
+|---|---|---|---|---|
+| step 5, inner 2 | `3` | 6; 1.35e-4 | 3; 8 cycles to 9.9e-6 | 3; 14 cycles to 9.5e-6 |
+| step 5, inner 2 | `p@drop` | 14; 8.74e-2 | 3; 11 cycles to 1.0e-5 | 3; 3.5e-5 |
+| step 5, inner 2 | `p` | **16, stagnant; 2.48** | 3; 11 cycles to 9.0e-6 | **3; 1.03e-5** |
+| step 6, inner 1 | `3` | 5; 2.61e-4 | — | 3; 6.77e-5 |
+| step 6, inner 1 | `p@drop` | 8; 1.08e-2 | — | 4; 7.13e-5 |
+| step 6, inner 1 | `p` | (see the attribution table) | — | 3; 6.30e-5 |
+| step 10, inner 0 (iterate = φ) | `3` | 4; 1.91e-4 | (same operator) | (same fit) |
+| step 10, inner 0 (iterate = φ) | `p@drop` | 5; 4.94e-4 | (same operator) | (same fit) |
+
+At every state measured, the reach-2 fit (`p`, or its drop alone) **made at the state it is applied
+at** is level with the reach-3 fit at the march tolerance (3–5 against 3–4 cycles) and within a factor
+of ~3 at 1e-5. It loses heavily only when applied two inner iterates (step 5) or one (step 6) after its
+fit, which is how the dual-time inner loop uses it. Step 10's first inner solve has no lag and loses
+only one cycle and a factor 2.6 at the tight tolerance (the "rate halves" of the record).
+
+## Attribution: which fitted component carries the lagged failure (step 5, inner 2)
+
+⚠️ **Deviation from the pre-registration, flagged:** 0b was pre-registered to run only if 0a said H1,
+and 0a was unreadable. It is run anyway, on the failure actually observed (the lagged `p` fit against
+the march's operator), because it is the same experiment and decides where option 4 would have to act.
+The arm is `p` (the probe the march would use), not `p@drop`. Each row re-fits `p` at φ and puts back
+one fitted component from a uniform-reach-3 re-fit at φ on the same frozen coarsening
+(`ComponentSwap`); everything else is `p`'s own. Pre-registered bar: within 1.5x of arm `3`'s 6 cycles,
+i.e. ≤ 9.
+
+| `p` with this component from the reach-3 fit | cycles, rtol 0.3 | tight row-scaled (16 cycles) |
+|---|---|---|
+| none (`p`) | 16, stagnant | 2.48 |
+| finest leading level operator (the smoother's residual products) | 16, stagnant | 1.72 |
+| every finest-level SIMPLE piece (`F` inverse, `M G`, `D`, `C`, Schur diagonal) | 16, stagnant | 2.48 |
+| the finest Schur diagonal inverse alone | 16, stagnant | 2.48 |
+| the finest `C` alone | 16, stagnant | 2.48 |
+| the split's coupling block | 16, stagnant | 1.08 |
+| **every coarse level (Galerkin operators, coarse solve, their SIMPLE pieces)** | **6** | **2.98e-4** |
+| all of the above (null control: must reproduce arm `3`) | 6 | 1.47e-4 (arm `3`: 1.35e-4) |
+
+**The coarse levels carry the failure.** Swapping them alone meets the bar exactly (6, the arm-`3`
+count); nothing on the finest level does, the Schur diagonal included (so H1-a, the proposal's
+over-relaxed Frobenius pressure sweep, is not what fails here). The null control reproduces arm `3`, so
+the swap machinery is sound. The fine-piece swaps that leave every digit unchanged did move their arrays
+(the census below: the `p` probe drops 773 476 of `C`'s 1 311 372 entries, 3.5e-3 of its norm); those
+values simply do not matter to this solve.
+
+Why the coarse levels: the fitted fine operators of `p` and `3` differ by 3.7e-3 (largest relative
+change of the finest operator's values), but their coarse levels by 5.3e-2, fourteen times more, at the
+same aggregates. A Galerkin coarse operator `Pᵀ A P` over these aggregates sums each aggregate's
+couplings, and on the pressure rows those sums nearly cancel, so removing couplings that took part in
+the cancellation moves the coarse operator far more, relatively, than the fine one. (An inference from
+the two numbers; the cancellation itself was not measured.)
+
+Census of what the `p` probe drops at φ (`validation/reach_research/dropped_census.py`, step 5; the numbers were taken with its scratch first draft, same computation): per
+row field of the `p` column, 773 476 of 1 311 372 entries in every row field (667 808 of 1 122 986 for
+ω), of norm 4.6e-3 (u), 9.9e-4 (v), 1.4e-3 (w), 3.5e-3 (p), 4.1e-3 (k), 8.5e-4 (ω) of each block.
+
 (Continued below.)
