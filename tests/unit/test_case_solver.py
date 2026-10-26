@@ -876,9 +876,9 @@ def _pitzdaily_march_as_its_script_passed_it() -> tuple[dict, dict]:
 def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
     """``validation/bfs3d_openfoam/compare.py``'s march at its defaults -- see the pitzDaily twin.
 
-    Since the file took pitzDaily's march settings (the uniform probe, no refit floor, the residual
-    stop, the faster shift descent with its release, the lighter turbulence damping) it differs from
-    the twin only in its trailing inverse.
+    Since the file took pitzDaily's march settings (no refit floor, the residual stop, the faster shift
+    descent with its release, the lighter turbulence damping) it differs from the twin only in its
+    trailing inverse and its probe, which keeps the pressure column at reach three.
     """
     settings = {
         "max_steps": 150,
@@ -908,7 +908,9 @@ def _bfs3d_march_as_its_script_passed_it() -> tuple[dict, dict]:
                 ),
                 precision="float32",
             ),
-            probe=JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None),
+            probe=JacobianProbeSpec(
+                stencil_reach=3, column_reach=(2, 2, 2, 3, 2, 2), gradient_sweeps=None
+            ),
             pivot_floor=PivotFloor(threshold=0.15),
         ),
         "dual_time": DualTimeLoop(
