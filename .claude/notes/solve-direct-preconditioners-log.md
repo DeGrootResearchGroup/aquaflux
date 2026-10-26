@@ -1470,17 +1470,22 @@
       than their own size, pitzDaily 5 471), but the fold-only arm shows that is nearly harmless.
 
       The measure that separates them: in each continuity row, the largest dropped `|C_ij|` against the
-      row's WEAKEST face-neighbour `|C_ij|`, by the cell's conductance ratio (max/min of `|S_f| / d_f.n_f`
-      over its faces; median, and share of rows above 0.1):
+      row's WEAKEST face-neighbour `|C_ij|`, by the cell's spacing ratio (max/min of the normal distance
+      `|d_f.n_f|` over its faces, an aspect ratio; `mesh_anisotropy.spacing_ratio`; median, and share of
+      rows above 0.1):
 
-      | conductance ratio | pitzDaily cells | pitzDaily | bfs3d cells | bfs3d |
+      | spacing ratio | pitzDaily cells | pitzDaily | bfs3d cells | bfs3d |
       |---|---|---|---|---|
       | 1-2:1 | 8 399 | 3.4e-03, 0 % | 40 | 3.9e-02, 0 % |
       | 2-10:1 | 3 643 | 8.6e-03, 6 % | 13 440 | 0.23, 88 % |
       | above 10:1 | 183 | 0.51, 77 % | 9 560 | 1.30, 100 % |
 
-      Mesh-wide conductance ratio: pitzDaily median 1.7, p99 12, 1.5 % of cells above 10:1; bfs3d median
-      8.6, p99 59, 41 % above 10:1. So pitzDaily's stretched cells drop couplings as large as bfs3d's do,
+      Mesh-wide spacing ratio: pitzDaily median 1.7, p99 12, 1.5 % of cells above 10:1; bfs3d median
+      8.6, p99 59, 41 % above 10:1. The face-conductance ratio `|S_f| / |d_f.n_f|` (roughly its square)
+      is pitzDaily median 2.8, p99 116, 13 % above 10:1; bfs3d median 64, p99 1694, 92 % above 10:1.
+      ⚠️ Until 2026-10-26 `conductance_ratio` returned the spacing ratio (it took a norm over the
+      per-face scalar area, collapsing it to one number), so this entry's first draft and its rule
+      lines called these spacing-ratio bins "conductance ratio". So pitzDaily's stretched cells drop couplings as large as bfs3d's do,
       and there are 183 of them; bfs3d drops them nearly everywhere. Not run: bfs3d on a less graded mesh
       (the causal test), and pitzDaily with a refined, stretched near-wall region.
 

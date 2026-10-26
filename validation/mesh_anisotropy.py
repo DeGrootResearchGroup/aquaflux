@@ -5,11 +5,14 @@ level-1 one does not.  That mechanism only explains the pitzDaily/bfs3d split if
 differ on this axis, so measure it directly.  Reading the mesh costs a fraction of building the
 coupled case, which is what makes this affordable on bfs3d.
 
-Two measures, because the crude one can mislead:
+Three measures, because the crude one can mislead:
   face-centroid ratio   max/min distance from the cell centroid to its own face centroids
-  conductance ratio     max/min of |S_f| / (d_f . n_f) over a cell's faces -- the ratio of the
+  spacing ratio         max/min of the normal distance |d_f . n_f| across a cell's faces -- an aspect
+                        ratio read the way a face flux sees it
+  conductance ratio     max/min of |S_f| / |d_f . n_f| over a cell's faces -- the ratio of the
                         diffusive couplings a transport operator actually assembles, which is
-                        what an incomplete factorization has to reproduce
+                        what an incomplete factorization has to reproduce (roughly the square of
+                        the spacing ratio on a stretched hexahedron)
 """
 
 from __future__ import annotations
@@ -36,23 +39,39 @@ MESHES = {
 }
 
 
-def conductance_ratio(mesh, geom):
-    """Per cell, max/min of the diffusive conductance ``|S_f| / (d_f . n_f)`` over its faces, shape ``(n,)``."""
+def _spread_over_faces(mesh, per_face):
+    """Per cell, max/min of a positive per-face quantity over the cell's faces, shape ``(n_cells,)``."""
     fc = mesh.face_cells
-    owner, nb = np.asarray(fc.owner), np.asarray(fc.neighbour)
+    owner, neighbour = np.asarray(fc.owner), np.asarray(fc.neighbour)
     interior = np.asarray(fc.interior)
-    area = np.asarray(jnp.linalg.norm(geom.face.area, axis=-1))
-    x_p = geom.cell.centroid[fc.owner]
-    delta = np.asarray(dot(fc.neighbour_centroid(geom.cell.centroid) - x_p, geom.face.normal))
-    boundary_delta = np.asarray(dot(geom.face.centroid - x_p, geom.face.normal))
-    normal_distance = np.where(interior, delta, boundary_delta)
-    conductance = area / np.maximum(np.abs(normal_distance), 1e-300)
-    n = mesh.n_cells
-    lo, hi = np.full(n, np.inf), np.zeros(n)
-    for cells, faces in ((owner, np.arange(owner.size)), (nb[interior], np.flatnonzero(interior))):
-        np.minimum.at(lo, cells, conductance[faces])
-        np.maximum.at(hi, cells, conductance[faces])
+    lo, hi = np.full(mesh.n_cells, np.inf), np.zeros(mesh.n_cells)
+    for cells, faces in (
+        (owner, np.arange(owner.size)),
+        (neighbour[interior], np.flatnonzero(interior)),
+    ):
+        np.minimum.at(lo, cells, per_face[faces])
+        np.maximum.at(hi, cells, per_face[faces])
     return hi / np.maximum(lo, 1e-300)
+
+
+def _normal_distance(mesh, geom):
+    """``|d_f . n_f|`` per face: owner to neighbour centroid, or owner to face centroid on a boundary."""
+    fc = mesh.face_cells
+    x_p = geom.cell.centroid[fc.owner]
+    across = np.asarray(dot(fc.neighbour_centroid(geom.cell.centroid) - x_p, geom.face.normal))
+    to_face = np.asarray(dot(geom.face.centroid - x_p, geom.face.normal))
+    return np.maximum(np.abs(np.where(np.asarray(fc.interior), across, to_face)), 1e-300)
+
+
+def spacing_ratio(mesh, geom):
+    """Per cell, max/min of the normal distance ``|d_f . n_f|`` over its faces, shape ``(n,)``."""
+    return _spread_over_faces(mesh, _normal_distance(mesh, geom))
+
+
+def conductance_ratio(mesh, geom):
+    """Per cell, max/min of the diffusive conductance ``|S_f| / |d_f . n_f|`` over its faces, shape ``(n,)``."""
+    area = np.asarray(geom.face.area)  # one scalar per face
+    return _spread_over_faces(mesh, area / _normal_distance(mesh, geom))
 
 
 def report(name, path):
@@ -82,10 +101,12 @@ def report(name, path):
         np.maximum.at(hi, cells, dist)
     ratio = hi / np.maximum(lo, 1e-300)
 
-    cratio = conductance_ratio(mesh, geom)
-
     print(f"\n{name}: {n} cells, {mesh.dim}D, {int(interior.sum())} interior faces")
-    for label, q in (("face-centroid ratio", ratio), ("conductance ratio", cratio)):
+    for label, q in (
+        ("face-centroid ratio", ratio),
+        ("spacing ratio", spacing_ratio(mesh, geom)),
+        ("conductance ratio", conductance_ratio(mesh, geom)),
+    ):
         print(
             f"  {label:<22} median {np.median(q):8.2f}  p90 {np.quantile(q, 0.90):9.2f}  "
             f"p99 {np.quantile(q, 0.99):9.2f}  max {q.max():10.2f}  "

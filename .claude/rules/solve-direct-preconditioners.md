@@ -243,8 +243,8 @@ bare block inverse).
   Reach is graph distance; across a stretched cell the cell three faces away can couple more strongly
   than the face neighbour along its long side, so dropping the distance-3 pressure couplings removes some
   as large as couplings kept. bfs3d's largest dropped `|C_ij|` is 1.3x the row's weakest face coupling at
-  the median in cells above 10:1 (41 % of its cells) and 0.23x in 2–10:1 ones (58 %); pitzDaily's is 0.3–0.9 %
-  in its 98.5 % of cells below 10:1 and 0.5x in its 183 stretched ones. Only p matters: probing p alone
+  the median in cells whose spacing ratio exceeds 10:1 (41 % of its cells) and 0.23x in 2–10:1 ones (58 %);
+  pitzDaily's is 0.3–0.9 % in its 98.5 % of cells below 10:1 and 0.5x in its 183 stretched ones. Only p matters: probing p alone
   at 2 reproduces bfs3d's failure, which is a stagnant solve at the harder inner iterates, not a slower
   one; the drop alone stagnates it, the fold alone does not, and neither the coarsening nor float32 is
   involved. A block-norm measure of the fold (bfs3d 2x pitzDaily) cannot predict this. Re-measure on

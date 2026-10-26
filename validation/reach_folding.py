@@ -112,7 +112,7 @@ from aquaflux.turbulence import (  # noqa: E402
     scale_momentum_only,
 )
 from aquaflux.turbulence.coupled import coupled_scaled_norm  # noqa: E402
-from mesh_anisotropy import conductance_ratio  # noqa: E402
+from mesh_anisotropy import spacing_ratio  # noqa: E402
 
 LADDER = (1.0, 0.5, 0.25, 0.125, 1 / 32)
 #: A diagonal counts as moved when the fold shifts it by more than this share of the shifted diagonal.
@@ -300,9 +300,9 @@ class StepRebuild:
         return g, shift, term.make_preconditioner(strength)
 
 
-#: Cells whose faces' conductances span more than this ratio count as stretched.
+#: Cells whose faces' normal distances span more than this ratio count as stretched.
 STRETCHED = 10.0
-#: The bins the pressure fold is reported over, by a cell's conductance ratio.
+#: The bins the pressure fold is reported over, by a cell's spacing (aspect) ratio.
 ANISOTROPY_BINS = ((1.0, 2.0), (2.0, STRETCHED), (STRETCHED, np.inf))
 
 
@@ -451,7 +451,7 @@ def folding_report(coupled, phi, shift, names):
             flush=True,
         )
     schur_report(j3, j2, shift, n, n_fields)
-    pressure_entry_report(j3, e, n, n_fields, conductance_ratio(mesh, mesh.geometry()), (owner, nb))
+    pressure_entry_report(j3, e, n, n_fields, spacing_ratio(mesh, mesh.geometry()), (owner, nb))
     del j2, j3, e
     gc.collect()
 
@@ -475,7 +475,7 @@ def pressure_entry_report(j3, e, n, n_fields, anisotropy, edges):
     A block-norm ratio is set by a block's strongest couplings, so it cannot see a fold that is small
     beside those and large beside the weak ones -- which on a stretched cell are the couplings along its
     long direction. This reads each changed entry against its own value, and each pressure row's fold
-    against that row's strongest neighbour coupling, binned by the cell's conductance ratio.
+    against that row's strongest neighbour coupling, binned by the cell's spacing ratio.
     """
     p = n_fields - 3
     velocity = slice(0, p * n)
@@ -521,7 +521,7 @@ def pressure_entry_report(j3, e, n, n_fields, anisotropy, edges):
     folded = abs(e[pressure, leading].multiply(kept)).max(axis=1).toarray().ravel() / strongest
     print(
         "  continuity rows, against each row's strongest neighbour coupling max_(j != i)|J3_ij|, by the "
-        "cell's conductance ratio (median / p99):",
+        "cell's spacing ratio (median / p99):",
         flush=True,
     )
     for low, high in ANISOTROPY_BINS:
@@ -549,7 +549,7 @@ def pressure_entry_report(j3, e, n, n_fields, anisotropy, edges):
     dropped_c = abs(c3 - c3.multiply(kept_c)).max(axis=1).toarray().ravel()
     ratio = dropped_c / np.where(weakest > 0, weakest, np.inf)
     print(
-        "  C rows: largest dropped |C_ij| / weakest face-neighbour |C_ij|, by the cell's conductance ratio "
+        "  C rows: largest dropped |C_ij| / weakest face-neighbour |C_ij|, by the cell's spacing ratio "
         "(median / p90 / p99; share of rows above 0.1):",
         flush=True,
     )
@@ -627,7 +627,7 @@ def main():
     names = field_names(n_fields)
     rebuild = StepRebuild(coupled, phi, beta, step_number, iterate)
     mesh = coupled.momentum.mesh
-    anisotropy = conductance_ratio(mesh, mesh.geometry())
+    anisotropy = spacing_ratio(mesh, mesh.geometry())
     print(
         f"[configuration] case {CASE_NAME}, {n} cells, step {step_number} (station {rebuild.station}) from "
         f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, split precision "

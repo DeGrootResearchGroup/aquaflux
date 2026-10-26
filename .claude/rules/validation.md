@@ -200,14 +200,18 @@ branches.
   pivot floor (2026-10-25, `BFS3D_NU_PERTURBATION`; uniform reach 3 gave 17 steps on every draw).
   pitzDaily deliberately probes every column at reach 2 inside its reach-3 pattern: its march is
   unchanged and the probe 40 % cheaper (2026-10-14). The difference is the pressure column on stretched
-  cells (bfs3d 41 % above 10:1, pitzDaily 1.5 %; `solve-direct-preconditioners.md`, probe colouring).
+  cells (spacing ratio above 10:1: bfs3d 41 %, pitzDaily 1.5 %; `solve-direct-preconditioners.md`, probe
+  colouring).
 - **`reach_folding.py` replays one inner solve of either step case per probe arm** (`REACH_FOLDING_CASE`,
   `_STEP`, `_INNER` from a march run with `*_INNER_DUMP_ABOVE=1`; arms `3`, `2`, a field, `A/B` build vs
   re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`). ⚠️ At most two arms per process on bfs3d (the
   fifth died in LLVM's allocator on 15 GiB). ⚠️ It re-fits at the step's start, which matches the march
   only where the step re-fitted there (every ramp step does); a pitzDaily inner replay ran 4 cycles where
   its march logged 5, likely its post-setback tolerance. `mesh_anisotropy.py` (moved to `validation/`)
-  gives the per-cell conductance ratio both use.
+  gives the per-cell spacing ratio it bins by (`spacing_ratio`, max/min `|d.n|`) and the conductance
+  ratio (`conductance_ratio`, max/min `|S_f|/|d.n|`, roughly its square). ⚠️ Before 2026-10-26
+  `conductance_ratio` returned the spacing ratio (a norm over the per-face scalar area), so a
+  "conductance ratio" quoted from it before then is a spacing ratio.
 
 ## Machine contention and run records
 
