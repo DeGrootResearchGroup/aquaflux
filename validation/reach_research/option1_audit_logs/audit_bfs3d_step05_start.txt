@@ -1,0 +1,152 @@
+[configuration] case bfs3d_openfoam, 23040 cells, step 5 (station 4), Jacobian of the station's assembler at the step's start (state-00004), uniform reach-3 probe, float64, commit 8dd92e7f, taus [0.01, 0.03]
+[colours] p column reach 2: 39 colours, kept distance-3 entries per row 0.00
+[colours] p column S(0.01): 48 colours, kept distance-3 entries per row 2.45
+[colours] p column S(0.03): 46 colours, kept distance-3 entries per row 2.01
+[colours] reach 3: 96; skeleton in 14 s
+[matrix] 4 materializes in 146 s
+
+  row field u: |block| 1.146e-02, rows with no nonzero face coupling 0 of 23040
+    reach 2   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.84e-01  1.29e+01  3.42e+03  100.0%   99.8%  |dropped|/|block| 4.76e-03
+      1-2:1     40 cells   6.95e-02  1.33e-01  1.34e-01  100.0%   85.0%
+      2-10:1  13440 cells   4.34e-01  2.04e+01  3.42e+03   99.9%   99.6%
+      10-inf:1   9560 cells   5.24e-01  3.28e+00  8.20e+02  100.0%  100.0%
+    reach 2   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  4.84e-01  1.29e+01  3.42e+03   99.8%   96.4%  |dropped|/|block| 4.76e-03
+      1-2:1     40 cells   6.95e-02  1.33e-01  1.34e-01   85.0%   25.0%
+      2-10:1  13440 cells   4.34e-01  2.04e+01  3.42e+03   99.6%   94.5%
+      10-inf:1   9560 cells   5.24e-01  3.28e+00  8.20e+02  100.0%   99.5%
+      dropped/strongest median 5.93e-03 p99 8.44e-03 max 1.59e-02
+      folded onto kept entries: |change|/|block| 3.55e-03; per row max|change|/weakest median 2.63e-01 p99 9.24e+00 max 2.24e+03
+    S(0.01)   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.79e-03  2.86e-01  1.63e+02   26.2%   10.0%  |dropped|/|block| 5.47e-05
+      1-2:1     40 cells   4.83e-03  1.34e-02  1.34e-02   10.0%    0.0%
+      2-10:1  13440 cells   8.17e-03  5.21e-01  1.63e+02   43.9%   17.0%
+      10-inf:1   9560 cells   1.44e-03  1.09e-02  1.44e+01    1.3%    0.2%
+      dropped/strongest median 4.98e-05 p99 4.94e-04 max 3.22e-03
+      folded onto kept entries: |change|/|block| 3.92e-05; per row max|change|/weakest median 2.47e-03 p99 1.91e-01 max 5.11e+01
+    S(0.03)   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  6.85e-03  5.51e-01  1.63e+02   21.1%    7.2%  |dropped|/|block| 1.35e-04
+      1-2:1     40 cells   2.19e-02  6.40e-02  6.43e-02   35.0%    0.0%
+      2-10:1  13440 cells   1.60e-02  8.88e-01  1.63e+02   33.9%   12.2%
+      10-inf:1   9560 cells   4.38e-03  4.70e-02  1.44e+01    3.0%    0.3%
+      dropped/strongest median 8.80e-05 p99 1.97e-03 max 6.07e-03
+      folded onto kept entries: |change|/|block| 9.15e-05; per row max|change|/weakest median 4.12e-03 p99 3.33e-01 max 9.10e+01
+
+  row field v: |block| 1.572e-03, rows with no nonzero face coupling 0 of 23040
+    reach 2   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.97e-01  1.59e+01  8.89e+03  100.0%   99.9%  |dropped|/|block| 7.71e-04
+      1-2:1     40 cells   3.62e-02  1.67e-01  1.68e-01  100.0%  100.0%
+      2-10:1  13440 cells   2.56e-01  2.87e+00  3.92e+02  100.0%   99.9%
+      10-inf:1   9560 cells   1.59e+00  3.25e+01  8.89e+03  100.0%  100.0%
+    reach 2   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  4.97e-01  1.59e+01  8.89e+03   99.9%   94.0%  |dropped|/|block| 7.71e-04
+      1-2:1     40 cells   3.62e-02  1.67e-01  1.68e-01  100.0%    5.0%
+      2-10:1  13440 cells   2.56e-01  2.87e+00  3.92e+02   99.9%   90.1%
+      10-inf:1   9560 cells   1.59e+00  3.25e+01  8.89e+03  100.0%   99.9%
+      dropped/strongest median 2.81e-04 p99 4.97e-03 max 6.26e-03
+      folded onto kept entries: |change|/|block| 5.85e-04; per row max|change|/weakest median 2.18e-01 p99 9.39e+00 max 7.73e+02
+    S(0.01)   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.83e-03  8.68e-02  2.29e+01   11.4%    2.6%  |dropped|/|block| 3.48e-05
+      1-2:1     40 cells   2.65e-03  3.10e-02  3.11e-02   10.0%    5.0%
+      2-10:1  13440 cells   5.13e-03  9.10e-02  2.29e+01   11.9%    2.7%
+      10-inf:1   9560 cells   3.20e-03  7.77e-02  2.18e+00   10.6%    2.4%
+      dropped/strongest median 3.55e-06 p99 3.07e-04 max 5.80e-04
+      folded onto kept entries: |change|/|block| 2.49e-05; per row max|change|/weakest median 2.57e-03 p99 3.81e-02 max 1.45e+01
+    S(0.03)   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  8.64e-03  2.75e-01  1.06e+02   10.1%    2.7%  |dropped|/|block| 9.60e-05
+      1-2:1     40 cells   1.29e-02  1.67e-01  1.68e-01   10.0%    5.0%
+      2-10:1  13440 cells   7.70e-03  1.87e-01  1.06e+02    8.2%    2.2%
+      10-inf:1   9560 cells   1.13e-02  3.94e-01  2.18e+01   12.7%    3.3%
+      dropped/strongest median 6.68e-06 p99 1.38e-03 max 2.08e-03
+      folded onto kept entries: |change|/|block| 5.24e-05; per row max|change|/weakest median 4.02e-03 p99 1.14e-01 max 4.06e+01
+
+  row field w: |block| 4.183e-04, rows with no nonzero face coupling 0 of 23040
+    reach 2   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.26e-01  2.55e+01  4.58e+03  100.0%   99.1%  |dropped|/|block| 9.23e-04
+      1-2:1     40 cells   2.97e-02  3.64e-01  3.87e-01  100.0%   45.0%
+      2-10:1  13440 cells   1.97e-01  2.06e+00  3.49e+02  100.0%   98.6%
+      10-inf:1   9560 cells   1.59e+00  5.52e+01  4.58e+03  100.0%   99.9%
+    reach 2   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  4.26e-01  2.55e+01  4.58e+03   99.1%   88.0%  |dropped|/|block| 9.23e-04
+      1-2:1     40 cells   2.97e-02  3.64e-01  3.87e-01   45.0%    5.0%
+      2-10:1  13440 cells   1.97e-01  2.06e+00  3.49e+02   98.6%   79.8%
+      10-inf:1   9560 cells   1.59e+00  5.52e+01  4.58e+03   99.9%   99.8%
+      dropped/strongest median 5.96e-04 p99 6.43e-03 max 9.50e-03
+      folded onto kept entries: |change|/|block| 6.93e-04; per row max|change|/weakest median 1.72e-01 p99 1.55e+01 max 3.26e+03
+    S(0.01)   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.15e-03  7.43e-02  7.30e+01   13.8%    2.2%  |dropped|/|block| 4.77e-05
+      1-2:1     40 cells   2.38e-03  9.41e-02  1.01e-01    5.0%    5.0%
+      2-10:1  13440 cells   4.72e-03  4.64e-02  5.45e+00   13.7%    1.6%
+      10-inf:1   9560 cells   3.32e-03  1.13e-01  7.30e+01   14.0%    3.1%
+      dropped/strongest median 9.97e-06 p99 3.00e-04 max 1.20e-03
+      folded onto kept entries: |change|/|block| 3.44e-05; per row max|change|/weakest median 2.31e-03 p99 3.81e-02 max 7.30e+01
+    S(0.03)   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  9.05e-03  2.49e-01  1.36e+02   12.6%    2.9%  |dropped|/|block| 1.46e-04
+      1-2:1     40 cells   1.10e-02  9.41e-02  1.01e-01    5.0%    2.5%
+      2-10:1  13440 cells   8.01e-03  1.20e-01  2.10e+01    7.7%    1.5%
+      10-inf:1   9560 cells   1.17e-02  5.01e-01  1.36e+02   19.6%    4.9%
+      dropped/strongest median 1.70e-05 p99 1.32e-03 max 3.70e-03
+      folded onto kept entries: |change|/|block| 8.77e-05; per row max|change|/weakest median 2.98e-03 p99 1.32e-01 max 7.47e+01
+
+  row field p: |block| 2.321e-03, rows with no nonzero face coupling 0 of 23040
+    reach 2   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.17e-01  5.37e+00  6.47e+00  100.0%  100.0%  |dropped|/|block| 4.59e-03
+      1-2:1     40 cells   3.80e-02  4.01e-02  4.01e-02  100.0%  100.0%
+      2-10:1  13440 cells   2.34e-01  8.67e-01  9.38e-01  100.0%  100.0%
+      10-inf:1   9560 cells   1.34e+00  6.16e+00  6.47e+00  100.0%  100.0%
+    reach 2   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  4.17e-01  5.37e+00  6.47e+00  100.0%   93.9%  |dropped|/|block| 4.59e-03
+      1-2:1     40 cells   3.80e-02  4.01e-02  4.01e-02  100.0%    0.0%
+      2-10:1  13440 cells   2.34e-01  8.67e-01  9.38e-01  100.0%   89.9%
+      10-inf:1   9560 cells   1.34e+00  6.16e+00  6.47e+00  100.0%  100.0%
+      dropped/strongest median 6.03e-03 p99 7.41e-03 max 7.66e-03
+      folded onto kept entries: |change|/|block| 3.37e-03; per row max|change|/weakest median 1.95e-01 p99 4.81e+00 max 8.72e+00
+    S(0.01)   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.54e-03  9.69e-03  1.14e-02    0.2%    0.0%  |dropped|/|block| 4.75e-05
+      1-2:1     40 cells   2.45e-03  8.32e-03  8.32e-03    0.0%    0.0%
+      2-10:1  13440 cells   4.83e-03  9.73e-03  1.14e-02    0.4%    0.0%
+      10-inf:1   9560 cells   2.12e-03  9.69e-03  1.09e-02    0.1%    0.0%
+      dropped/strongest median 5.18e-05 p99 4.36e-04 max 1.03e-03
+      folded onto kept entries: |change|/|block| 3.33e-05; per row max|change|/weakest median 2.11e-03 p99 9.50e-03 max 1.58e-02
+    S(0.03)   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  7.08e-03  2.96e-02  3.72e-02    0.7%    0.0%  |dropped|/|block| 1.26e-04
+      1-2:1     40 cells   1.35e-02  1.65e-02  1.65e-02    0.0%    0.0%
+      2-10:1  13440 cells   6.55e-03  3.02e-02  3.72e-02    1.2%    0.0%
+      10-inf:1   9560 cells   9.35e-03  2.86e-02  3.00e-02    0.0%    0.0%
+      dropped/strongest median 8.33e-05 p99 1.93e-03 max 2.43e-03
+      folded onto kept entries: |change|/|block| 7.96e-05; per row max|change|/weakest median 3.18e-03 p99 2.77e-02 max 4.05e-02
+
+  row field k: |block| 1.343e-03, rows with no nonzero face coupling 0 of 23040
+    reach 2   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.45e-01  2.55e+01  9.73e+01  100.0%  100.0%  |dropped|/|block| 4.77e-03
+      1-2:1     40 cells   4.77e-02  5.43e-02  5.43e-02  100.0%  100.0%
+      2-10:1  13440 cells   2.42e-01  8.72e-01  1.16e+00  100.0%  100.0%
+      10-inf:1   9560 cells   1.54e+00  4.23e+01  9.73e+01  100.0%  100.0%
+    reach 2   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  4.45e-01  2.55e+01  9.73e+01  100.0%   94.6%  |dropped|/|block| 4.77e-03
+      1-2:1     40 cells   4.77e-02  5.43e-02  5.43e-02  100.0%    0.0%
+      2-10:1  13440 cells   2.42e-01  8.72e-01  1.16e+00  100.0%   91.0%
+      10-inf:1   9560 cells   1.54e+00  4.23e+01  9.73e+01  100.0%  100.0%
+      dropped/strongest median 5.86e-03 p99 9.14e-03 max 9.99e-03
+      folded onto kept entries: |change|/|block| 3.57e-03; per row max|change|/weakest median 2.02e-01 p99 6.37e+00 max 8.47e+01
+    S(0.01)   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.55e-03  1.16e-02  2.48e-02    2.0%    0.0%  |dropped|/|block| 6.00e-05
+      1-2:1     40 cells   3.22e-03  7.50e-03  7.50e-03    0.0%    0.0%
+      2-10:1  13440 cells   4.85e-03  1.22e-02  2.48e-02    2.5%    0.0%
+      10-inf:1   9560 cells   2.13e-03  1.05e-02  2.20e-02    1.4%    0.0%
+      dropped/strongest median 5.30e-05 p99 4.69e-04 max 1.05e-03
+      folded onto kept entries: |change|/|block| 4.29e-05; per row max|change|/weakest median 2.13e-03 p99 9.74e-03 max 2.47e-02
+    S(0.03)   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  7.32e-03  4.23e-02  9.03e-02    3.0%    0.0%  |dropped|/|block| 1.45e-04
+      1-2:1     40 cells   1.50e-02  2.57e-02  2.57e-02    0.0%    0.0%
+      2-10:1  13440 cells   6.76e-03  4.09e-02  7.58e-02    3.1%    0.0%
+      10-inf:1   9560 cells   9.54e-03  4.46e-02  9.03e-02    2.8%    0.0%
+      dropped/strongest median 8.89e-05 p99 2.00e-03 max 2.78e-03
+      folded onto kept entries: |change|/|block| 8.81e-05; per row max|change|/weakest median 3.29e-03 p99 3.05e-02 max 8.82e-02
+
+  row field omega: |block| 1.255e+01, rows with no nonzero face coupling 4490 of 23040
+    reach 2   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.23e-01  5.50e+00  7.15e+00  100.0%  100.0%  |dropped|/|block| 2.58e-03
+      1-2:1     40 cells   3.54e-02  4.78e-02  4.78e-02  100.0%  100.0%
+      2-10:1  11524 cells   2.56e-01  1.05e+00  1.50e+00  100.0%  100.0%
+      10-inf:1   6986 cells   1.44e+00  6.37e+00  7.15e+00  100.0%  100.0%
+    reach 2   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  4.23e-01  5.50e+00  7.15e+00  100.0%   95.4%  |dropped|/|block| 2.58e-03
+      1-2:1     40 cells   3.54e-02  4.78e-02  4.78e-02  100.0%    0.0%
+      2-10:1  11524 cells   2.56e-01  1.05e+00  1.50e+00  100.0%   92.9%
+      10-inf:1   6986 cells   1.44e+00  6.37e+00  7.15e+00  100.0%  100.0%
+      dropped/strongest median 6.16e-03 p99 1.01e-02 max 1.19e-02
+      folded onto kept entries: |change|/|block| 1.97e-03; per row max|change|/weakest median 2.26e-01 p99 5.00e+00 max 8.71e+00
+    S(0.01)   dropped/weakest (tau 0.01) median p99 max >tau >3tau:  4.75e-03  1.00e-02  3.04e-02    1.0%    0.0%  |dropped|/|block| 2.73e-05
+      1-2:1     40 cells   2.28e-03  6.90e-03  6.90e-03    0.0%    0.0%
+      2-10:1  11524 cells   4.89e-03  1.03e-02  3.04e-02    1.4%    0.0%
+      10-inf:1   6986 cells   2.12e-03  9.82e-03  2.19e-02    0.5%    0.0%
+      dropped/strongest median 5.28e-05 p99 4.37e-04 max 8.13e-04
+      folded onto kept entries: |change|/|block| 1.95e-05; per row max|change|/weakest median 2.16e-03 p99 9.64e-03 max 3.15e-02
+    S(0.03)   dropped/weakest (tau 0.03) median p99 max >tau >3tau:  7.57e-03  3.01e-02  4.68e-02    1.1%    0.0%  |dropped|/|block| 6.01e-05
+      1-2:1     40 cells   1.27e-02  1.82e-02  1.82e-02    0.0%    0.0%
+      2-10:1  11524 cells   6.50e-03  3.25e-02  4.68e-02    1.5%    0.0%
+      10-inf:1   6986 cells   1.18e-02  2.93e-02  3.76e-02    0.4%    0.0%
+      dropped/strongest median 9.06e-05 p99 1.93e-03 max 2.74e-03
+      folded onto kept entries: |change|/|block| 3.80e-05; per row max|change|/weakest median 4.26e-03 p99 2.83e-02 max 5.11e-02
+
+[run_case] the case exited with status 0

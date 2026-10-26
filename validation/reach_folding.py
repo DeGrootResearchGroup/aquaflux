@@ -42,6 +42,10 @@ the fold that breaks its solve. ``X*0`` must reproduce ``3`` and ``X*1`` must re
 does two things to a column with couplings past its reach: it DROPS them (their positions are written as
 zeros) and it FOLDS them onto near entries it shares a colour with. ``X@drop`` re-fits from ``J3`` with only
 the drop, ``X@fold`` from ``JX`` with the dropped entries restored -- which of the two costs the solve.
+``p@S<tau>`` (``p@S0.01``) probes the pressure column with a colouring built for ``R2 + S(tau)``, the
+reach-2 pattern plus the distance-3 pairs a static strength skeleton calls strong at ``tau``
+(``pressure_strength_skeleton.py``), every other column at reach 3, the stored pattern at reach 3; the
+session is built and re-fitted under that probe, installed in place of the one its spec would make.
 
 Usage, one checkpoint per run (``state-<step-1>`` is the step's start, ``state-<step>`` gives its shift)::
 
@@ -81,6 +85,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import ClassVar
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -95,7 +100,11 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
-from aquaflux.precondition import FieldSplit, materialize_block_jacobian  # noqa: E402
+from aquaflux.precondition import (  # noqa: E402
+    FieldSplit,
+    JacobianProbe,
+    materialize_block_jacobian,
+)
 from aquaflux.precondition import sparse_jacobian as sparse_jacobian_module  # noqa: E402
 from aquaflux.precondition.materialized_session import (  # noqa: E402
     PROBE_BATCH_SIZE,
@@ -106,6 +115,7 @@ from aquaflux.precondition.probe_layout import ProbedBlocks  # noqa: E402
 from aquaflux.precondition.sparse_jacobian import (  # noqa: E402
     ColumnProbePlan,
     block_stencil_colouring,
+    block_stencil_gather_map,
     column_probe_plan,
 )
 from aquaflux.solve import ConstantRelaxation, solve_linear  # noqa: E402
@@ -117,9 +127,14 @@ from aquaflux.turbulence import (  # noqa: E402
     scale_both_blocks,
     scale_momentum_only,
 )
-from aquaflux.turbulence.coupled import coupled_scaled_norm  # noqa: E402
+from aquaflux.turbulence.coupled import _CoupledNarrowing, coupled_scaled_norm  # noqa: E402
 from jax.experimental import sparse as jsparse  # noqa: E402
 from mesh_anisotropy import spacing_ratio  # noqa: E402
+from pressure_strength_skeleton import (  # noqa: E402
+    PressureSkeleton,
+    pattern_colouring,
+    pattern_probe_plan,
+)
 
 LADDER = (1.0, 0.5, 0.25, 0.125, 1 / 32)
 #: The fixed seed of the random right-hand side the leading inverse's own convergence is read on.
@@ -222,10 +237,18 @@ def _parse_arm(token, n_fields, names):
         name, scale = token.split("*")
         label, reach = probe_reach(name, n_fields, names)
         out[f"uniform 3 + {float(scale):g} x fold of {label}"] = (None, reach, float(scale))
+    elif "@S" in token:
+        name, tau = token.split("@S")
+        if name not in names:
+            raise SystemExit(f"REACH_FOLDING_ARMS: {token!r}: unknown field {name!r}")
+        probe = PatternProbe(names.index(name), float(tau))
+        out[f"{name} coloured for R2 + S({float(tau):g}), rest at 3"] = (probe, probe, None)
     elif "@" in token:
         name, part = token.split("@")
         if part not in ("drop", "fold"):
-            raise SystemExit(f"REACH_FOLDING_ARMS: {token!r}: the part after @ is drop or fold")
+            raise SystemExit(
+                f"REACH_FOLDING_ARMS: {token!r}: the part after @ is drop, fold or S<tau>"
+            )
         label, reach = probe_reach(name, n_fields, names)
         out[
             f"uniform 3 with only the {'dropped' if part == 'drop' else 'folded'} part of {label}"
@@ -243,6 +266,53 @@ def _parse_arm(token, n_fields, names):
         label, reach = probe_reach(token, n_fields, names)
         out[label] = (reach, reach, None)
     return out
+
+
+class PatternProbe:
+    """A probe whose column ``field`` is coloured for ``R2 + S(tau)``; every other column at reach 3.
+
+    Built in this harness, never by the library: :meth:`probe` makes the plan from the case mesh's
+    strength skeleton (``pressure_strength_skeleton.py``, built once per process) and the library's
+    colouring, and wraps it in a :class:`JacobianProbe` laid out for ``groups``, with the case's own
+    narrowing. :meth:`StepRebuild.fitted` installs it as the session's probe before the session builds.
+    """
+
+    _skeletons: ClassVar[dict] = {}
+
+    def __init__(self, field, tau):
+        self.field, self.tau = field, tau
+
+    def probe(self, coupled, groups, gradient_sweeps, production_viscosity):
+        mesh = coupled.momentum.mesh
+        skeleton = self._skeletons.get(id(mesh))
+        if skeleton is None:
+            skeleton = self._skeletons[id(mesh)] = PressureSkeleton.of(mesh)
+        n, n_fields = coupled.layout.n_cells, coupled.layout.n_fields
+        pattern = skeleton.pattern(self.tau)
+        colour, count = pattern_colouring(pattern)
+        plan = pattern_probe_plan(
+            skeleton.owner,
+            skeleton.nb,
+            n,
+            n_fields,
+            self.field,
+            pattern,
+            colour,
+            count,
+            active_rows=None if groups is None else groups.active_rows(),
+        )
+        print(
+            f"[probe] column {self.field} coloured for R2 + S({self.tau:g}): {count} colours, "
+            f"{plan.n_probes} probes per fit (kept distance-3 entries per row "
+            f"{skeleton.strong_distance_three(self.tau).nnz / n:.2f})",
+            flush=True,
+        )
+        leading = None if groups is None else groups.n_leading_fields
+        return JacobianProbe(
+            plan,
+            block_stencil_gather_map(plan, leading_fields=leading),
+            _CoupledNarrowing(gradient_sweeps, production_viscosity),
+        )
 
 
 class ScaledFold:
@@ -475,7 +545,18 @@ class StepRebuild:
 
         allowed = inspect.signature(coupled_step).parameters
         march = {k: v for k, v in settings.items() if k in allowed and k != "preconditioner"}
-        session = open_session(with_reach(build_reach), self.coupled)
+        if isinstance(build_reach, PatternProbe):
+            session = open_session(file_pc, self.coupled)
+            problem = session._problem
+            session._probe = build_reach.probe(
+                self.coupled,
+                problem.groups() if isinstance(file_pc.inverse, FieldSplit) else None,
+                file_pc.probe.gradient_sweeps,
+                problem.production_viscosity,
+            )
+            build_reach = refit_reach = None  # the installed probe serves the build and the re-fit
+        else:
+            session = open_session(with_reach(build_reach), self.coupled)
         session.rebind(self.anchor)
         base = session.build(self.seed, **march)
         if refit_reach != build_reach and mix is None:

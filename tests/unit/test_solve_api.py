@@ -213,6 +213,10 @@ VALIDATION_INTERNAL_REACHES = {
     # by on the host inside its looped arm: the session's own structure holds its order at cell level,
     # so the harness builds the entry-by-entry one over the same layout.
     "_dof_probe_gather",
+    # The probe colouring's own saturation-degree colourer, run by `pressure_strength_skeleton.py` on the
+    # conflict graph of a pattern that is not a stencil (reach 2 plus chosen distance-3 pairs): the colour
+    # count it reports is a probe cost only if it is the library's colourer that produced it.
+    "_saturation_colouring",
     # Whether the padded-row products run as the fused loop in this process, printed by
     # `spmv_kernel_probe.py` beside its "operator apply" row: that row is the fused loop or XLA's
     # gathered form depending on it, so the banner must say which one was timed.
