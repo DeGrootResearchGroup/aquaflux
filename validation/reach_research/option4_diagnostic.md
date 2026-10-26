@@ -172,7 +172,7 @@ one fitted component from a uniform-reach-3 re-fit at φ on the same frozen coar
 (`ComponentSwap`); everything else is `p`'s own. Pre-registered bar: within 1.5x of arm `3`'s 6 cycles,
 i.e. ≤ 9.
 
-| `p` with this component from the reach-3 fit | cycles, rtol 0.3 | tight row-scaled (16 cycles) |
+| `p` with this component from the reach-3 fit (step 5, inner 2) | cycles, rtol 0.3 | tight row-scaled (16 cycles) |
 |---|---|---|
 | none (`p`) | 16, stagnant | 2.48 |
 | finest leading level operator (the smoother's residual products) | 16, stagnant | 1.72 |
@@ -182,6 +182,10 @@ i.e. ≤ 9.
 | the split's coupling block | 16, stagnant | 1.08 |
 | **every coarse level (Galerkin operators, coarse solve, their SIMPLE pieces)** | **6** | **2.98e-4** |
 | all of the above (null control: must reproduce arm `3`) | 6 | 1.47e-4 (arm `3`: 1.35e-4) |
+
+At step 6, inner 1 the same swap repairs `p` again: `p` 6 cycles / 4.77e-3, `p` with the coarse levels
+from the reach-3 fit 5 / 2.80e-4, arm `3` 5 / 2.61e-4. (At `1c5a187` the record had `p` at this state
+16, stagnant at 0.21; on this tree it degrades rather than fails.)
 
 **The coarse levels carry the failure.** Swapping them alone meets the bar exactly (6, the arm-`3`
 count); nothing on the finest level does, the Schur diagonal included (so H1-a, the proposal's
@@ -200,5 +204,30 @@ the two numbers; the cancellation itself was not measured.)
 Census of what the `p` probe drops at φ (`validation/reach_research/dropped_census.py`, step 5; the numbers were taken with its scratch first draft, same computation): per
 row field of the `p` column, 773 476 of 1 311 372 entries in every row field (667 808 of 1 122 986 for
 ω), of norm 4.6e-3 (u), 9.9e-4 (v), 1.4e-3 (w), 3.5e-3 (p), 4.1e-3 (k), 8.5e-4 (ω) of each block.
+
+## Settings screen on the leading smoother (step 5, inner 2)
+
+The proposal's cheap screen, on `p` with arm `3` beside it in the same process, each setting at two
+smoother sweep counts (`sweeps` 2, shipped, and 4; never rank smoother arms at one). Edits through
+`REACH_FOLDING_LEADING`; Frobenius-off is moved together with the pressure weight, as the rules require.
+Cycles at rtol 0.3 / tight row-scaled after 16.
+
+| leading edit | `sweeps` | arm `3` | `p` |
+|---|---|---|---|
+| none | 2 | 6 / 1.35e-4 | 16 / 2.48 |
+| `pressure_smoother_weight=0.7` | 2 | 6 / 1.18e-3 | 16 / 2.28 |
+| `pressure_smoother_weight=0.85` | 2 | 6 / 4.46e-4 | 16 / 2.34 |
+| `pressure_sweeps=4` | 2 | 5 / 4.43e-5 | 16 / 2.55 |
+| `schur_frobenius=false, pressure_smoother_weight=0.7` | 2 | 6 / 2.19e-4 | 16 / 2.34 |
+| none | 4 | 6 / 1.51e-4 | 12 / 8.77e-2 |
+| `pressure_smoother_weight=0.7` | 4 | 6 / 2.36e-4 | 16 / 3.00 |
+| `pressure_smoother_weight=0.85` | 4 | 6 / 2.97e-4 | 15 / 0.189 |
+| `pressure_sweeps=4` | 4 | 5 / 4.96e-5 | **10 / 3.14e-2** |
+| `schur_frobenius=false, pressure_smoother_weight=0.7` | 4 | 6 / 1.64e-4 | 13 / 6.32e-2 |
+
+No smoother setting brings the lagged `p` fit within the bar (≤ 9); the best, four sweeps of four inner
+pressure sweeps, reaches 10 at about twice the fine-level smoothing work per application. Damping the
+pressure sweep (the H1-a remedy) makes it worse at both sweep counts. Arm `3` is insensitive to all of
+it. This agrees with the attribution: the fine-level smoother is not where the failure lives.
 
 (Continued below.)
