@@ -32,7 +32,8 @@ uniform-reach-3 march of either case, the two things that could separate them:
 
 Arms (``REACH_FOLDING_ARMS``, comma-separated, default ``3,2,each``): ``3`` probes every column at reach 3,
 ``2`` every column at reach 2, ``each`` adds one arm per field with only that column at reach 2 --
-which column's folding costs the solve -- and a field name (``p``) adds that one such arm. ``A/B`` builds
+which column's folding costs the solve -- a field name (``p``) adds that one such arm, and ``!p`` probes
+every column but that one at reach 2. ``A/B`` builds
 the session under probe ``A`` and re-fits it under ``B`` (``3/p``): the leading hierarchy's coarsening is
 frozen at the build from the values it read then, so this separates a fold that moves the COARSENING from
 one that moves the fitted VALUES. ``X*t`` builds under a uniform reach 3 and re-fits from
@@ -131,7 +132,10 @@ def probe_reach(token, n_fields, names):
     if token in names:
         f = names.index(token)
         return f"{token} at 2", tuple(2 if g == f else 3 for g in range(n_fields))
-    raise SystemExit(f"REACH_FOLDING_ARMS: unknown probe {token!r} (3, 2, or a field name)")
+    if token.startswith("!") and token[1:] in names:
+        f = names.index(token[1:])
+        return f"all but {token[1:]} at 2", tuple(3 if g == f else 2 for g in range(n_fields))
+    raise SystemExit(f"REACH_FOLDING_ARMS: unknown probe {token!r} (3, 2, a field name, or !field)")
 
 
 def arms(n_fields, names):
