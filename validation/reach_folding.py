@@ -107,6 +107,7 @@ from aquaflux.turbulence import (  # noqa: E402
     scale_momentum_only,
 )
 from aquaflux.turbulence.coupled import coupled_scaled_norm  # noqa: E402
+from mesh_anisotropy import conductance_ratio  # noqa: E402
 
 LADDER = (1.0, 0.5, 0.25, 0.125, 1 / 32)
 #: A diagonal counts as moved when the fold shifts it by more than this share of the shifted diagonal.
@@ -146,7 +147,9 @@ def arms(n_fields, names):
                 label, reach = probe_reach(name, n_fields, names)
                 out[label] = (reach, reach, None)
         elif "/" in token:
-            (built, build), (fitted, refit) = (probe_reach(t, n_fields, names) for t in token.split("/"))
+            (built, build), (fitted, refit) = (
+                probe_reach(t, n_fields, names) for t in token.split("/")
+            )
             out[f"coarsened {built}, re-fitted {fitted}"] = (build, refit, None)
         else:
             label, reach = probe_reach(token, n_fields, names)
@@ -180,7 +183,9 @@ class ScaledFold:
         uniform, folded = probed(self.uniform), probed(self.folded)
         if uniform.data.shape != folded.data.shape:
             raise RuntimeError("the two probes' block layouts differ; their values cannot be mixed")
-        return ProbedBlocks(uniform.data + self.scale * (folded.data - uniform.data), uniform.layout)
+        return ProbedBlocks(
+            uniform.data + self.scale * (folded.data - uniform.data), uniform.layout
+        )
 
     def __enter__(self):
         sparse_jacobian_module.materialize_blocks = self.materialize
@@ -200,9 +205,11 @@ class StepRebuild:
         solver_spec = compare.SOLVER
         self.spec = solver_spec
         ramp = solver_spec.continuation
-        companion = {"flow": scale_momentum_only, "both": scale_both_blocks, None: scale_both_blocks}[
-            ramp.scale
-        ]
+        companion = {
+            "flow": scale_momentum_only,
+            "both": scale_both_blocks,
+            None: scale_both_blocks,
+        }[ramp.scale]
 
         def assembler_for(station):
             if station == ramp.stations:
@@ -226,7 +233,9 @@ class StepRebuild:
         file_pc = settings["preconditioner"]
 
         def with_reach(reach):
-            return dataclasses.replace(file_pc, probe=dataclasses.replace(file_pc.probe, column_reach=reach))
+            return dataclasses.replace(
+                file_pc, probe=dataclasses.replace(file_pc.probe, column_reach=reach)
+            )
 
         allowed = inspect.signature(coupled_step).parameters
         march = {k: v for k, v in settings.items() if k in allowed and k != "preconditioner"}
@@ -265,7 +274,13 @@ class StepRebuild:
         return g, shift, term.make_preconditioner(strength)
 
 
-def solve_arm(rebuild, label, reaches, names, tight_rtol):
+#: Cells whose faces' conductances span more than this ratio count as stretched.
+STRETCHED = 10.0
+#: The bins the pressure fold is reported over, by a cell's conductance ratio.
+ANISOTROPY_BINS = ((1.0, 2.0), (2.0, STRETCHED), (STRETCHED, np.inf))
+
+
+def solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy):
     started = time.time()
     active, session = rebuild.fitted(*reaches)
     n = rebuild.coupled.layout.n_cells
@@ -285,7 +300,10 @@ def solve_arm(rebuild, label, reaches, names, tight_rtol):
     G = jax.jit(lambda x: residual_fn(x) + shift * (x - phi))
     base_solver = active.linear_solver()
     project = active.step_projection
-    print(f"[arm] {label}: fitted in {time.time() - started:.0f} s, floored rows {floored_text}", flush=True)
+    print(
+        f"[arm] {label}: fitted in {time.time() - started:.0f} s, floored rows {floored_text}",
+        flush=True,
+    )
     for tag, solver in (
         ("march rtol", base_solver),
         (f"rtol {tight_rtol:g}", with_relative_tolerance(base_solver, tight_rtol)),
@@ -304,7 +322,21 @@ def solve_arm(rebuild, label, reaches, names, tight_rtol):
             float(norm(jnp.where(jnp.arange(linear.size) // n == f, linear, 0.0)) / norm(g))
             for f in range(len(names))
         ]
-        line += "\n              by row field " + " ".join(f"{names[f]} {shares[f]:.2e}" for f in range(len(names)))
+        line += "\n              by row field " + " ".join(
+            f"{names[f]} {shares[f]:.2e}" for f in range(len(names))
+        )
+        # The continuity rows' part held by stretched cells, against their share of the cells.
+        pressure = len(names) - 3
+        stretched_rows = jnp.asarray(
+            np.concatenate(
+                [np.zeros(pressure * n, bool), anisotropy > STRETCHED, np.zeros(2 * n, bool)]
+            )
+        )
+        in_stretched = float(norm(jnp.where(stretched_rows, linear, 0.0)) / norm(g))
+        line += (
+            f"\n              p rows in cells above {STRETCHED:g}:1 ({np.mean(anisotropy > STRETCHED):.0%} of "
+            f"cells): {in_stretched:.2e} of p's {shares[pressure]:.2e}"
+        )
         if tag == "march rtol":
             v = project(p, d) if project is not None else d
             ladder = [float(norm(G(p + a * v))) / float(norm(g)) for a in LADDER]
@@ -341,9 +373,15 @@ def folding_report(coupled, phi, shift, names):
     t0 = time.time()
     j3 = materialize(coupled, phi, owner, nb, n, n_fields, None)
     j2 = materialize(coupled, phi, owner, nb, n, n_fields, (2,) * n_fields)
-    print(f"[matrix] {j3.shape[0]} dofs, {j3.nnz / 1e6:.1f}M nnz, both in {time.time() - t0:.0f} s", flush=True)
+    print(
+        f"[matrix] {j3.shape[0]} dofs, {j3.nnz / 1e6:.1f}M nnz, both in {time.time() - t0:.0f} s",
+        flush=True,
+    )
     e = (j2 - j3).tocsr()
-    print("\n  |E_ab| / |J3_ab| (row field x column field; E = reach-2 colouring - uniform reach 3)", flush=True)
+    print(
+        "\n  |E_ab| / |J3_ab| (row field x column field; E = reach-2 colouring - uniform reach 3)",
+        flush=True,
+    )
     print("        " + "".join(f"{f:>10s}" for f in names), flush=True)
     for a in range(n_fields):
         cells = []
@@ -361,7 +399,10 @@ def folding_report(coupled, phi, shift, names):
         f"{MOVED:g}, then quantiles over all rows",
         flush=True,
     )
-    print(f"  {'field':>5s} {'moved':>8s} {'median':>10s} {'p99':>10s} {'max':>10s} {'rows > 1e-2':>12s}", flush=True)
+    print(
+        f"  {'field':>5s} {'moved':>8s} {'median':>10s} {'p99':>10s} {'max':>10s} {'rows > 1e-2':>12s}",
+        flush=True,
+    )
     for f in range(n_fields):
         m = moved[f * n : (f + 1) * n]
         print(
@@ -373,11 +414,18 @@ def folding_report(coupled, phi, shift, names):
     # which is the scale a smoother or a per-cell block inverse weighs it against.
     rows = np.repeat(np.arange(e.shape[0]), np.diff(e.indptr))
     weight = np.abs(e.data) / np.where(shifted[rows] > 0, shifted[rows], np.inf)
-    print("\n  off-diagonal fold |E_ij| / |J3_ii + s_i|, largest per row field (over every column)", flush=True)
+    print(
+        "\n  off-diagonal fold |E_ij| / |J3_ii + s_i|, largest per row field (over every column)",
+        flush=True,
+    )
     for f in range(n_fields):
         in_field = (rows >= f * n) & (rows < (f + 1) * n)
-        print(f"  {names[f]:>5s} max {weight[in_field].max() if in_field.any() else 0.0:10.2e}", flush=True)
+        print(
+            f"  {names[f]:>5s} max {weight[in_field].max() if in_field.any() else 0.0:10.2e}",
+            flush=True,
+        )
     schur_report(j3, j2, shift, n, n_fields)
+    pressure_entry_report(j3, e, n, n_fields, conductance_ratio(mesh, mesh.geometry()))
     del j2, j3, e
     gc.collect()
 
@@ -393,6 +441,60 @@ def schur_parts(jacobian, shift, n, n_fields):
     c = shifted[pressure, pressure].tocsr()
     dmg = (d @ sp.diags(1.0 / f.diagonal()) @ g).tocsr()
     return c, dmg, (c - dmg).tocsr()
+
+
+def pressure_entry_report(j3, e, n, n_fields, anisotropy):
+    """Entry by entry, how far the fold moves the pressure couplings it touches.
+
+    A block-norm ratio is set by a block's strongest couplings, so it cannot see a fold that is small
+    beside those and large beside the weak ones -- which on a stretched cell are the couplings along its
+    long direction. This reads each changed entry against its own value, and each pressure row's fold
+    against that row's strongest neighbour coupling, binned by the cell's conductance ratio.
+    """
+    p = n_fields - 3
+    velocity = slice(0, p * n)
+    pressure = slice(p * n, (p + 1) * n)
+    print(
+        "\n  pressure couplings, entry by entry (r = |E_ij| / |J3_ij| over the entries the fold moved)",
+        flush=True,
+    )
+    for label, rows, cols in (
+        ("p rows x p (C)", pressure, pressure),
+        ("velocity rows x p (G)", velocity, pressure),
+        ("p rows x velocity (D)", pressure, velocity),
+    ):
+        moved = e[rows, cols].tocoo()
+        keep = moved.data != 0
+        r_i, c_i, delta = moved.row[keep], moved.col[keep], moved.data[keep]
+        exact = np.asarray(j3[rows, cols][r_i, c_i]).ravel()
+        ratio = np.abs(delta) / np.where(exact != 0, np.abs(exact), np.inf)
+        flipped = int(np.sum((exact != 0) & (np.sign(exact + delta) != np.sign(exact))))
+        print(
+            f"  {label:22s} moved {delta.size:9d}  r median {np.median(ratio):.2e} p90 "
+            f"{np.quantile(ratio, 0.9):.2e} p99 {np.quantile(ratio, 0.99):.2e}  r > 0.1: "
+            f"{int(np.sum(ratio > 0.1)):7d}  r > 1: {int(np.sum(ratio > 1)):6d}  sign flipped {flipped:6d}  "
+            f"onto exact zeros {int(np.sum(exact == 0)):6d}",
+            flush=True,
+        )
+    # Each continuity row's largest fold against its largest neighbour coupling (any leading column).
+    leading = slice(0, (p + 1) * n)
+    rows3 = j3[pressure, leading].tocsr()
+    rows3.setdiag(0.0, k=p * n)
+    strongest = np.abs(rows3).max(axis=1).toarray().ravel()
+    largest_fold = np.abs(e[pressure, leading]).max(axis=1).toarray().ravel()
+    ratio = largest_fold / np.where(strongest > 0, strongest, np.inf)
+    print(
+        "  continuity row fold max_j|E_ij| / max_(j != i)|J3_ij|, by the cell's conductance ratio:",
+        flush=True,
+    )
+    for low, high in ANISOTROPY_BINS:
+        cells = (anisotropy >= low) & (anisotropy < high)
+        if cells.any():
+            print(
+                f"    {low:g}-{high:g}:1  {int(cells.sum()):6d} cells  median {np.median(ratio[cells]):.2e}  "
+                f"p99 {np.quantile(ratio[cells], 0.99):.2e}  max {ratio[cells].max():.2e}",
+                flush=True,
+            )
 
 
 def schur_report(j3, j2, shift, n, n_fields):
@@ -457,6 +559,8 @@ def main():
     n, n_fields = coupled.layout.n_cells, coupled.layout.n_fields
     names = field_names(n_fields)
     rebuild = StepRebuild(coupled, phi, beta, step_number, iterate)
+    mesh = coupled.momentum.mesh
+    anisotropy = conductance_ratio(mesh, mesh.geometry())
     print(
         f"[configuration] case {CASE_NAME}, {n} cells, step {step_number} (station {rebuild.station}) from "
         f"state-{step_number - 1:05d} {start}, solving at {where}, beta {beta:g}, split precision "
@@ -466,7 +570,7 @@ def main():
     )
     shift = None
     for label, reaches in arms(n_fields, names).items():
-        arm_shift = solve_arm(rebuild, label, reaches, names, tight_rtol)
+        arm_shift = solve_arm(rebuild, label, reaches, names, tight_rtol, anisotropy)
         shift = arm_shift if shift is None else shift
     if os.environ.get("REACH_FOLDING_SKIP_MATRIX") != "1":
         folding_report(coupled, rebuild.iterate, shift, names)

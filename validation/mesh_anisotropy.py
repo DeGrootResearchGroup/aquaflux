@@ -21,7 +21,7 @@ import numpy as np
 
 # Run directly from anywhere: resolve the repository root from THIS file rather than pinning a
 # checkout, so the harness survives being run from another worktree.
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import aquaflux  # noqa: F401,E402
@@ -32,8 +32,27 @@ from aquaflux.vectors import dot, scale  # noqa: E402
 
 MESHES = {
     "pitzDaily": ROOT / "validation/pitzdaily_openfoam/runs/kwsst/polyMesh",
-    "bfs3d": ROOT / "validation/bfs3d_openfoam/runs/kwsst/polyMesh",
+    "bfs3d": ROOT / "validation/bfs3d_openfoam/of_case/constant/polyMesh",
 }
+
+
+def conductance_ratio(mesh, geom):
+    """Per cell, max/min of the diffusive conductance ``|S_f| / (d_f . n_f)`` over its faces, shape ``(n,)``."""
+    fc = mesh.face_cells
+    owner, nb = np.asarray(fc.owner), np.asarray(fc.neighbour)
+    interior = np.asarray(fc.interior)
+    area = np.asarray(jnp.linalg.norm(geom.face.area, axis=-1))
+    x_p = geom.cell.centroid[fc.owner]
+    delta = np.asarray(dot(fc.neighbour_centroid(geom.cell.centroid) - x_p, geom.face.normal))
+    boundary_delta = np.asarray(dot(geom.face.centroid - x_p, geom.face.normal))
+    normal_distance = np.where(interior, delta, boundary_delta)
+    conductance = area / np.maximum(np.abs(normal_distance), 1e-300)
+    n = mesh.n_cells
+    lo, hi = np.full(n, np.inf), np.zeros(n)
+    for cells, faces in ((owner, np.arange(owner.size)), (nb[interior], np.flatnonzero(interior))):
+        np.minimum.at(lo, cells, conductance[faces])
+        np.maximum.at(hi, cells, conductance[faces])
+    return hi / np.maximum(lo, 1e-300)
 
 
 def report(name, path):
@@ -44,8 +63,6 @@ def report(name, path):
     interior = np.asarray(fc.interior)
     centroid = np.asarray(geom.cell.centroid)
     fcentroid = np.asarray(geom.face.centroid)
-    area = np.asarray(jnp.linalg.norm(geom.face.area, axis=-1))
-    normal = np.asarray(geom.face.normal)
     n = mesh.n_cells
 
     # skewness, for the record
@@ -65,16 +82,7 @@ def report(name, path):
         np.maximum.at(hi, cells, dist)
     ratio = hi / np.maximum(lo, 1e-300)
 
-    # diffusive conductance |S_f| / (d_f . n_f), per face, gathered per cell
-    delta = np.asarray(dot(fc.neighbour_centroid(geom.cell.centroid) - x_p, geom.face.normal))
-    boundary_delta = np.asarray(dot(geom.face.centroid - x_p, geom.face.normal))
-    normal_distance = np.where(interior, delta, boundary_delta)
-    conductance = area / np.maximum(np.abs(normal_distance), 1e-300)
-    clo, chi = np.full(n, np.inf), np.zeros(n)
-    for cells, faces in ((owner, np.arange(owner.size)), (nb[interior], np.flatnonzero(interior))):
-        np.minimum.at(clo, cells, conductance[faces])
-        np.maximum.at(chi, cells, conductance[faces])
-    cratio = chi / np.maximum(clo, 1e-300)
+    cratio = conductance_ratio(mesh, geom)
 
     print(f"\n{name}: {n} cells, {mesh.dim}D, {int(interior.sum())} interior faces")
     for label, q in (("face-centroid ratio", ratio), ("conductance ratio", cratio)):
