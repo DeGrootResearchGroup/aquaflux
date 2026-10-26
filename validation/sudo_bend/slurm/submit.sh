@@ -33,6 +33,12 @@ root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 logs="$root/validation/sudo_bend/slurm/logs"
 mkdir -p "$logs"
 
+# The jobs' environment must run aquaflux's command line (its own dependencies, not only the
+# source): a broken install fails here, before any job queues, rather than minutes into each one.
+python="${SUDO_VENV:-$HOME/venvs/aquaflux}/bin/python"
+(cd "$root" && "$python" -m aquaflux --help >/dev/null) || {
+  echo "$python cannot run aquaflux; in that environment: pip install -e \"$root\"" >&2; exit 2; }
+
 ids=()
 for grid in "${grids[@]}"; do
   [ -n "${cores[$grid]-}" ] || { echo "unknown grid $grid (round36, round48, round64)" >&2; exit 2; }
