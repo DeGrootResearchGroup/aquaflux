@@ -155,7 +155,7 @@ defect — fix it in the same change.
 | PC shift floor | `refit_beta_floor=0.0` | 0.0 (since #712) | `PC_BETA_FLOOR` |
 | inverse | none — `MaterializedJacobian.inverse` required | **`FieldSplit`** (case refuses others) | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
-| probe column reach | `column_reach=None` (uniform) | uniform (since #712) | `COLUMN_REACH` |
+| probe column reach | `column_reach=None` (uniform); `strong_couplings=None` | `[2, 2, 2, 3, 2, 2]` (since #839); no strong couplings | `COLUMN_REACH`, `STRONG_COUPLINGS` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `INNER_TOL` |
 | flow (leading) inverse | none — `field_split=True` requires `leading_inverse` and `trailing_inverse` | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
 | field split precision | `FieldSplit.precision="float64"` | **`float32`** (pitzDaily too; the adjoint's preconditioner stays float64) — ⚠️ breaks at near-zero pivots without the pivot floor (below), which both case files set | `SPLIT_PRECISION` |

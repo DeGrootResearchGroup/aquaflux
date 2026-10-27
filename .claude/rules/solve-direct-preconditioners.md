@@ -232,9 +232,23 @@ bare block inverse).
   21 / 23 / 40 steps, 194–384 cycles (2026-10-25). Tables: log, "Probe colouring reach 2 — pitzDaily and
   bfs3d" and "bfs3d: pressure alone at reach 3". The zero-shift adjoint ties: 331 / 373 applications
   (forward / transposed) to 1e-8 against uniform's 335 / 383 (`zero_shift_adjoint.py`, `state-00017`).
-  A pressure probe coloured for a geometry-only strength skeleton (`R2 + S(0.01)`, 243 seeds) with the
-  rest at 2 kept the 17 steps on three draws and ran ~5 % faster; it is a harness, not library code
-  (log, "THE REACH-2 RACE"; `solve-open-directions.md` entry 16).
+  `JacobianProbeSpec.strong_couplings` (pressure at reach 2 plus the couplings beyond it the first fit
+  shows to be strong, 243 seeds) kept the 17 steps on three draws and saved ~1 %, a wash, so bfs3d
+  does not set it (log, "`StrongCouplings` (library, 2026-10-26)").
+- **`StrongCouplings` (`strong_couplings.py`; `JacobianProbeSpec.strong_couplings`, off when unset)
+  probes one column at its `column_reach` plus the couplings beyond it that the Jacobian shows to be
+  strong.** At the session's first fit (`MaterializedSession._with_strong_couplings`) the column is
+  probed once at the plan's `pattern_reach`; beyond its own reach a pair `(i, j)` is kept when its
+  magnitude, in some judged row field (`rows`, default the column's own), is at least `fraction` times
+  row `i`'s smallest **nonzero** face-neighbour coupling to the column. Every fit from then on probes the
+  column for that pattern (`ColumnProbePlan.with_column_pattern`, coloured collision-free for it); the
+  pattern is held for the session, like a frozen coarsening. It needs the plan to carry its cell graph
+  (`ColumnProbePlan.edges`, set by `column_probe_plan`) and refuses `column_reach` unset. The selection
+  is `MaterializedSession.coupling_selection` and is described to the `"probe"` report sink.
+  `JacobianProbeSpec.build_settings()` is what reaches a problem's `probe` (all but this field).
+  ⚠️ Judge the pressure column by its continuity rows (the default), not the momentum rows: a momentum
+  component's pressure coupling across a face parallel to that component is near zero without being
+  zero, so its weakest face coupling is a poor yardstick (the option 1 audit's static-bar failure).
 
   The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
   cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor
