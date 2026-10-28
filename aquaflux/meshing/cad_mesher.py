@@ -46,10 +46,11 @@ from .layers import PrismLayers
 from .mapped import MappedQuads, MappedSurface
 from .netgen_process import LocalSizes, NetgenProcess, SurfaceTriangulation
 from .pipe_core import PipeCore
-from .pipes import find_pipes, rim_divisions
+from .pipes import find_pipes, open_ends, pipe_runs, rim_divisions
 from .planarize import FacePlanarizer
 from .polygons import Polygons, PyramidCaps
 from .refinement import LocatedRefinement, Refinement
+from .rows import PipeGrading
 from .sheets import SlitSurface, opened, parted
 
 __all__ = [
@@ -243,6 +244,9 @@ class CadMesher:
         How the cores of pipes (see :meth:`mesh`) are filled.
     duct_core : DuctCore
         How the cores of ducts (see :meth:`mesh`) are filled.
+    pipe_grading : PipeGrading or None
+        How a straight pipe's rows grow away from what it joins, toward an open end or its
+        middle; unset, every pipe's rows are about as long as the cells round it are wide.
     planarizer : FacePlanarizer or None
         Flattens the dual's faces once its boundary is on the drawing, moving only the centroids
         of the primal cells outside the layers: the boundary stays on the drawing, the cut cells'
@@ -268,6 +272,7 @@ class CadMesher:
     cap_height: ClearedCaps | float = dataclasses.field(default_factory=ClearedCaps)
     pipe_core: PipeCore = dataclasses.field(default_factory=PipeCore)
     duct_core: DuctCore = dataclasses.field(default_factory=DuctCore)
+    pipe_grading: PipeGrading | None = None
     planarizer: FacePlanarizer | None = None
     core: OctreeCore | None = None
     refinements: tuple[Refinement, ...] = ()
@@ -328,13 +333,15 @@ class CadMesher:
             (see :class:`~aquaflux.meshing.MappedQuads`): each face a band or four-sided. Layered,
             they carry hexahedra.
         pipes : sequence of str, or None
-            The patches whose faces are pipes: each a cylinder the fluid fills, bounded by two
-            loops (its rims), with nothing else inside it. A pipe's face is meshed as a structured
-            grid (as ``mapped``), layered if its patch is, and its core filled with a structured
-            O-grid (:attr:`pipe_core`; see :mod:`~aquaflux.meshing.pipes`). Where Netgen's
-            division of a candidate's rims would not take an O-grid (two counts, or one not a
-            multiple of four), the region is triangulated again with both rims divided alike,
-            into the larger count rounded up to a multiple of four. Unset, every face that is one;
+            The patches whose faces are pipes: each a tube the fluid fills -- straight, bent,
+            coiled, tapering or swept along any curve, told from its triangles rather than its
+            kind of surface -- bounded by two loops (its rims), with nothing else inside it. A pipe's face is
+            meshed as a structured grid (as ``mapped``), layered if its patch is, and its core
+            filled with a structured O-grid (:attr:`pipe_core`; see :mod:`~aquaflux.meshing.pipes`),
+            one O-grid through pipes joined end to end. Where Netgen's division of a candidate's
+            rims would not take an O-grid (two counts, or one not a multiple of four), the region
+            is triangulated again with every rim of the pipes joined end to end divided alike,
+            into the largest count rounded up to a multiple of four. Unset, every face that is one;
             empty, none.
         ducts : sequence of str, or None
             The patches whose faces are the sides of rectangular ducts: four four-sided faces round
@@ -411,7 +418,9 @@ class CadMesher:
                 surface = self._triangulated(brep, local_sizes=local_sizes)
             candidates = _candidates(topology, patch_of_face, names, named_pipes)
             duct_candidates = _candidates(topology, patch_of_face, names, named_ducts)
-            divisions = rim_divisions(topology, surface.triangles, surface.face, candidates)
+            divisions = rim_divisions(
+                topology, surface.points, surface.triangles, surface.face, candidates
+            )
             found, _ = find_ducts(
                 topology, surface.points, surface.triangles, surface.face, duct_candidates,
                 self.feature_angle, edge_counts=False,
@@ -438,7 +447,9 @@ class CadMesher:
         )
         if chosen.size:
             stage("meshing the mapped walls, pipes and ducts as grids")
-        walls = self._mapped(model, region, topology, surface, chosen)
+        layered_faces = np.isin(patch_of_face, [names.index(n) for n in layered])
+        graded = self._graded(topology, surface, pipe_faces, layered_faces)
+        walls = self._mapped(model, region, topology, surface, chosen, graded)
         twins = np.arange(walls.points.shape[0])
         if topology.sheet.any():
             stage("opening the surface along the baffles")
@@ -450,7 +461,17 @@ class CadMesher:
         fan_tetrahedra, tents = np.zeros((0, 4), dtype=np.int64), np.zeros((0, 6), dtype=np.int64)
         if on_layered.any():
             stage("growing the layers")
-            grown = self.layers.extrude(walls.points, walls.faces, on_layered, twins=twins)
+            # A pipe's open end is replaced by its O-grid's last cross-section, so its own faces
+            # may turn as they are drawn in to the layers' top without thinning the layers.
+            opened_ends = [
+                g
+                for f in np.asarray(pipe_faces).tolist()
+                for g in open_ends(topology, f, layered_faces)
+            ]
+            replaced = np.isin(walls.face, opened_ends)
+            grown = self.layers.extrude(
+                walls.points, walls.faces, on_layered, replaced, twins=twins
+            )
             twins = _grown_twins(grown, twins)
             points, fill, wall_faces = grown.points, grown.inner, grown.walls
             prisms, hexahedra, stacked = grown.prisms, grown.hexahedra, grown.columns
@@ -525,8 +546,8 @@ class CadMesher:
     def _conduits(
         self, topology, walls: MappedSurface, pipe_faces, ducts: list[Duct], on_layered, stacked
     ) -> list[Conduit]:
-        """Each pipe and duct to be cored: its ends, and its rings round the core -- the layers'
-        top over its grid, where it is layered, else the grid itself."""
+        """Each run of pipes and each duct to be cored: its ends, and its rings round the core --
+        the layers' top over its grid, where it is layered, else the grid itself."""
         top_of = np.arange(walls.points.shape[0])
         if stacked is not None:
             top_of[stacked[:, 0]] = stacked[:, -1]
@@ -536,10 +557,9 @@ class CadMesher:
             return conduit_ends(topology, rims, own, walls.faces, walls.face, on_layered)
 
         conduits = []
-        for f in np.asarray(pipe_faces).tolist():
-            grid = walls.grids[f]
+        for run, grid in pipe_runs({f: walls.grids[f] for f in np.asarray(pipe_faces).tolist()}):
             conduits.append(Conduit(
-                ends(grid, [f]), top_of[grid], self.pipe_core.fill, self.pipe_core.junction_rows
+                ends(grid, run), top_of[grid], self.pipe_core.fill, self.pipe_core.junction_rows
             ))  # fmt: skip
         for duct in ducts:
             rings, width = duct_rings(duct, walls.grids)
@@ -563,15 +583,28 @@ class CadMesher:
         return found
 
     @staticmethod
-    def _mapped(model, region, topology, surface, chosen) -> MappedSurface:
+    def _mapped(model, region, topology, surface, chosen, graded=None) -> MappedSurface:
         """The triangulated surface, with the ``chosen`` faces remeshed as structured
-        quadrilaterals, each new point moved onto its face."""
+        quadrilaterals, each new point moved onto its face, the ``graded`` faces' rows graded."""
         if not chosen.size:
             return MappedSurface(surface.points, Polygons(surface.triangles), surface.face)
         return MappedQuads().remesh(
             surface.points, surface.triangles, surface.face, chosen, topology.vertices,
-            lambda points, faces: model.project(region, points, faces=faces).points,
+            lambda points, faces: _points_and_normals(model.project(region, points, faces=faces)),
+            graded,
         )  # fmt: skip
+
+    def _graded(self, topology, surface, pipe_faces, layered_faces):
+        """For each pipe, :attr:`pipe_grading` and the points of the ends it opens through; none
+        without a grading."""
+        if self.pipe_grading is None:
+            return None
+        graded = {}
+        for f in np.asarray(pipe_faces).tolist():
+            ends = open_ends(topology, f, layered_faces)
+            points = np.unique(surface.triangles[np.isin(surface.face, ends)])
+            graded[f] = (self.pipe_grading, points)
+        return graded
 
     @staticmethod
     def _opened(model, region, topology, walls: MappedSurface) -> tuple[MappedSurface, np.ndarray]:
@@ -722,6 +755,11 @@ def _compacted(points: np.ndarray, cells: list[np.ndarray]):
         return position[np.asarray(indices, dtype=np.int64)]
 
     return points[used], renumber
+
+
+def _points_and_normals(projection) -> tuple[np.ndarray, np.ndarray]:
+    """A projection onto the drawing as the points it lands on and the normals there."""
+    return projection.points, projection.normal
 
 
 def _faces_of(patch_of_face: np.ndarray, names, chosen) -> np.ndarray:

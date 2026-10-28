@@ -59,11 +59,11 @@ its file alone.**
 | `axes.py` | `AXES`, `AxisName`, and the one refusal of an extruded axis stated for a 3D mesh |
 | `kinematic.py` | `kinematic_pressure` / `pressure_from_kinematic` — the one home of OpenFOAM's pressure-per-unit-density factor |
 | `restart_file.py` | `RestartHeader` (its `mesh_digest` from `aquaflux.mesh`), `checkpoint_writer`, `read_restart` → `RestartFile` (`resumption`), `refuse_non_finite` |
-| `boundaries.py` | `PatchCondition` → `Inlet` / `Outlet` / `Wall` / `Lamp`; `InletTurbulence` → `FixedTurbulence` / `IntensityLength` |
+| `boundaries.py` | `PatchCondition` → `Inlet` / `DevelopedInlet` / `Outlet` / `Wall` / `Lamp`; `PatchSite`; `InletTurbulence` → `FixedTurbulence` / `IntensityLength` |
 | `radiation.py` | `LampProfile` → `LambertianProfile` / `CosinePowerProfile` / `IesProfile`; `UniformMedium`; `SurfaceSource` → `MeshPatch` / `StlSurface` / `CadSurface` (+ `Coarsen`); `OccluderSpec` → `PatchBody` / `StlBody` / `CadSolid` / `CadFluid`; `Receivers` |
 | `paths.py` | `named_paths` / `with_paths` / `relocated` (see "Paths") |
 | `solver.py` | `SolverSpec` → `CoupledMarch` / `FlowMarch` (on `_March`) / `Segregated` / `RadiationSolve`; `ViscosityRamp`; `RootSolve`; `solver_for`; `NotConverged` |
-| `outputs.py` | `Outputs`, `RunFields(cells, patches)`, `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk`, `Checkpoints` |
+| `outputs.py` | `Outputs`, `RunFields(cells, patches)`, `FieldWriter` → `Vtk` / `OpenFOAMTime` / `PatchVtk` / `RadialProfiles`, `Checkpoints` |
 | `run.py` | `prepare_run(path, overwrite)` → `PreparedRun.run(terminal)` → `RunRecord`; `plan_run` → `RunPlan` |
 | `aquaflux/__main__.py` | the `aquaflux` command |
 
@@ -141,6 +141,18 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `turbulence_closures(model)` → `(k, omega)` (inlet: both `Dirichlet` from the inflow; outlet: both
   `ZeroGradient`; wall: `k` by `Wall.k`, and a placeholder `ZeroGradient` ω the closure fixes in the wall
   cells).
+- **A condition is placed on its patch before its closures are built** (`PatchCondition.placed(PatchSite)`,
+  default itself; `physics._placed_conditions`, the one source both flow builds read). `PatchSite(name,
+  centroids, areas, normals, directory)` carries the patch's faces (the face geometry taken to the host
+  once per build, not per patch) and the case directory. `DevelopedInlet(profile_table)` (a `path_fields` table, scope `flow`) places as a private
+  `_ProfiledInlet`: the table read (`io.read_profile_table`; `U` required, `k`/`omega` only under RANS),
+  laid out from the patch's area-weighted centre along its inward normal (`RadialProfile`/`AxialVector`,
+  `boundary.md`), the patch refused when a face leans past `FLAT_PATCH` (1°). Unplaced it builds no
+  closure (refused by name). **The datum rule asks `PatchCondition.prescribes_pressure()`** (default: its
+  flow closure's; `DevelopedInlet` `False`), since it runs before the mesh is read.
+  `RadialProfiles(file, centre, axis, bands)` is the writer of such a table (vectors along the axis,
+  `boundary.radial_average` by cell volume). Pinned by `tests/unit/test_developed_inlet.py` (a 3D box
+  through a real build, both sides, refusals, the writer's table read back).
 - **The wall set is `flow.sheared_patches(momentum.boundary)`**, so the flow/turbulence wall reconciliation
   at `CoupledRANS.build` holds by construction.
 - **One `PropertyModel`** (`Fluid.property_model()`), built in the momentum builder and handed to
@@ -149,7 +161,8 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   to a jitted function, so a continuation rescaling viscosity would recompile at every rung. `mu = rho * nu`
   in that order, bit-identical to the hand-built drivers.
 - **An unset setting is not passed** (`_set`), so the builder's default applies; nothing restates a default.
-- **`_momentum(spec, mesh, geometry)` is the one flow builder** both flow physics start from.
+- **`_momentum(spec, mesh, geometry, conditions)` is the one flow builder** both flow physics start from,
+  `conditions` the placed ones.
 
 ## Checking a build
 
@@ -173,7 +186,7 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   (so a checkpoint's digest would not match) and costs minutes at scale, and nobody runs a real case on a
   box grid.
 - **A mesh file is the mesher's input** (`mesh_file.py`: `MeshSpec(drawing, region, sizes, patches,
-  others, layers, layered, mapped, pipes, pipe_core, ducts, duct_core, planarizer, core, refinements, output)`, the one-form sections
+  others, layers, layered, mapped, pipes, pipe_core, pipe_grading, ducts, duct_core, planarizer, core, refinements, periodic, output)`, the one-form sections
   `drawing` / `region` / `sizes` / `output` written without `kind`; `region.baffles` names the drawing's
   sheets standing in it, unset all, `[]` none -- `DrawingRegion` → `CadRegion`), read by the case's own YAML parse
   and registry (`read_mesh_file` / `write_mesh_file` in `case_file.py`, `mesh_spec_from_mapping` /
@@ -183,7 +196,9 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   output before meshing** (each writer's `MeshWriter.replaces()`, the rule its own `write` refuses by),
   mesh, measure (`mesh.QualitySummary`), write the `.aqmesh` (its header's `provenance`: the settings as
   they ran, version, commit, modified, start, seconds, `quality`) and the polyMesh if `output.openfoam` is
-  set. Exit 2 on a refused file or an occupied output; not in `SERVED` (it can take minutes). **Each
+  set; with `periodic` (`mesh.PeriodicJoin`, one pair) the quality is measured before the join
+  (`QualitySummary` refuses a periodic mesh), then `MeshSpec.joined` runs as a stage of its own; a
+  periodic mesh with `output.openfoam` is refused at read. Exit 2 on a refused file or an occupied output; not in `SERVED` (it can take minutes). **Each
   stage is printed as it starts** (`  12.3 s  growing the layers`, flushed; `on_stage` threaded through
   `MeshSpec.mesh` into `CadMesher.mesh`, then "measuring the mesh's quality" and "writing the mesh"),
   then the summary and the quality line; the browser shows these lines as they are, parsing none.
@@ -233,8 +248,7 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `MaterializedJacobian` is refused. `_March.observers_for` wires the session's `observer` to the log's
   and the recorder's `on_refresh`, which is how `history.csv` counts refits. ⚠️ Before 2026-10-23 only
   `CoupledMarch` did: a laminar run's `history.csv` read `refits` 0 whatever it refitted. Pinned by
-  `test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes`. (`march.log` shows
-  refits only with the logger's `"pc"` detail, which a case run does not ask for, on either march.) A `point_setup`
+  `test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes`. A `point_setup`
   may observe a ramp's anchor and is refused if it returns settings. With a ramp, `CoupledMarch.observers_for`
   notes `ViscosityRamp.description` at the anchor (`viscosity ramp: x100 down to the case's own in 12
   stations of 1 step each, scaling the flow's viscosity only`) and passes `on_station=logger.on_station`,
@@ -284,7 +298,12 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   0.01–0.4 s against 2.5–5 s of process start-up (2026-10-06, macOS arm64, loaded machine; breakdown in the
   log).
 - **`outputs` is optional; its default writes `results/fields.vtu`, `results/march.log`,
-  `results/history.csv`** (project owner). `history` is `solve.StepHistory` (`solve-march.md`); `log` and
+  `results/history.csv`** (project owner). **`outputs.log_detail` defaults to every `MarchLogger`
+  detail a case run can feed** (`inner`, `fields`, `pc`; project owner, 2026-10-26: the step-only log
+  was too thin to watch a run by); `[]` gives one row a step. `residuals` is not offered (it needs an
+  extractor the runner does not build; `history.csv` has the per-equation residuals). `LOG_DETAILS`
+  (`outputs.py`) is pinned equal to `MarchLogger.DETAIL - {"residuals"}`, and a real run's log by
+  `tests/integration/test_case_run.py`. Before 2026-10-26 no case run's log had any detail. `history` is `solve.StepHistory` (`solve-march.md`); `log` and
   `history` may not name the same file. `SolverSpec.observers_for(logger, recorder)` takes a
   `solve.MarchRecorder` and reads its hooks as attributes; the runner's `_StepCount` forwards to recorders.
   `on_residuals` is wired only when a recorder takes it (each costs a block split of the step's carried
@@ -433,4 +452,4 @@ Radiation is a physics of the case file (project owner, 2026-10-05), and its run
 - Source kinds beyond `BodyForce` (waits on #362).
 - A passive-scalar case referring to another case's converged flow (#662; `bfs3d_species` imports the flow
   harness by path).
-- Profiles (`DirichletField`, a callable).
+- Profiles other than a developed pipe flow's (`DirichletField`, a callable).

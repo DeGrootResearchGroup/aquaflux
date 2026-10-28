@@ -42,7 +42,8 @@ class MeshRecord:
     seconds : float
         How long the meshing took, writing excluded.
     quality : QualitySummary
-        The mesh's quality, as its header records it.
+        The mesh's quality, as its header records it: before its periodic patches, if any, are
+        joined.
     """
 
     mesh: Mesh
@@ -92,7 +93,11 @@ def make_mesh(
     mesh = mesh_file.spec.mesh(mesh_file.directory, on_stage=on_stage)
     seconds = time.perf_counter() - clock
     _tell(on_stage, "measuring the mesh's quality")
+    # Measured before any periodic join: across a seam the concave-cell test would misread.
     quality = QualitySummary.of(mesh)
+    if mesh_file.spec.periodic is not None:
+        _tell(on_stage, "joining the periodic patches")
+        mesh = mesh_file.spec.joined(mesh)
     _tell(on_stage, "writing the mesh")
     commit, modified = _checkout_state()
     provenance = {

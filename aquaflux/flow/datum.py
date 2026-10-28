@@ -20,6 +20,7 @@ from __future__ import annotations
 import abc
 import dataclasses
 import math
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -28,7 +29,12 @@ if TYPE_CHECKING:
     from aquaflux.boundary import BoundaryConditions
     from aquaflux.mesh import MeshGeometry
 
-__all__ = ["PinnedPoint", "PressureDatum", "refuse_an_unsuitable_pressure_datum"]
+__all__ = [
+    "PinnedPoint",
+    "PressureDatum",
+    "refuse_a_pressure_datum_beside",
+    "refuse_an_unsuitable_pressure_datum",
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -145,9 +151,35 @@ def refuse_an_unsuitable_pressure_datum(
         If the level is free and no datum is given -- the system would be singular -- or a datum is
         given and a patch already fixes the level, which would over-determine it.
     """
-    fixing = [
-        name for name, closure in boundary.conditions.items() if closure.prescribes_pressure()
-    ]
+    refuse_a_pressure_datum_beside(
+        [name for name, closure in boundary.conditions.items() if closure.prescribes_pressure()],
+        datum,
+        caller,
+    )
+
+
+def refuse_a_pressure_datum_beside(
+    fixing: Sequence[str], datum: PressureDatum | None, caller: str
+) -> None:
+    """The rule of :func:`refuse_an_unsuitable_pressure_datum`, given the patches that fix the level.
+
+    For a caller that knows which patches prescribe the pressure before any closure is built (a case
+    file, read before its mesh).
+
+    Parameters
+    ----------
+    fixing : sequence of str
+        The patches whose closure prescribes the pressure.
+    datum : PressureDatum or None
+        The datum given, if any.
+    caller : str
+        What is being built, for the message.
+
+    Raises
+    ------
+    ValueError
+        As :func:`refuse_an_unsuitable_pressure_datum`.
+    """
     if not fixing and datum is None:
         raise ValueError(
             f"{caller}: no boundary patch prescribes the pressure, so its level is free and the "

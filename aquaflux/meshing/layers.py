@@ -203,6 +203,7 @@ class PrismLayers:
         points: np.ndarray,
         faces: Polygons,
         layered: np.ndarray,
+        replaced: np.ndarray | None = None,
         twins: np.ndarray | None = None,
     ) -> LayerExtrusion:
         """Grow the layers.
@@ -214,6 +215,10 @@ class PrismLayers:
             A closed surface wound out of the region, every point used.
         layered : np.ndarray of bool, shape ``(faces.n_faces,)``
             Which faces carry layers, the triangles' first.
+        replaced : np.ndarray of bool, shape ``(faces.n_faces,)``, optional
+            Faces without layers that will be replaced after the layers are grown (a pipe's open
+            end, whose O-grid's cross-section takes its place), so may turn as they are drawn in
+            without the layers beside them being thinned. Unset, none.
         twins : np.ndarray of int, shape ``(n_points,)``, optional
             For each point, the point it is a copy of, at the same place (itself if none): points
             sharing one grow the same column. Unset, every point is its own.
@@ -231,20 +236,21 @@ class PrismLayers:
         """
         points = np.asarray(points, dtype=np.float64)
         layered = np.asarray(layered, dtype=bool)
+        replaced = np.zeros_like(layered) if replaced is None else np.asarray(replaced, dtype=bool)
         fan = fanned(points, faces, layered)
         if fan is None:
-            return self._grown(_Surface.of(points, faces), layered, twins)
+            return self._grown(_Surface.of(points, faces), layered, replaced, twins)
         n_points = points.shape[0]
         own = np.arange(n_points) if twins is None else np.asarray(twins, dtype=np.int64)
         twins = np.concatenate([own, np.arange(n_points, fan.points.shape[0])])
         middles = _Middles.of(_Surface.of(points, faces), layered, fan)
         surface = _Surface.of(fan.points, fan.faces, added=fan.added)
-        grown = self._grown(surface, layered[fan.face], twins, middles)
+        grown = self._grown(surface, layered[fan.face], replaced[fan.face], twins, middles)
         return _merged(grown, fan, layered[fan.face])
 
-    def _grown(self, surface: _Surface, layered, twins, middles=None) -> LayerExtrusion:
+    def _grown(self, surface: _Surface, layered, replaced, twins, middles=None) -> LayerExtrusion:
         """The layers grown on ``surface``, every point with its own column, the fan's
-        ``middles``' columns set between their two sides'."""
+        ``middles``' columns set between their two sides', the ``replaced`` faces free to turn."""
         n_points = surface.points.shape[0]
         moving = np.zeros(n_points, dtype=bool)
         rings = surface.rings[layered]
@@ -260,9 +266,10 @@ class PrismLayers:
         gap = _gaps(surface, direction, moving, 2.5 * thickness)
         share[moving] = np.minimum(1.0, self.gap_share * gap[moving] / thickness[moving])
         share = alike.smallest(_smoothed_down(surface, share, moving))
+        kept = ~layered & ~replaced
         for _ in range(self.max_halvings + 1):
             extrusion = _built(surface, layered, moving, direction, offsets, share * stretch)
-            bad = _to_be_thinned(extrusion, surface, layered, moving, self.min_top_share)
+            bad = _to_be_thinned(extrusion, surface, layered, kept, moving, self.min_top_share)
             if not bad.size:
                 return extrusion
             share[bad] *= 0.5
@@ -635,10 +642,12 @@ def _built(surface, layered, moving, direction, offsets, reach) -> LayerExtrusio
     )  # fmt: skip
 
 
-def _to_be_thinned(extrusion: LayerExtrusion, surface: _Surface, layered, moving, min_top_share):
-    """The moving points of any cell that is inside out, of any drawn-in face that turned, and at
-    either end of any edge of the layers' top shorter than ``min_top_share`` of the wall edge
-    under it."""
+def _to_be_thinned(
+    extrusion: LayerExtrusion, surface: _Surface, layered, kept, moving, min_top_share
+):  # fmt: skip
+    """The moving points of any cell that is inside out, of any drawn-in face that turned among
+    those ``kept`` (the faces without layers that stay), and at either end of any edge of the
+    layers' top shorter than ``min_top_share`` of the wall edge under it."""
     points = extrusion.points
     rows = []
     for cells, tetrahedra in ((extrusion.prisms, _PRISM_TETRAHEDRA),
@@ -659,7 +668,7 @@ def _to_be_thinned(extrusion: LayerExtrusion, surface: _Surface, layered, moving
         flat = _FLAT_SHARE * np.abs(volume).sum(axis=1)
         bad = np.any(volume > flat[:, None], axis=1) | (volume.sum(axis=1) >= -flat)
         rows.append(cells[bad].reshape(-1))
-    bare = ~layered & ~surface.added
+    bare = kept & ~surface.added
     drawn = extrusion.walls.where(bare)
     turned = np.einsum("ij,ij->i", drawn.normals(points), surface.normals[bare]) <= 0.0
     turned_triangles, turned_quads = drawn.split(turned)

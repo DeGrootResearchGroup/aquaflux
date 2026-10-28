@@ -323,16 +323,36 @@ def ray_hits(origin, direction, corners) -> np.ndarray:
     np.ndarray
         The distances, in units of ``direction``'s length, each positive.
     """
+    distance = crossing_distances(origin, np.asarray(direction)[None], corners)[0]
+    return distance[np.isfinite(distance)]
+
+
+def crossing_distances(origin, directions, corners) -> np.ndarray:
+    """How far rays from one point go to each triangle they cross (Moller-Trumbore).
+
+    Parameters
+    ----------
+    origin : np.ndarray, shape ``(3,)``
+    directions : np.ndarray, shape ``(n_rays, 3)``
+    corners : np.ndarray, shape ``(n_triangles, 3, 3)``
+
+    Returns
+    -------
+    np.ndarray, shape ``(n_rays, n_triangles)``
+        The distance, in units of each direction's length, at which each ray crosses each
+        triangle; ``inf`` where it does not cross it.
+    """
+    directions = np.asarray(directions, dtype=np.float64)
     edge1 = corners[:, 1] - corners[:, 0]
     edge2 = corners[:, 2] - corners[:, 0]
-    pvec = np.cross(direction, edge2)
-    det = np.einsum("ij,ij->i", edge1, pvec)
+    pvec = np.cross(directions[:, None, :], edge2[None])
+    det = np.einsum("mk,nmk->nm", edge1, pvec)
     ok = np.abs(det) > 1e-14
     inv = np.where(ok, 1.0 / np.where(ok, det, 1.0), 0.0)
     tvec = origin - corners[:, 0]
-    u = np.einsum("ij,ij->i", tvec, pvec) * inv
+    u = np.einsum("mk,nmk->nm", tvec, pvec) * inv
     qvec = np.cross(tvec, edge1)
-    v = (qvec @ direction) * inv
-    t = np.einsum("ij,ij->i", edge2, qvec) * inv
+    v = np.einsum("mk,nk->nm", qvec, directions) * inv
+    t = np.einsum("mk,mk->m", edge2, qvec)[None] * inv
     inside = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 0)
-    return t[inside]
+    return np.where(inside, t, np.inf)

@@ -107,6 +107,7 @@ is described once, for every field:
 | kind | velocity | pressure | in a `RANS` case |
 |---|---|---|---|
 | {class}`~aquaflux.case.Inlet` | `velocity`, prescribed | follows the interior | requires `turbulence`, the inflow `k` and `omega` |
+| {class}`~aquaflux.case.DevelopedInlet` | a fully developed pipe flow's, from the table `profile_table` | follows the interior | the table's `k` and `omega` |
 | {class}`~aquaflux.case.Outlet` | follows the interior | `pressure`, prescribed | `k` and `omega` follow the interior |
 | {class}`~aquaflux.case.Wall` | no slip — at rest, or at `velocity` for a moving wall | follows the interior | a wall for the closure; `k: zero_gradient` (default) or `k: zero` |
 
@@ -142,6 +143,20 @@ An inlet's `turbulence` is given either outright or the way it is usually known:
   ```yaml
   turbulence: {kind: IntensityLength, intensity: 0.05, length: 2.54e-3}
   ```
+
+A {class}`~aquaflux.case.DevelopedInlet` admits the flow far down a straight pipe, which no
+longer changes along it and depends only on the distance from the axis. Its `profile_table` is a
+table of that flow against the radius -- a `radius` column, then `U` (the velocity along the
+axis) and, for a `RANS` case, `k` and `omega` -- such as a {class}`~aquaflux.case.RadialProfiles`
+output writes from a case of the pipe alone, periodic along it and held at its bulk velocity. Each
+face of the inlet takes the values at its distance from the patch's centre, the velocity along the
+patch's inward normal, so the inlet must be flat (a pipe's end), and the pipe may be placed and
+turned anyhow:
+
+```yaml
+boundaries:
+  inlet: {kind: DevelopedInlet, profile_table: precursor/profiles.csv}
+```
 
 **`numerics`** — the discretization choices of a flow: `momentum_advection`
 (required, since a flow with no advection is Stokes flow rather than a default),
@@ -342,6 +357,7 @@ run writes the fields as VTK, the log and the history into `results/` beside the
 outputs:
   directory: results                    # relative to the case file
   log: march.log                        # the march's per-step table; null for the terminal only
+  log_detail: [inner, fields, pc]       # what the table adds beneath each step; [] for one row a step
   history: history.csv                  # the same steps as comma-separated values; null for none
   checkpoints: {kind: Checkpoints, every: 1, keep: 3}
   fields:
@@ -364,8 +380,21 @@ outputs:
   one VTK polygonal-data file per patch (`patches/<patch>.vtp`) indexed by a multiblock file
   (`patches.vtm`), one block per patch named by it. A radiation case's irradiance is written this
   way; a flow case has no patch fields, and writes the patches alone.
+- {class}`~aquaflux.case.RadialProfiles` writes the fields averaged over `bands` bands of distance
+  from an axis (a `centre` on it and its `axis` direction), as the table a
+  {class}`~aquaflux.case.DevelopedInlet` reads: a vector as its component along the axis. For a
+  fully developed pipe flow, a periodic case of the pipe alone:
+
+  ```yaml
+  - {kind: RadialProfiles, file: profiles.csv, centre: [0.0, 0.0, 0.0], axis: [1.0, 0.0, 0.0], bands: 40}
+  ```
 - Each writer's `fields` names what it writes — `U` and `p`, and under `RANS` also `k`, `omega`
   and `nut`; left out, all of them. The pressure is the solved one.
+- The log's `log_detail` adds, beneath each step's row: `inner`, a row per inner Newton
+  iteration of a dual-time step (its residual in and out, the Krylov cycles and the step length);
+  `fields`, each field's relative change over the step (under `RANS`); `pc`, each refit of a
+  materialized-Jacobian preconditioner and what it took. Each reads what the march already
+  computes. All three are on unless the file says otherwise.
 - The history ({class}`~aquaflux.solve.StepHistory`) has one row per step of the march — the
   step, the seconds since the run started, the residual and its ratio to the starting one, the
   line-search factor, the shift, the linear-solve cost, the continuation station the step drove
@@ -545,8 +574,8 @@ same rule a run refuses on, without checking the mesh.
 
 ## What a case file cannot describe yet
 
-- **A boundary profile** — an inlet velocity or value varying across the patch. Those are
-  functions of position, built in code.
+- **A boundary profile other than a developed pipe flow's** — an inlet velocity or value varying
+  across the patch some other way. Those are functions of position, built in code.
 - **A starting state on a mesh that is not an OpenFOAM one** — `Fields` reads an OpenFOAM time
   directory onto that case's own mesh; there is no way yet to start from another program's fields on
   a generated grid.

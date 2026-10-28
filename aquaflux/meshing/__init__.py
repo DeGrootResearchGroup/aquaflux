@@ -22,7 +22,8 @@ quadrilaterals a tetrahedral fill meets. :class:`PipeCore` fills a pipe's core, 
 with a structured O-grid, and :class:`DuctCore` a rectangular duct's -- four four-sided faces round
 it, along a straight line or a curve -- with hexahedra cross-section by cross-section, each a
 :class:`ConduitFill`; the mesher finds pipes and ducts by itself (:func:`find_pipes`,
-:func:`find_ducts`). :func:`element_mesh` makes a mesh of any tetrahedra, triangular prisms,
+:func:`find_ducts`), and :class:`PipeGrading` lets a straight pipe's cross-sections grow longer
+away from what it joins. :func:`element_mesh` makes a mesh of any tetrahedra, triangular prisms,
 hexahedra and pyramids.
 
 :class:`OctreeCore` builds a core of hexahedra inside a :class:`Region` -- the region a closed
@@ -91,6 +92,7 @@ from .lattices import BlockLattice, CartesianFrame, CylindricalFrame, Straight
 from .mapped import MappedQuads, MappedSurface
 from .near_surface import NearSurface
 from .pipe_core import PipeCore
+from .rows import PipeGrading
 from .pipes import find_pipes
 from .regions import ClosedSurface, Region, SampledRegion
 from .refinement import (
@@ -141,6 +143,7 @@ __all__ = [
     "NetgenProcess",
     "OctreeCore",
     "PipeCore",
+    "PipeGrading",
     "PipeOGrid",
     "Planarization",
     "PlaneSurface",

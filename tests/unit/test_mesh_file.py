@@ -33,7 +33,7 @@ from aquaflux.case import (
     write_mesh_file,
 )
 from aquaflux.io import read_aqmesh, read_aqmesh_header, read_openfoam
-from aquaflux.mesh import QualitySummary, structured_grid_3d
+from aquaflux.mesh import PeriodicJoin, QualitySummary, structured_grid_3d
 from aquaflux.meshing import (
     DuctCore,
     FacePlanarizer,
@@ -42,6 +42,7 @@ from aquaflux.meshing import (
     Graded,
     OctreeCore,
     PipeCore,
+    PipeGrading,
     RefinedBox,
     RefinedNear,
 )
@@ -62,6 +63,7 @@ DOCUMENT = {
         "core_bow": 0.3,
         "shell": {"kind": "Graded", "cells": 3, "growth": 1.2},
     },
+    "pipe_grading": {"kind": "PipeGrading", "growth": 1.1, "max_length": 0.05},
     "ducts": ["vessel_walls"],
     "duct_core": {"kind": "DuctCore", "junction_rows": 3},
     "core": {"kind": "OctreeCore", "size": 0.08, "clearance": 0.03},
@@ -84,6 +86,7 @@ def test_the_file_reads_into_its_sections_and_writes_back_as_given():
         mapped=("lamp",),
         pipes=("inlet",),
         pipe_core=PipeCore(core_bow=0.3, shell=Graded(3, 1.2)),
+        pipe_grading=PipeGrading(growth=1.1, max_length=0.05),
         ducts=("vessel_walls",),
         duct_core=DuctCore(junction_rows=3),
         core=OctreeCore(size=0.08, clearance=0.03),
@@ -107,6 +110,7 @@ def test_a_file_on_disk_reads_back_equal_and_relative_to_its_own_directory(tmp_p
 def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaults():
     mesher = mesh_spec_from_mapping(DOCUMENT).mesher()
     assert mesher.pipe_core == PipeCore(core_bow=0.3, shell=Graded(3, 1.2))
+    assert mesher.pipe_grading == PipeGrading(growth=1.1, max_length=0.05)
     assert mesher.duct_core == DuctCore(junction_rows=3)
     assert (mesher.max_size, mesher.feature_angle, mesher.grading, mesher.min_size) == (
         0.02, 0.785, 0.2, None,
@@ -313,6 +317,39 @@ def test_the_feature_angle_is_read_once_it_is_a_positive_number(sizes, angle):
 def test_the_drawings_sections_are_refused_by_name(document, message):
     with pytest.raises(ValueError, match=message):
         drawing_sections_from_mapping(document)
+
+
+# --- a periodic mesh -------------------------------------------------------------------------
+
+PERIODIC = {"kind": "PeriodicJoin", "first": "right", "second": "left"}
+
+
+def test_a_periodic_join_reads_writes_back_and_joins_the_written_mesh(tmp_path, boxed):
+    """The two patches are one seam in the file written; the quality is measured before the join."""
+    document = {**DOCUMENT, "periodic": PERIODIC, "output": {"path": "pipe.aqmesh"}}
+    spec = mesh_spec_from_mapping(document)
+    assert spec.periodic == PeriodicJoin("right", "left")
+    assert mesh_spec_to_mapping(spec) == document
+    path = tmp_path / "mesh.yaml"
+    write_mesh_file(spec, path)
+    told = []
+    record = make_mesh(path, on_stage=told.append)
+    assert told == [
+        "meshing the box", "measuring the mesh's quality", "joining the periodic patches",
+        "writing the mesh",
+    ]  # fmt: skip
+    written = read_aqmesh(record.aqmesh)
+    assert written.face_cells.neighbour_offset is not None
+    assert "left" not in written.face_patches.names and "right" not in written.face_patches.names
+    assert written.n_faces == BOX.n_faces - 3 * 2
+    assert record.quality == QualitySummary.of(BOX)
+
+
+def test_a_periodic_mesh_is_not_also_written_as_a_polymesh():
+    with pytest.raises(ValueError, match=r"written only as an \.aqmesh file"):
+        mesh_spec_from_mapping(
+            {**DOCUMENT, "periodic": PERIODIC, "output": {"path": "a.aqmesh", "openfoam": "of"}}
+        )
 
 
 def test_a_regions_baffles_are_read_named_none_or_unset_and_written_back_as_given():

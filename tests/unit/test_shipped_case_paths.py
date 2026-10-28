@@ -1,10 +1,13 @@
-"""Every file a shipped case file names is in the repository, or is declared to be generated.
+"""Every file a shipped case or mesh file names is in the repository, or is declared to be generated.
 
 A case file names its mesh (and, for radiation, a lamp's photometry) by a path relative to itself. A
 path into a directory the repository ignores reads cleanly and builds on the machine that ran the
 generator, and nowhere else: the 3D backward-facing step once named ``runs/kwsst/polyMesh``, which an
 OpenFOAM run writes and ``.gitignore`` excludes, while the same mesh sat tracked in another case's
 directory, so from a fresh checkout the case could not be built and nothing said so.
+
+A mesh file names the drawing it meshes and the mesh it writes, so it is read the same way: the
+drawing must be tracked, and the mesh it makes is declared as generated.
 
 A path that a fresh checkout cannot have is therefore a decision to write down, with what generates
 it, in :data:`GENERATED` -- declared, not discovered. A declared path that is now tracked, or that no
@@ -18,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from aquaflux.case import read_case
+from aquaflux.case.case_file import read_case_document, read_mesh_file
 from aquaflux.case.paths import named_paths
 
 REPO = Path(__file__).resolve().parents[2]
@@ -31,6 +35,17 @@ GENERATED: dict[str, str] = {
     "validation/ray_effects_room/work/empty/case/constant/polyMesh": (
         "generate_dom.py (blockMesh + snappyHexMesh in OpenFOAM's Docker image)"
     ),
+    **{
+        f"validation/sudo_bend/grids/{grid}/work/{path}": (
+            f"validation/sudo_bend/grids/{grid}: {command}"
+        )
+        for grid in ("round36", "round48", "round64")
+        for path, command in (
+            ("bend.aqmesh", "aquaflux mesh mesh.yaml"),
+            ("precursor.aqmesh", "aquaflux mesh precursor_mesh.yaml"),
+            ("precursor/profiles.csv", "aquaflux run precursor.yaml"),
+        )
+    },
 }
 
 
@@ -42,15 +57,32 @@ def _tracked() -> list[str]:
     return [name for name in listed.stdout.split("\0") if name]
 
 
-def _case_files(tracked: list[str]) -> list[str]:
+def _yaml_files(tracked: list[str]) -> list[str]:
     return [name for name in tracked if name.startswith("validation/") and name.endswith(".yaml")]
 
 
+def _is_mesh_file(name: str) -> bool:
+    """Whether a shipped YAML file is a mesh file: one naming the drawing it meshes, which no case
+    file has."""
+    document = read_case_document(REPO / name)
+    return isinstance(document, dict) and "drawing" in document
+
+
+def _case_files(tracked: list[str]) -> list[str]:
+    return [name for name in _yaml_files(tracked) if not _is_mesh_file(name)]
+
+
+def _mesh_files(tracked: list[str]) -> list[str]:
+    return [name for name in _yaml_files(tracked) if _is_mesh_file(name)]
+
+
 def _named(tracked: list[str]) -> dict[str, list[str]]:
-    """Each path the shipped case files name, normalized to the repository -> the files naming it."""
+    """Each path the shipped case and mesh files name, normalized to the repository -> the files
+    naming it."""
     named: dict[str, list[str]] = {}
-    for case_file in _case_files(tracked):
-        case = read_case(REPO / case_file)
+    read = [(name, read_case(REPO / name)) for name in _case_files(tracked)]
+    read += [(name, read_mesh_file(REPO / name)) for name in _mesh_files(tracked)]
+    for case_file, case in read:
         for location, path in named_paths(case.spec):
             assert not os.path.isabs(path), f"{case_file} {location} is absolute: {path}"
             target = os.path.relpath(os.path.normpath(case.directory / path), REPO)
@@ -69,7 +101,10 @@ def test_the_census_reads_every_shipped_case_file() -> None:
     case_files = _case_files(tracked)
     assert "validation/bfs3d_openfoam/case.yaml" in case_files
     assert "validation/pitzdaily_openfoam/case.yaml" in case_files
-    assert any(path.endswith("polyMesh") for path in _named(tracked))
+    assert "validation/sudo_bend/grids/round36/mesh.yaml" in _mesh_files(tracked)
+    named = _named(tracked)
+    assert any(path.endswith("polyMesh") for path in named)
+    assert "validation/sudo_bend/bend.step" in named
 
 
 def test_every_path_a_shipped_case_file_names_is_tracked_or_declared_generated() -> None:

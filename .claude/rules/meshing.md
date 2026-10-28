@@ -162,7 +162,7 @@ vertex. Features: fold beyond `feature_angle` (no default), every patch border, 
 ## The CAD mesher (`cad_mesher.py`) — built
 
 `CadMesher(max_size, feature_angle, min_size=None, grading=None, layers=None, cap_height=ClearedCaps(),
-pipe_core=PipeCore(), duct_core=DuctCore(), planarizer=None, core=None, refinements=(), netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
+pipe_core=PipeCore(), duct_core=DuctCore(), pipe_grading=None, planarizer=None, core=None, refinements=(), netgen=NetgenProcess()).mesh(model, region, patches=None, others="walls",
 layered=(), mapped=(), pipes=None, ducts=None, baffle_patch=BAFFLE_PATCH, on_stage=None) -> Mesh` (`on_stage`, a `Stage`, is told each stage's name as it starts,
 only the stages this mesh runs; `aquaflux mesh` prints them, `case.md`): `write_brep` → `triangulate` (face-tagged; again with the refinements' local sizes when there are any, below;
 again with the rims divided alike where a pipe candidate's need it, and whenever there is a duct, its edges divided as below) → pipes and ducts found (below) → the `mapped` patches' faces, the pipes' and the ducts' sides remeshed as structured quadrilaterals (below) → the surface opened along the baffles ("Baffles", below) →
@@ -219,7 +219,7 @@ and their stub's triangles are not wound alike (`_loops` refuses such triangles 
 ## Prism layers (`layers.py`) — built, on triangles and quadrilaterals
 
 `PrismLayers(first_height, growth, count, gap_share=0.4, max_stretch=2.0, max_halvings=8, min_top_share=0.1).extrude(points,
-faces: Polygons, layered, twins=None) -> LayerExtrusion(points, prisms, hexahedra, tetrahedra, tents, inner, walls, sides, side_face,
+faces: Polygons, layered, replaced=None, twins=None) -> LayerExtrusion(points, prisms, hexahedra, tetrahedra, tents, inner, walls, sides, side_face,
 columns, fanned)`: one extruder for both kinds, prisms over triangles and hexahedra over quadrilaterals, layer by
 layer in the surface's order; `inner`, `walls` and `sides` are `Polygons`; `columns` each moved point then its
 layer points; `tetrahedra`, `tents` and `fanned` are the fan's (below; empty without one). A mesh file states it as `MeshSpec.layers` with the patch names in `MeshSpec.layered` (both
@@ -315,18 +315,45 @@ patches (agreed with the project owner, 2026-10-20: quads from mapped meshing of
 extruder for both kinds, pyramid caps to the fill; a block's faces as the source were the alternative
 not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells are hexahedra.
 - **Two shapes, read from the face's own triangles** (boundary edges used once, chained into loops in
-  their winding): **a band** (two loops: a cylinder or cone, a flat ring) -- rows from the loop with more
-  points toward the other, rolled to start across from it, `round(distance / mean spacing)` rows;
+  their winding): **a band** (two loops: any tube, a cone, a flat ring) -- rows from the loop with more
+  points toward the other (below);
   **four-sided** (one loop, four points within `corner_tolerance` × extent of the drawing's vertices) --
   a Coons grid of its sides. Anything else (Sozzi's hemispherical lamp tip: one loop, no four corners;
   the vessel's cylinder: three loops, the riser's hole) is refused by name.
+- **A band's rows, three ways** (`_Builder.band`; the second rim's roll is always the one its rows' end
+  is carried onto by the least turn -- a round rim maps onto itself under any spin, so every roll fits
+  equally; the least turn is the untwisted one):
+  - **the one rigid motion between the rims** (`RimMotion`, a screw: turn about a line plus slide along
+    it, fitted by Kabsch to the flattened rims point for point) when the band is no tube (rims' radii
+    more than `TUBE_RADII` 2 % apart: a cone, a flat ring) or when the wall *is* the tube its rim sweeps
+    along that screw (`_follows`: every wall point within `SWEPT_WALL` 5 % of the radius of the swept
+    centreline, carried on 2 r past either rim for a saddle): a straight pipe's slide, a bend's turn, a
+    coil's screw -- exact, rows `round(mean helix length / spacing)`. Row `t` is the first rim carried
+    `t` of the way, plus `t` of what the motion leaves (a cone's radius change);
+  - **else marched along the tube** (`sections.TubeWall.march`, an S-bend, a sweep along a free curve):
+    rows `round((area / mean rim perimeter) / spacing)` (the tube's length by Pappus), each cross-section
+    the plane **its wall normals lie in** (smallest eigenvector of `Σ ν νᵀ` over its cut points),
+    re-centred on the cut and refined to `SETTLED` 1e-6 rad (about three refinements), predicted from
+    the last by the last step's turn; cuts are rays on the face's triangles moved onto the drawing,
+    **normals from the drawing** (`onto` returns points and normals). ⚠️ Facet normals averaged at
+    vertices lean toward the larger facets where curvature changes: the S's inflection row leant 1.5°
+    with them, 0.04° with the drawing's (pinned by
+    `test_an_s_bends_band_becomes_a_grid_of_its_cross_sections_marched_along_it`). The marched end is
+    carried onto the far rim by the rigid motion between them, `t` of it at row `t`;
+  - either way the rims' bows (measured along each rim's Newell normal) fade over `RIM_ROWS`.
+  ⚠️ **Turns under `STRAIGHT` (1e-6 rad) are a slide**: Netgen's rims of a straight pipe fit with a
+  rounding-error turn (2e-8 rad seen) whose line is ~10⁷ m away, and a least-squares pivot then gave
+  7·10⁸ rows; the pivot is the closed form `½(t⊥ + cot(θ/2) u × t⊥)` (pinned by
+  `test_a_rim_motion_between_two_rims_of_a_straight_pipe_is_a_slide_despite_rounding`).
+- **`_loops` refuses a boundary that is not simple loops** (a point on it twice): walked on every face as
+  a pipe candidate since recognition went generic, the stub cube's faces looped forever.
 - **Netgen's edge points, kept**: the grid's sides are the triangulation's, which the neighbouring faces
   share (per-edge `maxh` is only a bound; an exact count needs `edge_divisions`, below, used for pipe
   rims only). **Unequal opposite
   sides**: the grid stops a row short and a strip of triangles (`_zipped`, shorter diagonal first) joins it
   to the shorter-counted side; a four-sided face with both pairs unequal is refused.
-- New points are interpolated in space and moved onto the face by the injected `onto` (the mesher's
-  `CadModel.project(faces=)`); no surface parameters are read. **Wound by construction** (rows run from a
+- New points are interpolated in space and moved onto the face by the injected `onto(points, faces) ->
+  (points, normals)` (the mesher's `CadModel.project(faces=)`); no surface parameters are read. **Wound by construction** (rows run from a
   loop, in its winding, into the face), pinned by the outward-normal assertion; a reorientation step was
   dominated and deleted.
 - Measured on Sozzi (lamp cylinder and both pipes mapped; log): 98.6 / 98.8 % of the lamp's / pipes'
@@ -354,8 +381,8 @@ not taken). Layered, a mapped wall carries hexahedra, so the dual's wall cells a
   (`CloseOpenQuads`) does not close quads given from Python (log). Background: log, "hexahedra to
   tetrahedra: what the literature and other meshers do". Pinned by `tests/unit/test_meshing_caps.py`
   and `test_a_caps_height_is_measured_on_its_quadrilaterals_first_edge`.
-- Pinned in `tests/unit/test_meshing_mapped.py` (bands of equal and unequal rims, Coons grids with and
-  without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
+- Pinned in `tests/unit/test_meshing_mapped.py` (bands of equal and unequal rims, a bend's rows its
+  meridians, an S-bend marched, `RimMotion`'s fit, Coons grids with and without a strip, the refusals) and `test_meshing_netgen.py` (the L with all six rectangles mapped: every
   wall face with no vertex on a CAD edge a hexahedron's; Sozzi's lamp and pipes).
 
 ## Pipes: structured O-grid cores (`pipes.py`, `pipe_core.py`) — built
@@ -365,17 +392,23 @@ structured O-grid** (`PipeCore`) whose outer quads are the layers' top quads, po
 seam, no caps inside the pipe (agreed with the project owner, 2026-10-20, over replacing whole pipes
 with the block mesher's `PipeOGrid`: the extruder keeps the wall cells and their hand-over to the
 vessel's layers at the junction; a few layers then a full O-grid inside gives the grading control).
-- **Found** (`find_pipes`): a `CylinderFace` with the fluid inside (`solid_inside`), two loops of equal
-  counts, a multiple of four, nothing else of the surface inside it between its rims (refuses a vessel
-  shell round a lamp); `rim_counts=False` skips the counts, for the drawing view (asked before any
-  rim is divided). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
+- **Found** (`find_pipes`) **from the face's triangulation, not its CAD record** (`_TubeShape`): two
+  simple loops; closed across them by centroid fans, a volume over `TUBE_VOLUME` 0.1 × area × rim radius
+  (a tube holds 0.5, a flat ring 0; negative is a bore, "the fluid is outside it"); equal rim counts, a
+  multiple of four; and no other surface point (the pipe's own and its caps' aside) inside the closed
+  tube (`ClosedSurface.inside`). So straight lengths, bends, coils, reducers and free-form sweeps (a
+  B-spline surface, an `OtherFace`) are all pipes; `rim_divisions(topology, points, ...)` uses the same
+  test. `rim_counts=False` skips the counts, for the drawing view (asked before any rim is divided). `CadMesher.mesh(pipes=None)` takes every such face (and maps it); a tuple names
   the patches, each face of which must be one (else `ValueError` naming the reason); `()` none.
   `MeshSpec.pipes` / `MeshSpec.pipe_core` in a mesh file.
 - **Rims divided alike** (`rim_divisions`, #789): Netgen's rim counts follow the size (Sozzi: 12/13 at
   maxh 0.005, 17/17 at 0.0035), so a candidate (fluid-filled cylinder, two loops) whose loops differ or
   are not a multiple of four gets both rims `4·ceil(max/4)` segments -- never coarser than Netgen chose
   -- shared among a rim's edges by length (largest remainder, ≥ 1 each; Sozzi's inlet rim is two edges,
-  15 + 5); an edge on two candidates' rims takes the larger. `CadMesher.mesh` then triangulates **a
+  15 + 5). **Candidates sharing a rim edge are one group (`_joined`) and get one count**, the group's
+  largest rounded up, on every rim: per candidate, a bend's far rim kept its 12 while the shared rim took
+  the straight pipe's 16, so the bend stopped being a pipe (pinned by
+  `test_pipes_joined_at_a_rim_are_divided_alike_all_along`). `CadMesher.mesh` then triangulates **a
   second time** with `NetgenProcess.triangulate(edge_divisions=)` (only when something is asked) and runs
   `find_pipes` on that; `patch_of_face` comes from the first triangulation (per CAD face, unchanged).
   Both Sozzi pipes cored at every maxh 0.02-0.0035 (log, "Pipe rims divided alike"); at 0.0025 the
@@ -399,9 +432,33 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   and its junction caps' apexes make 0.3 mm cells; one cell gave pipe faces over 50° 36 against 66 (log).
   ⚠️ The dual cells of the core's four corners in each cross-section are **triangular prisms** (three
   primal cells meet there): inherent to an O-grid; the bow evens their neighbours.
+- **Runs** (`pipe_runs`): pipes whose grids share an end row (as a point set) are joined into one grid,
+  each next grid turned (rows reversed, columns reversed and rolled) so its first row is the previous
+  last, point for point, and filled by **one** `PipeCore.fill` (one `Conduit` whose own faces are the
+  run's), so no cross-section is left to caps and tets between them. Refused: three pipes at one rim (a
+  tee is not a run) and a closed loop of pipes (no end to start from). Measured on `validation/sudo_bend`
+  (36 round, layers 2.5 mm × 1.2 × 4, maxh 0.01, 2026-10-23, before the merge of #813's conduits): 76788
+  cells ungraded, 42660 graded (1.08 to D/5), 98.6 % hexahedra (the rest the core-corner prisms),
+  interior non-orthogonality max 13.4° either way (with the open ends `replaced`), no concave cell;
+  volume the inscribed 36-gon's to 4e-5 in the legs and the bend alike.
+- **Grading along a straight pipe** (`rows.PipeGrading(growth, max_length=None)`, `CadMesher.pipe_grading`,
+  `MeshSpec.pipe_grading`; agreed with the project owner 2026-10-23): rows start at the rims' spacing at
+  each rim that joins something (another pipe of a run, a junction) and grow by `growth` toward an
+  **open end** (`pipes.open_ends`: a cap face without layers, `conduit_ends`' open-end rule read per face
+  of the drawing, before the layers) or the length's middle, up to `max_length`; none to grade from,
+  even. Only where the band's motion does not bend (`RimMotion.bends`, `STRAIGHT_PATH` 1e-3: a straight
+  pipe's rims fit with a twist about its own axis); bends and marched curves stay even.
+  `MappedQuads.remesh(graded={face: (grading, open-rim points)})`.
+- ⚠️ **A pipe's open-end faces are `replaced` in `PrismLayers.extrude`**: the O-grid's last cross-section
+  takes their place, so their drawn-in triangles turning is not a reason to thin. Before, layers 14 mm
+  thick turned the end disc's rim triangles and were thinned to 3.7 mm at the outlet, tapering over the
+  end rows: the sudo bend's worst faces (25.9° even, 41.1° with 20 mm graded rows) were there; with the
+  mask 13.4° both (2026-10-23; pinned by
+  `test_layers_beside_faces_to_be_replaced_are_not_thinned_for_turning_them`).
 - **Ends** (`conduits.py`: `conduit_ends`, `fill_conduits`, shared with ducts; a `Conduit` carries its
-  rings, its `fill(points, rings) -> ConduitFill` and `junction_rows`): an end on a flat face without layers bounded only by the
-  pipe's rim (`is_cap`: its edges ⊆ the pipe's) is **open** -- the O-grid runs to it and its last
+  rings, its `fill(points, rings) -> ConduitFill` and `junction_rows`): an end on a flat face without
+  layers bounded only by the conduit's rims (`is_cap`: its edges ⊆ those of the conduit's own faces, a
+  pipe run's all) is **open** -- the O-grid runs to it and its last
   cross-section replaces that face's own faces inside the layers' ring, same patch (inlet / outlet area
   unchanged, 0.9783 of πr² both ways); else a **junction** -- the O-grid stops `junction_rows` short and
   its cross-section is the interface the fill meets, wound out of the fill and capped (`PyramidCaps`).
@@ -411,10 +468,15 @@ vessel's layers at the junction; a few layers then a full O-grid inside gives th
   pipes' faces over 50° 32-37 against 85-93 without cores, p99 6.0° against 46.8°, worst 59-60° against
   87-89°, neighbour volume ratio p99 36-38 against 165-177; ~1k more cells. ⚠️ The junction discs'
   cap apexes leave 2-3 cells of ~3.5e-11 m³ (0.33 mm) per mesh -- #785, now confined to two discs.
-- Pinned in `tests/unit/test_meshing_pipes.py` (O-grid exact in a polygon prism, its outer faces the
+- Pinned in `tests/unit/test_meshing_pipes.py` (the bend as a pipe, one beyond its ends, a bore and a
+  flat ring refused, the joined rim division, `pipe_runs`' joins and refusals; O-grid exact in a polygon prism, its outer faces the
   rings' quads, corners, bow, radial lines not twisted; `find_pipes`' refusals; the whole mesher on a stub
   cylinder open at both ends, no Netgen, every cell hexahedral but the corner prisms) and
-  `test_meshing_netgen.py` (Sozzi's pipes: closure, pipe p99 < 7°, hexahedra along both axes, end areas).
+  `test_meshing_netgen.py` (Sozzi's pipes: closure, pipe p99 < 7°, hexahedra along both axes, end areas;
+  a leg-bend-leg run: only hexahedra and four core-corner prisms a row, volume the swept polygon's; a
+  disc swept along a B-spline S, its wall an `OtherFace`: the same, non-orthogonality under 25°).
+  ⚠️ At an open end the core's lines seem to kink in a slice: the dual's end cells are half cells, their
+  centroids nearer the primal core corners (27 against 24.5 mm on that sweep) -- the dual's, not the rows'.
 
 ## Baffles (`sheets.py`) — built
 

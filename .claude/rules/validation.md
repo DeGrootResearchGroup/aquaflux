@@ -93,6 +93,10 @@ branches.
   (`run_with_footprint`), never a bare `subprocess.run`.** Otherwise `kill <pid>` leaves the
   `/usr/bin/time` child and its Python grandchild running, invisible to `run_case.sh --status`. `kill -9`
   still orphans; after an interrupted run check `pgrep -fl "usr/bin/time"`.
+- ⚠️ **A case started with `&` from a non-interactive shell ignores SIGINT** (POSIX: the shell sets it to
+  `SIG_IGN`, and Python keeps it, so no `KeyboardInterrupt` ever reaches `aquaflux run`'s handler; `SigIgn`
+  in `/proc/<pid>/status` shows it). A watchdog or stop sent as SIGINT does nothing; send SIGTERM, as
+  `run_case.sh` forwards (2026-10-23: two SIGINTs to a precursor run went unseen for 20 min).
 - **A timer that blocks on its own result also waits for earlier, untimed asynchronous work.** A JAX
   breakdown is sound only where the work before each timed piece is timed too; time a surprisingly large
   piece alone before believing it.
@@ -312,7 +316,7 @@ pivot floor, by machine".
   regeneration that differs shows in `git status`; on 2026-10-17 its node lines matched the current
   `blockMeshDict`'s grading to the file's printed precision, 5e-11 m). The OpenFOAM fields are not
   tracked there; without them `compare.py` marches and skips the comparison.
-- **A shipped case file may name only a tracked path or one declared in
+- **A shipped case or mesh file may name only a tracked path or one declared in
   `tests/unit/test_shipped_case_paths.py`'s `GENERATED`** (with what writes it), fast tier; the bfs3d
   mesh once sat at an ignored `runs/kwsst/polyMesh` while tracked twice in `bfs3d_species/`.
 - ⚠️ `bfs3d_species/of_case/` still tracks a run's scratch output against its own `.gitignore` (`2000/`,
@@ -380,6 +384,57 @@ run and compare the studies; numbers in its README.
 - Within 2 mm of a sleeve the grid-interpolation error is 17–36 % at every spacing (#726), and the
   node-averaged mean G is not a converged volume integral. `render.py` draws figures from 0.5 mm pixels
   masked by the exact water test; plate-plane figures are direct light only.
+
+## `sudo_bend` — a 90° pipe bend (Sudo, Sumida & Hibara 1998)
+
+The third canonical RANS case: curvature-driven secondary flow, no sharp-edged separation. **Meshed
+natively** from its own drawings (`geometry.py` → tracked `bend.step`, `precursor.step`), one O-grid from
+inlet to outlet through the bend (`meshing.md`, "Runs").
+- **The case files are per grid, generated** (`write_grids.py` → tracked `grids/round{36,48,64}/{mesh,
+  precursor_mesh,precursor,case}.yaml`, each writing into its own gitignored `work/`): edit the script,
+  rerun it, never the files. `test_shipped_case_paths.py`'s `GENERATED` declares each grid's three
+  generated paths. The scripts (`render_mesh.py`, `render_flow.py`, `plot_inflow.py`) default to
+  `round36`.
+- **The inflow is developed in a precursor, then mapped by radius** (the project owner's choice,
+  2026-10-23): each grid's `precursor_mesh.yaml` meshes one diameter of the pipe with that grid's settings
+  and joins its ends (`periodic`), `precursor.yaml` holds `BulkVelocity` at Re 6e4 and writes
+  `work/precursor/profiles.csv` (`RadialProfiles`), `case.yaml`'s inlet is a `DevelopedInlet`. The
+  precursor is a `CoupledMarch` with `BlockDiagonal`: the channel files' `Segregated` + `DirectSolve`
+  asked 131 GB on 3792 cells (dense), and a held bulk velocity refuses a `MaterializedJacobian` (#541).
+- **The grid study (GCI, Celik et al. 2008; agreed with the project owner 2026-10-23)**: `r = 4/3` in
+  `h = (V/N)^(1/3)` per level (36/48/64 round; measured 1.324 and 1.307: 42,660 / 98,987 / 221,102
+  cells), **the first cell fixed at 2.5 mm** (same wall-function regime), layers above it `1.2^(1/r^k)`
+  with one more a level (4, 5, 6: four layers would give r 1.285, under 1.3); `max_size = πD/N` gives
+  exactly N rim points. ⚠️ The worst non-orthogonality rises 13.4 → 17.7 → 21.5°, at the core's corners,
+  because the thicker layer stack thins the shell. `gci.py` reproduces Celik's Table 1 before anything
+  else (the check that it can fail) and reports K_loss, the 90° secondary-flow strength and local GCI of
+  the symmetry-plane axial velocity at the stations. ⚠️ **Its point reading is a weighted linear fit over a
+  connectivity stencil (the 4 nearest cells' two face rings)**: a Delaunay `LinearNDInterpolator` moved a
+  value 0.02 U_b under a 1e-7 m mesh change (degenerate on the graded rows), k-nearest centroids by distance
+  all fell in one row's cross-section, and one nearest cell flipped on the axis (0.007 U_b); now two coarse
+  solves 0.1 µm apart agree to 1e-7.
+- **`run_study.py` runs the whole study** through `run_case.sh` (`SUDO_GRIDS`, `SUDO_REDO`, `SUDO_FORCE`;
+  `SUDO_` is in `run_case.sh`'s capture line): per grid the two meshes, the precursor and the bend, each a
+  `run_forwarded` child logging to `work/<step>.log`, skipping what is done (an `.aqmesh` there, `run.yaml`
+  `converged: true`), refusing a bend whose ~200 KB/cell estimate exceeds `MemAvailable`, then `gci.py` once
+  all three bends converged. Checked 2026-10-26: skips, the refusal, a real step, and `kill <pid>` leaving
+  no child.
+- **On Slurm (the project owner runs on Nibi, 2026-10-26)**: `slurm/submit.sh <account> [grids]` submits a
+  `grid.sbatch` per grid (`SUDO_GCI=0`, per-grid cores/`--mem`/time in the script) and `gci.sbatch` with
+  `--dependency=afterok`; `environment.sh` loads `SUDO_MODULES` (default `python/3.12`), activates
+  `SUDO_VENV` (default `~/venvs/aquaflux`) and sizes the thread pools to `SLURM_CPUS_PER_TASK`.
+  `SUDO_WORK_ROOT` moves each grid's `work/` there and links it back (the `.gitignore` entry has no
+  trailing slash so the link is ignored too). `run_study.py`'s memory check is cgroup-aware (v1 and v2, tightest limit up to the root) so a job's
+  `--mem` is what it sees. Checked against a stand-in `sbatch`; not yet run on Nibi.
+- **The precursors stop at rtol 1e-6** (project owner, 2026-10-23: enough on other cases); 1e-6 came at
+  steps 42 / 55 / 72 on the three grids, the fine one at ~140-345 s a step (README).
+- **The bend marches with bfs3d's solver section, probe reach included** (`column_reach: [2, 2, 2, 3,
+  2, 2]`, pressure at 3, as bfs3d on `main` since #839; project owner, 2026-10-26). Carry a later
+  change to bfs3d's section into `write_grids.py`'s template.
+- **Memory**: the bend's materialized march held ~10.5 GB of 15 on round36 (≥ 4.3 GB free, 15 steps, 42
+  min); round48 (~20 GB) and round64 (~45 GB, estimated at ~200 KB/cell) are solved on a larger machine.
+- The station list and digitized profiles are still to be taken from the paper (the project owner is
+  fetching them).
 
 ## The aggressive Reynolds continuation does NOT need the complete LU
 

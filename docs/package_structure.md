@@ -69,12 +69,15 @@ cfd/                                  # repo root
 │   │   ├── graph.py                  #   cell↔cell adjacency (build-time): cell_adjacency_coo() (SciPy COO, for RCM) / cell_adjacency_csr() (CSR arrays, for partitioners)
 │   │   ├── structured.py             #   structured_grid_2d() / structured_grid_3d() / graded_nodes(): clean orthogonal quad/hex grids (interior-node skew for order studies lives in tests/support/meshes.py)
 │   │   ├── digest.py                 #   mesh_digest(mesh): one digest for one mesh, wherever it is read (checkpoints, .aqmesh headers)
+│   │   ├── periodic.py               #   PeriodicJoin: two boundary patches joined into one periodic seam; the face matching the OpenFOAM cyclic fusion shares
+│   │   ├── carried.py                #   carried_cell_zones / carried_face_patches: zones and patches onto a rebuilt mesh (the join, the collapse)
 │   │   └── collapse.py               #   collapse_extruded_direction(): one-cell-thick extruded 3D mesh → genuine 2D Mesh (used by the OpenFOAM reader for empty-patch 2D cases)
 │   │
 │   ├── io/                           # mesh import (file formats → Mesh) and field output; depends on mesh, never the reverse
 │   │   ├── aqmesh/                   #   aquaflux's own mesh file (.aqmesh): write_aqmesh / read_aqmesh / read_aqmesh_header, read back exactly
 │   │   ├── reader.py                 #   MeshReader(eqx.Module) strategy: read() → Mesh (format-agnostic seam)
 │   │   ├── cell_fields.py            #   as_cell_values(): the conversion + per-cell length check every field writer makes
+│   │   ├── profiles.py               #   write_profile_table / read_profile_table: fields against radius as CSV (a developed pipe flow)
 │   │   ├── vtk/                      #   VTK XML output: write_vtu() (one frame) / write_pvd() (transient collection)
 │   │   │   ├── topology.py           #     Mesh → VtkCells: face-based storage → arbitrary polygon/polyhedron connectivity (hexahedra as VTK hexahedra), each face wound outward from the cell listing it (pure numpy)
 │   │   │   ├── xml.py                #     VtkCells + cell fields → .vtu / .pvd document parts; raw appended binary by default, ASCII on request (pure)
@@ -117,6 +120,7 @@ cfd/                                  # repo root
 │   │
 │   ├── boundary/                     # weak boundary-face-value closures (a BC is a special face interpolator)
 │   │   ├── conditions.py             #   BoundaryCondition → Dirichlet, DirichletField, ZeroGradient, Neumann, Convective
+│   │   ├── radial.py                 #   RadialProfile / AxialVector (values by distance from an axis) + radial_average (cell values over bands of radius)
 │   │   └── collection.py             #   BoundaryConditions: named {patch: closure} collection bound to a mesh's patches, applied by the shared iterate-patches → gather owner → set fold
 │   │
 │   ├── flow/                         # the coupled pressure–velocity (u, v[, w], p) block
@@ -231,11 +235,13 @@ cfd/                                  # repo root
 │   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
 │   │   ├── refinement.py             #   Refinement: RefinedBox / RefinedSphere / RefinedCylinder / RefinedNear(patches, distance) -> LocatedRefinement (octree criterion + Netgen LocalSizes)
-│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered, twins) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
-│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, and their grids
+│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered, replaced, twins) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
+│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, and their grids; bands swept along the RimMotion (slide or turn) between their rims, or marched along the tube
+│   │   ├── rows.py                   #   PipeGrading: a straight pipe's rows grown away from what it joins
+│   │   ├── sections.py               #   TubeWall.march: a tube's cross-sections, each the plane its wall normals lie in, marched along it
 │   │   ├── conduits.py               #   Conduit / ConduitEnds / ConduitFill; conduit_ends / fill_conduits: pipes' and ducts' structured cores taken out of the fill, open ends and junctions
 │   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> ConduitFill: an O-grid (square core, bow, shell) inside rings of points
-│   │   ├── pipes.py                  #   find_pipes / rim_divisions: pipes found from the CAD (rims divided alike)
+│   │   ├── pipes.py                  #   find_pipes / rim_divisions / pipe_runs / open_ends: pipes (any tube the fluid fills: straight, bent, swept) found from the face's triangulation (rims divided alike), joined end to end into runs
 │   │   ├── duct_core.py              #   DuctCore.fill(points, rings, width) -> ConduitFill: four-sided cross-sections by transfinite interpolation, joined
 │   │   ├── ducts.py                  #   Duct; find_ducts / duct_divisions / duct_rings: rectangular ducts (chained four-face segments) found from the CAD, rails' points on normal cross-sections
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill

@@ -31,9 +31,11 @@ starts from (a :class:`Checkpoint` of an earlier run, to resume one that stopped
 ``outputs`` section what a run writes; :func:`prepare_run` reads and checks a file for a run, and :meth:`PreparedRun.run` builds,
 solves and writes it -- what ``aquaflux run case.yaml`` does.
 
-Each boundary patch is described once for every field: an :class:`Inlet`, an :class:`Outlet`, a
-:class:`Wall` or a :class:`Lamp`. The closures each equation needs, and the set of walls a turbulence
-closure measures its wall distance from, all follow from that one statement.
+Each boundary patch is described once for every field: an :class:`Inlet`, a
+:class:`DevelopedInlet` (a fully developed pipe flow, its profiles from a table another case's
+:class:`RadialProfiles` output wrote), an :class:`Outlet`, a :class:`Wall` or a :class:`Lamp`. The
+closures each equation needs, and the set of walls a turbulence closure measures its wall distance
+from, all follow from that one statement.
 
 A :class:`Radiation` case is the light of its lamps rather than a flow: its patches are lamps and walls
 (black, or reflecting by a ``reflectance``), its physics holds the medium, what stands in the way and
@@ -59,6 +61,7 @@ It writes the fluence rate ``G`` at the cell centres, the irradiance ``E`` on th
 from __future__ import annotations
 
 from .boundaries import (
+    DevelopedInlet,
     FixedTurbulence,
     Inlet,
     InletTurbulence,
@@ -66,6 +69,7 @@ from .boundaries import (
     Lamp,
     Outlet,
     PatchCondition,
+    PatchSite,
     Wall,
 )
 from .case_file import (
@@ -85,7 +89,16 @@ from .drawing_view import DRAWING_FILE, DrawingView, view_drawing
 from .mesh_file import Drawing, DrawingRegion, DrawingSections, MeshOutput, MeshSizes, MeshSpec
 from .mesh_run import MeshRecord, make_mesh
 from .mesh_source import AquafluxMesh, MeshSource, OpenFOAMMesh
-from .outputs import Checkpoints, FieldWriter, OpenFOAMTime, Outputs, PatchVtk, RunFields, Vtk
+from .outputs import (
+    Checkpoints,
+    FieldWriter,
+    OpenFOAMTime,
+    Outputs,
+    PatchVtk,
+    RadialProfiles,
+    RunFields,
+    Vtk,
+)
 from .paths import relocated
 from .drawing import CadPlacement
 from .physics import RANS, Laminar, Physics, Radiation
@@ -150,6 +163,7 @@ __all__ = [
     "Coarsen",
     "CosinePowerProfile",
     "CoupledMarch",
+    "DevelopedInlet",
     "Drawing",
     "DrawingRegion",
     "DrawingSections",
@@ -185,9 +199,11 @@ __all__ = [
     "Outputs",
     "PatchBody",
     "PatchCondition",
+    "PatchSite",
     "PatchVtk",
     "Physics",
     "PreparedRun",
+    "RadialProfiles",
     "Radiation",
     "RadiationSolve",
     "Receivers",

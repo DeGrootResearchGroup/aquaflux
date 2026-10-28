@@ -6,7 +6,8 @@ A case file's ``outputs`` section names a directory, relative to the case file, 
   :class:`Vtk` (a VTK unstructured-grid file, for any mesh), :class:`OpenFOAMTime` (a time
   directory of an OpenFOAM case, which restarts in the solver that case is set up for), or
   :class:`PatchVtk` (the boundary patches and the fields on their faces, one VTK polygonal-data file
-  per patch bound by one multiblock index);
+  per patch bound by one multiblock index), or :class:`RadialProfiles` (the fields averaged over
+  bands of distance from an axis: a developed pipe flow's profiles, for another case's inlet);
 * ``log`` -- the per-step table of the march, written as the run goes;
 * ``history`` -- the same steps as a comma-separated-values file, every number at full precision, for
   a program to read (a convergence plot, a comparison of runs);
@@ -23,15 +24,27 @@ import abc
 import dataclasses
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal, get_args
 
-from aquaflux.io import write_openfoam_time, write_patches, write_vtu
+import numpy as np
+
+from aquaflux.boundary import radial_average
+from aquaflux.io import write_openfoam_time, write_patches, write_profile_table, write_vtu
 from aquaflux.mesh import Mesh
 
 from .axes import AXES, AxisName, refuse_an_extruded_axis_of_a_three_dimensional_mesh
 from .kinematic import kinematic_pressure
 
-__all__ = ["Checkpoints", "FieldWriter", "OpenFOAMTime", "Outputs", "PatchVtk", "RunFields", "Vtk"]
+__all__ = [
+    "Checkpoints",
+    "FieldWriter",
+    "OpenFOAMTime",
+    "Outputs",
+    "PatchVtk",
+    "RadialProfiles",
+    "RunFields",
+    "Vtk",
+]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -57,7 +70,8 @@ class RunFields:
 
 @dataclasses.dataclass(frozen=True)
 class FieldWriter(abc.ABC):
-    """Writes the converged fields in one format: :class:`Vtk`, :class:`OpenFOAMTime` or :class:`PatchVtk`.
+    """Writes the converged fields in one format: :class:`Vtk`, :class:`OpenFOAMTime`, :class:`PatchVtk`
+    or :class:`RadialProfiles`.
 
     Attributes
     ----------
@@ -315,6 +329,86 @@ class PatchVtk(FieldWriter):
 
 
 @dataclasses.dataclass(frozen=True)
+class RadialProfiles(FieldWriter):
+    """The fields averaged over bands of distance from an axis, as a profile table.
+
+    For a fully developed pipe flow, which depends on the radius alone: averaged over the pipe's
+    length and round it, its profiles are a table of ``radius`` against each field
+    (:func:`~aquaflux.io.write_profile_table`) that a :class:`~aquaflux.case.DevelopedInlet` of
+    another case admits. A vector field is written as its component along the axis (the axial
+    velocity, under the field's own name). Each band's values are its cells' means weighted by
+    volume (:func:`~aquaflux.boundary.radial_average`).
+
+    Attributes
+    ----------
+    file : str
+        The table's name in the output directory.
+    centre : tuple of float
+        A point on the axis.
+    axis : tuple of float
+        The axis's direction (any length).
+    bands : int
+        How many bands of equal width the radii up to the farthest cell's are divided into.
+
+    Raises
+    ------
+    ValueError
+        If ``file`` is not a plain file name, the centre and the axis are not of one dimension, the
+        axis is zero, or ``bands`` is below one.
+    """
+
+    file: str = "profiles.csv"
+    centre: tuple[float, ...] = ()
+    axis: tuple[float, ...] = ()
+    bands: int = 40
+
+    def __post_init__(self) -> None:
+        if not self.file or Path(self.file).name != self.file:
+            raise ValueError(f"RadialProfiles.file is a file name, got {self.file!r}.")
+        if len(self.centre) != len(self.axis) or len(self.centre) not in (2, 3):
+            raise ValueError(
+                "RadialProfiles gives the axis as a centre and a direction of two or three "
+                f"components each, got centre {self.centre!r} and axis {self.axis!r}."
+            )
+        if not any(self.axis):
+            raise ValueError("RadialProfiles.axis must not be zero.")
+        if self.bands < 1:
+            raise ValueError(f"RadialProfiles.bands must be >= 1, got {self.bands!r}.")
+
+    def refuse_for_dimension(self, dim: int) -> None:
+        """Refuse an axis of the wrong dimension -- see :meth:`FieldWriter.refuse_for_dimension`."""
+        if len(self.centre) != dim:
+            raise ValueError(
+                f"outputs.fields: RadialProfiles gives a {len(self.centre)}-dimensional axis, but "
+                f"the mesh is {dim}-dimensional."
+            )
+
+    def targets(self, directory: Path, case_directory: Path) -> tuple[Path, ...]:
+        """The one file -- see :meth:`FieldWriter.targets`."""
+        del case_directory
+        return (directory / self.file,)
+
+    def write(self, directory: Path, case_directory: Path, mesh: Mesh, fields: RunFields) -> Path:
+        """Write the table -- see :meth:`FieldWriter.write`."""
+        del case_directory
+        cells = mesh.geometry().cell
+        axis = np.asarray(self.axis, dtype=np.float64) / np.linalg.norm(self.axis)
+        values = {}
+        for name, field in self.chosen(fields.cells).items():
+            field = np.asarray(field, dtype=np.float64)
+            values[name] = field @ axis if field.ndim == 2 else field
+        radii, means = radial_average(
+            np.asarray(cells.centroid), np.asarray(cells.volume), values, self.centre, axis,
+            self.bands,
+        )  # fmt: skip
+        comment = (
+            f"Fields averaged over {len(radii)} bands of distance from the axis through "
+            f"{list(self.centre)} along {list(self.axis)}; a vector as its component along the axis."
+        )
+        return write_profile_table(directory / self.file, radii, means, comment=comment)
+
+
+@dataclasses.dataclass(frozen=True)
 class Checkpoints:
     """Write the march state every few steps, keeping the most recent, in ``checkpoints/``.
 
@@ -345,6 +439,12 @@ class Checkpoints:
                 raise ValueError(f"Checkpoints.{name} must be >= 1, got {getattr(self, name)!r}.")
 
 
+#: What a run's step log may add beneath each step's row (:attr:`Outputs.log_detail`).
+LogDetail = Literal["inner", "fields", "pc"]
+#: Every :data:`LogDetail`, in the order the log describes them.
+LOG_DETAILS: tuple[str, ...] = get_args(LogDetail)
+
+
 @dataclasses.dataclass(frozen=True)
 class Outputs:
     """Where a run writes, and what.
@@ -358,6 +458,11 @@ class Outputs:
     log : str or None
         The per-step log's file name in the output directory; ``None`` writes the log to the terminal
         only.
+    log_detail : tuple of str
+        What the log adds beneath each step's row: ``"inner"``, a row per inner Newton iteration of a
+        dual-time step (its residual in and out, Krylov cycles and step length); ``"fields"``, each
+        field's relative change over the step; ``"pc"``, each re-fit of a materialized preconditioner
+        and what it cost. Each reads what the march already computes. Empty, one row per step.
     history : str or None
         The per-step history's file name in the output directory, a comma-separated-values file with
         one row per step of the march (:class:`~aquaflux.solve.StepHistory`); ``None`` writes none.
@@ -369,7 +474,7 @@ class Outputs:
     ------
     ValueError
         If ``directory`` is empty, or ``log`` or ``history`` is not a plain file name, or the two
-        name the same file.
+        name the same file, or ``log_detail`` names something the log does not report.
     TypeError
         If a field writer or the checkpoints are not values of their family.
     """
@@ -377,6 +482,7 @@ class Outputs:
     directory: str = "results"
     fields: tuple[FieldWriter, ...] = (Vtk(),)
     log: str | None = "march.log"
+    log_detail: tuple[LogDetail, ...] = LOG_DETAILS
     history: str | None = "history.csv"
     checkpoints: Checkpoints | None = None
 
@@ -390,6 +496,9 @@ class Outputs:
             value = getattr(self, name)
             if value is not None and (not value or Path(value).name != value):
                 raise ValueError(f"Outputs.{name} is a file name, got {value!r}.")
+        if not set(self.log_detail) <= set(LOG_DETAILS):
+            unknown = sorted(set(self.log_detail) - set(LOG_DETAILS))
+            raise ValueError(f"Outputs.log_detail names {unknown}; it takes {list(LOG_DETAILS)}.")
         if self.log is not None and self.log == self.history:
             raise ValueError(f"Outputs.log and Outputs.history both name {self.log!r}.")
         for writer in self.fields:

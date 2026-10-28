@@ -54,11 +54,13 @@ MESH_SECTION_ICONS = {
     "mapped": "mdi-grid",
     "pipes": "mdi-pipe",
     "pipe_core": "mdi-pipe",
+    "pipe_grading": "mdi-pipe",
     "ducts": "mdi-rectangle-outline",
     "duct_core": "mdi-rectangle-outline",
     "planarizer": "mdi-vector-square",
     "core": "mdi-cube-outline",
     "refinements": "mdi-magnify-plus-outline",
+    "periodic": "mdi-sync",
     "output": "mdi-folder-outline",
 }
 

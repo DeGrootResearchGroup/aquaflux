@@ -108,6 +108,16 @@ All classes are `equinox.Module`s.
   caps, carry owner/neighbour/zones/offsets, rebuild via `from_csr`). A **mesh** transform the OpenFOAM
   reader calls on `empty` patches; unit-tested file-free (`structured_grid_3d(nx, ny, 1)` → matches
   `structured_grid_2d`). Fully vectorized (no per-face Python loop) using `aquaflux/ragged.py::rows`.
+- `periodic.py` — `PeriodicJoin(first, second, tolerance=PERIODIC_MATCH_TOLERANCE).join(mesh)`: two
+  boundary patches made one periodic seam (twins matched by vertex-mean place under one translation,
+  the first's faces kept as interior faces carrying `neighbour_offset = c_kept − c_donor`, the
+  second's dropped, both patches removed with their types and groups). Refuses an already periodic
+  mesh, so a mesh joins one pair (the mesh file's `periodic` holds one). Its helpers
+  `face_vertex_means`, `matched_by_translation`, `without_faces` are also `io/openfoam/cyclic.py`'s,
+  so the OpenFOAM cyclic fusion and the join match faces one way. `carried.py` holds
+  `carried_cell_zones` / `carried_face_patches`, shared by the join and the collapse. Pinned by
+  `tests/unit/test_mesh_periodic.py`, incl. the seam offset equal to the period on a restated box (a
+  mis-paired twin still places the image right, so the displacement test alone cannot see it).
 - `digest.py` — `mesh_digest(mesh)`: a SHA-256 of `owner`, `neighbour` and node coordinates binned to 1e-6 of
   the largest extent, so the same mesh read on another machine agrees and a renumbered or moved one does not;
   shared by case checkpoints and the `.aqmesh` header (`io.md`).

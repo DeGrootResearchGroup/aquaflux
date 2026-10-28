@@ -13,8 +13,8 @@ from collections import Counter
 
 import numpy as np
 import pytest
-from aquaflux.meshing import MappedQuads, Polygons
-from scipy.spatial import Delaunay
+from aquaflux.meshing import MappedQuads, PipeGrading, Polygons
+from scipy.spatial import Delaunay, cKDTree
 
 
 def _rings(points: np.ndarray, first: np.ndarray, second: np.ndarray) -> np.ndarray:
@@ -74,11 +74,13 @@ def _outward(points, triangles, outward):
 
 def _onto_cylinder(points, faces):
     radius = np.linalg.norm(points[:, :2], axis=1, keepdims=True)
-    return np.c_[points[:, :2] / radius, points[:, 2]]
+    landed = np.c_[points[:, :2] / radius, points[:, 2]]
+    return landed, np.c_[landed[:, :2], np.zeros(len(points))]
 
 
 def _onto_plane(points, faces):
-    return np.c_[points[:, :2], np.zeros(len(points))]
+    normal = np.tile([0.0, 0.0, 1.0], (len(points), 1))
+    return np.c_[points[:, :2], np.zeros(len(points))], normal
 
 
 SQUARE_CORNERS = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]], float)
@@ -217,6 +219,230 @@ def test_a_bands_rows_flatten_within_two_rows_of_a_rim_that_is_not_flat():
     assert bow[0] == pytest.approx(0.6, rel=1e-9)  # the saddle itself
     assert 0.1 < bow[1] < 0.5  # half way out of it
     np.testing.assert_allclose(bow[2:], 0.0, atol=1e-12)
+
+
+# A quarter bend: a torus of centreline radius BEND about the z axis through (0, BEND, 0), its tube
+# of radius 1, turning from the plane x = 0 (angle 0) to the plane y = BEND (a quarter turn).
+BEND = 3.0
+
+
+def _bend_section(angle: float, n: int) -> np.ndarray:
+    """The bend's cross-section at ``angle`` as ``n`` points round it, the first on top (+z)."""
+    along = np.array([np.sin(angle), -np.cos(angle), 0.0])  # away from the bend's axis
+    centre = np.array([0.0, BEND, 0.0]) + BEND * along
+    t = 0.5 * np.pi + 2 * np.pi * np.arange(n) / n
+    return centre + np.cos(t)[:, None] * along + np.sin(t)[:, None] * np.array([0.0, 0.0, 1.0])
+
+
+def _bend_band(n: int = 24, rows: int = 4):
+    """The bend's wall, triangulated outward: ``rows`` rings of ``n`` points between its rims."""
+    points, rings = [], []
+    for j in range(rows + 1):
+        rings.append(len(points) + np.arange(n))
+        points += list(_bend_section(0.5 * np.pi * j / rows, n))
+    points = np.array(points)
+    triangles = np.concatenate([_rings(points, rings[j], rings[j + 1]) for j in range(rows)])
+    return points, _outward(points, triangles, lambda c: c - _onto_centreline(c))
+
+
+def _bend_angle(points: np.ndarray) -> np.ndarray:
+    offset = points - np.array([0.0, BEND, 0.0])
+    return np.arctan2(offset[:, 0], -offset[:, 1])
+
+
+def _onto_centreline(points: np.ndarray) -> np.ndarray:
+    angle = _bend_angle(points)
+    return np.array([0.0, BEND, 0.0]) + BEND * np.c_[np.sin(angle), -np.cos(angle), 0 * angle]
+
+
+def _onto_torus(points, faces):
+    centre = _onto_centreline(points)
+    normal = points - centre
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    return centre + normal, normal
+
+
+def test_a_bends_band_becomes_a_grid_of_cross_sections_turned_round_its_axis():
+    # Each row of the grid is one cross-section of the bend -- every point at one angle round the
+    # bend's axis, all on the unit circle about the centreline there -- at equal steps from rim to
+    # rim, as many as keep the cells as long round the bend as they are wide. Interpolated straight
+    # from rim to rim instead, a row's points spread over a range of angles.
+    n = 24
+    points, triangles = _bend_band(n)
+    face = np.zeros(len(triangles), dtype=np.int64)
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_torus
+    )
+    grid = mapped.grids[0]
+    rows = round(BEND * 0.5 * np.pi / (2 * np.sin(np.pi / n)))
+    assert grid.shape == (rows + 1, n)
+    angle = _bend_angle(mapped.points[grid].reshape(-1, 3)).reshape(grid.shape)
+    steps = 0.5 * np.pi * np.arange(rows + 1) / rows
+    if angle[0, 0] > angle[-1, 0]:
+        steps = steps[::-1]
+    np.testing.assert_allclose(angle, np.repeat(steps[:, None], n, axis=1), atol=1e-12)
+    # Unprojected, the rows are already the circles: the motion carries the rim along the wall.
+    built = mapped.points[grid[1:-1]].reshape(-1, 3)
+    radius = np.linalg.norm(built - _onto_centreline(built), axis=1)
+    np.testing.assert_allclose(radius, 1.0, atol=1e-12)
+    # The columns run along the bend: column i keeps its place round each cross-section.
+    top = mapped.points[grid[:, 0]]
+    centre = _onto_centreline(top)
+    heights = (top - centre)[:, 2]
+    assert np.all(np.abs(heights - heights[0]) < 1e-12)
+
+
+def test_a_rim_motion_fitted_between_a_loop_and_its_screwed_image_is_that_screw():
+    from aquaflux.meshing.mapped import RimMotion
+
+    rng = np.random.default_rng(3)
+    loop = rng.normal(size=(17, 3))
+    axis = rng.normal(size=3)
+    axis /= np.linalg.norm(axis)
+    screw = RimMotion(axis, rng.normal(size=3), 1.1, 0.4 * axis)
+    fitted = RimMotion.fit(loop, screw.at(1.0, loop))
+    assert fitted.angle == pytest.approx(1.1, abs=1e-12)
+    for t in (0.25, 0.5, 0.8):
+        np.testing.assert_allclose(fitted.at(t, loop), screw.at(t, loop), atol=1e-12)
+    # A point a distance rho from the line travels the helix of that radius.
+    offset = loop - screw.pivot
+    rho = np.linalg.norm(offset - np.outer(offset @ axis, axis), axis=1)
+    np.testing.assert_allclose(fitted.path_length(loop), np.hypot(1.1 * rho, 0.4), rtol=1e-12)
+
+
+def test_a_rim_motion_between_two_rims_of_a_straight_pipe_is_a_slide_despite_rounding():
+    # Netgen's points on two rims of a straight pipe fit with a turn of rounding error; about its
+    # line every point is far away, and taken as a turn the rows' length would be that distance.
+    from aquaflux.meshing.mapped import RimMotion
+
+    t = 2 * np.pi * np.arange(36) / 36
+    rim = np.c_[np.zeros(36), np.cos(t), np.sin(t)]
+    other = (
+        rim
+        + np.array([3.0, 0.0, 0.0])
+        + np.random.default_rng(0).normal(scale=1e-12, size=rim.shape)
+    )
+    motion = RimMotion.fit(rim, other)
+    assert motion.angle == 0.0
+    np.testing.assert_allclose(motion.path_length(rim), 3.0, rtol=1e-9)
+    np.testing.assert_allclose(motion.at(0.5, rim), rim + np.array([1.5, 0.0, 0.0]), atol=1e-9)
+
+
+# An S-bend in one face: a quarter turn of radius TURN one way, then a quarter turn back, in the
+# plane z = 0, its tube of radius 1. Its rims are parallel, so the one rigid motion between them
+# is a slide, and only a march along it finds its cross-sections.
+TURN = 4.0
+
+
+def _s_bend_centreline(s: np.ndarray):
+    """The centreline at arc length ``s`` (from 0 to pi TURN) and its unit tangent there."""
+    half = 0.5 * np.pi * TURN
+    first = s <= half
+    angle = np.where(first, s / TURN, (2 * half - s) / TURN)
+    centre_first = np.c_[TURN * np.sin(angle), TURN * (1 - np.cos(angle)), 0 * s]
+    # The second turn is the first turned half a circle about the S's middle.
+    middle = np.array([TURN, TURN, 0.0])
+    centre_second = 2 * middle - centre_first
+    point = np.where(first[:, None], centre_first, centre_second)
+    tangent = np.c_[np.cos(angle), np.sin(angle), 0 * s]
+    return point, tangent
+
+
+def _s_bend_band(n: int = 24, rings: int = 64):
+    points, loops = [], []
+    s = np.linspace(0.0, np.pi * TURN, rings + 1)
+    centre, tangent = _s_bend_centreline(s)
+    t = 0.5 * np.pi + 2 * np.pi * np.arange(n) / n
+    for c, tan in zip(centre, tangent, strict=True):
+        side = np.cross([0.0, 0.0, 1.0], tan)
+        loops.append(len(points) + np.arange(n))
+        points += list(c + np.cos(t)[:, None] * side + np.sin(t)[:, None] * [0.0, 0.0, 1.0])
+    points = np.array(points)
+    triangles = np.concatenate([_rings(points, loops[j], loops[j + 1]) for j in range(rings)])
+    return points, _outward(points, triangles, lambda c: c - _s_bend_nearest(c)[0])
+
+
+_S_SAMPLES = np.linspace(0.0, np.pi * TURN, 20001)
+_S_CENTRE, _S_TANGENT = _s_bend_centreline(_S_SAMPLES)
+_S_TREE = cKDTree(_S_CENTRE)
+
+
+def _s_bend_nearest(points):
+    """The nearest centreline point to each point (to 6e-4 of the tube's radius), the
+    centreline's tangent there and its arc length."""
+    _, at = _S_TREE.query(points)
+    return _S_CENTRE[at], _S_TANGENT[at], _S_SAMPLES[at]
+
+
+def _onto_s_bend(points, faces):
+    centre = _s_bend_nearest(points)[0]
+    normal = points - centre
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    return centre + normal, normal
+
+
+def test_an_s_bends_band_becomes_a_grid_of_its_cross_sections_marched_along_it():
+    # Each row is a cross-section: its plane square to the centreline where it crosses it, the
+    # rows evenly spaced along it. Swept by the slide between its parallel rims instead, the rows
+    # in the middle of the S would stand at 45 degrees to it; with the wall's normals taken from
+    # its facets (averaged at their vertices), the row at the S's inflection leant 1.5 degrees.
+    n = 24
+    points, triangles = _s_bend_band(n)
+    face = np.zeros(len(triangles), dtype=np.int64)
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_s_bend
+    )
+    grid = mapped.grids[0]
+    rows = round(np.pi * TURN / (2 * np.sin(np.pi / n)))
+    assert grid.shape[0] - 1 == pytest.approx(rows, abs=1)
+    ring = mapped.points[grid]
+    centroid = ring.mean(axis=1)
+    _, tangent, arc = _s_bend_nearest(centroid)
+    offset = ring - centroid[:, None]
+    normal = np.cross(offset, np.roll(offset, -1, axis=1)).sum(axis=1)
+    normal /= np.linalg.norm(normal, axis=1, keepdims=True)
+    tilt = np.degrees(np.arccos(np.clip(np.abs(np.einsum("ij,ij->i", normal, tangent)), 0, 1)))
+    assert tilt.max() < 0.1
+    spacing = np.diff(np.sort(arc))
+    assert spacing.max() / spacing.min() < 1.02
+
+
+@pytest.mark.parametrize("open_rim", ["top", "bottom"])
+def test_a_straight_bands_rows_grow_away_from_its_joined_rim_toward_its_open_one(open_rim):
+    # The cylinder z in [0, 2], its top rim (or bottom) an open end: the rows start a spacing
+    # long at the other rim and grow by the grading's ratio toward it.
+    n = 24
+    points, triangles = _band(n, n)
+    face = np.zeros(len(triangles), dtype=np.int64)
+    z = points[:, 2]
+    open_points = np.flatnonzero(np.isclose(z, 2.0 if open_rim == "top" else 0.0))
+    grading = PipeGrading(growth=1.15)
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_cylinder,
+        graded={0: (grading, open_points)},
+    )  # fmt: skip
+    heights = mapped.points[mapped.grids[0]][:, :, 2].mean(axis=1)
+    if heights[0] > heights[-1]:
+        heights = heights[::-1]
+    rows = np.diff(heights)
+    if open_rim == "bottom":
+        rows = rows[::-1]
+    np.testing.assert_allclose(rows[1:] / rows[:-1], 1.15, rtol=1e-9)
+    assert rows[0] == pytest.approx(2 * np.sin(np.pi / n), rel=0.15)
+
+
+def test_a_bends_rows_stay_even_under_a_grading():
+    # Grading is for straight lengths: round a bend the flow changes all along it.
+    n = 24
+    points, triangles = _bend_band(n)
+    face = np.zeros(len(triangles), dtype=np.int64)
+    rim = np.flatnonzero(np.isclose(_bend_angle(points), 0.5 * np.pi))
+    mapped = MappedQuads().remesh(
+        points, triangles, face, np.array([0]), np.zeros((0, 3)), _onto_torus,
+        graded={0: (PipeGrading(growth=1.3), rim)},
+    )  # fmt: skip
+    angle = _bend_angle(mapped.points[mapped.grids[0]][:, 0])
+    np.testing.assert_allclose(np.abs(np.diff(angle)), np.abs(np.diff(angle)).mean(), rtol=1e-9)
 
 
 def test_triangles_wound_unalike_are_refused_rather_than_walked_for_ever():

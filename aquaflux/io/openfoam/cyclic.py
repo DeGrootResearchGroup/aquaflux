@@ -18,18 +18,15 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
-from scipy.spatial import cKDTree
+
+from aquaflux.mesh import (
+    PERIODIC_MATCH_TOLERANCE,
+    face_vertex_means,
+    matched_by_translation,
+    without_faces,
+)
 
 from .records import FoamPatch, patch_face_range
-
-DEFAULT_MATCH_TOLERANCE = 1e-4
-"""Default cyclic-face match tolerance, as a fraction of the kept patch's own bounding extent.
-
-Mirrors OpenFOAM's own ``matchTolerance`` cyclic-patch entry in spirit (a relative, not absolute,
-tolerance — so it scales with mesh size), but is not read from the file: the geometric match below
-verifies the pair *is* a pure translation rather than trusting a declared transform type, so no
-``transform``/``matchTolerance`` parsing is needed to reach the same guarantee.
-"""
 
 
 class _PatchFace(NamedTuple):
@@ -74,7 +71,7 @@ def fuse_cyclic_patches(
     neighbour: np.ndarray,
     patches: tuple[FoamPatch, ...],
     *,
-    match_tolerance: float = DEFAULT_MATCH_TOLERANCE,
+    match_tolerance: float = PERIODIC_MATCH_TOLERANCE,
 ) -> CyclicFusion:
     """Fuse every matched ``cyclic`` patch pair in ``patches`` into interior seam faces.
 
@@ -90,7 +87,7 @@ def fuse_cyclic_patches(
     patches : tuple of FoamPatch
         Every boundary patch, in file order.
     match_tolerance : float
-        Passed to the face-matching search (see :data:`DEFAULT_MATCH_TOLERANCE`).
+        Passed to the face-matching search (see :data:`~aquaflux.mesh.PERIODIC_MATCH_TOLERANCE`).
 
     Returns
     -------
@@ -110,7 +107,7 @@ def fuse_cyclic_patches(
 
     n_faces = owner.shape[0]
     dim = points.shape[1]
-    centroids = _face_centroids(points, face_node_offsets, face_node_indices)
+    centroids = face_vertex_means(points, face_node_offsets, face_node_indices)
 
     new_neighbour = neighbour.copy()
     full_offset = np.zeros((n_faces, dim))
@@ -118,20 +115,14 @@ def fuse_cyclic_patches(
     fused_names: set[str] = set()
 
     for kept, donor in pairs:
-        if kept.faces.size != donor.faces.size:
-            raise ValueError(
-                f"cyclic patches '{kept.patch.name}'/'{donor.patch.name}' have different face "
-                f"counts ({kept.faces.size} vs {donor.faces.size})"
-            )
-        if kept.faces.size == 0:
+        if kept.faces.size == 0 and donor.faces.size == 0:
             raise ValueError(
                 f"cyclic patches '{kept.patch.name}'/'{donor.patch.name}' have no faces to fuse"
             )
-        matched = _match_faces(
+        matched = matched_by_translation(
             centroids[kept.faces],
             centroids[donor.faces],
-            kept.patch.name,
-            donor.patch.name,
+            (kept.patch.name, donor.patch.name),
             match_tolerance,
         )
         kept_global = kept.faces[matched]
@@ -145,9 +136,7 @@ def fuse_cyclic_patches(
     keep_mask[np.concatenate(donor_blocks)] = False
     new_index = np.cumsum(keep_mask) - 1
 
-    new_offsets, new_indices = _compress_face_node_csr(
-        face_node_offsets, face_node_indices, keep_mask
-    )
+    new_offsets, new_indices = without_faces(face_node_offsets, face_node_indices, keep_mask)
     surviving_patches = tuple(
         patch._replace(start_face=int(new_index[patch.start_face]))
         for patch in patches
@@ -205,68 +194,3 @@ def _cyclic_pairs(patches: tuple[FoamPatch, ...]) -> list[tuple[_PatchFace, _Pat
             (_PatchFace(kept, patch_face_range(kept)), _PatchFace(donor, patch_face_range(donor)))
         )
     return pairs
-
-
-def _face_centroids(points: np.ndarray, offsets: np.ndarray, indices: np.ndarray) -> np.ndarray:
-    """Vertex-mean centroid of every face, vectorized over the ragged CSR node lists.
-
-    A pure translation shifts a vertex mean by exactly the same vector it shifts the true
-    (area-weighted) centroid, since both are linear in the vertex positions — so this cheap
-    estimate gives the *exact* seam translation for a genuinely periodic pair, with no per-face
-    Python loop.
-    """
-    counts = np.diff(offsets)
-    face_of_node = np.repeat(np.arange(counts.size), counts)
-    sums = np.zeros((counts.size, points.shape[1]))
-    np.add.at(sums, face_of_node, points[indices])
-    return sums / counts[:, None]
-
-
-def _match_faces(
-    kept_centroids: np.ndarray,
-    donor_centroids: np.ndarray,
-    kept_name: str,
-    donor_name: str,
-    match_tolerance: float,
-) -> np.ndarray:
-    """Pair each donor face to its kept-side counterpart by translated nearest centroid.
-
-    Robust to face ordering within each patch (OpenFOAM does not guarantee the two patches'
-    faces are listed in corresponding order): estimate the seam translation from the two patches'
-    centroid means, shift the donor centroids by it, and match each to its nearest kept centroid.
-    A genuinely periodic pair lands every match within a tight tolerance of its true counterpart
-    and uses each kept face exactly once; anything else — a face-count mismatch, a rotational or
-    non-uniform cyclic transform, mismatched patches — fails one of those checks.
-
-    Returns
-    -------
-    np.ndarray of int, shape ``(n_donor,)``
-        For donor face ``i``, the index into ``kept_centroids`` of its matched pair.
-
-    Raises
-    ------
-    ValueError
-        If the nearest-centroid match is not within tolerance, or is not one-to-one.
-    """
-    extent = float(np.linalg.norm(kept_centroids.max(axis=0) - kept_centroids.min(axis=0)))
-    tolerance = match_tolerance * extent if extent > 0.0 else match_tolerance
-    translation = kept_centroids.mean(axis=0) - donor_centroids.mean(axis=0)
-    tree = cKDTree(kept_centroids)
-    distance, matched = tree.query(donor_centroids + translation)
-    if distance.max() > tolerance or len(np.unique(matched)) != matched.size:
-        raise ValueError(
-            f"cyclic patches '{kept_name}'/'{donor_name}' could not be matched face-for-face "
-            f"within tolerance {tolerance:.3g} (worst mismatch {distance.max():.3g}); they may not "
-            "be a pure translational pair"
-        )
-    return matched
-
-
-def _compress_face_node_csr(
-    offsets: np.ndarray, indices: np.ndarray, keep_mask: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """Drop the CSR rows (faces) ``keep_mask`` excludes, preserving every other row's order."""
-    counts = np.diff(offsets)
-    new_offsets = np.concatenate([[0], np.cumsum(counts[keep_mask])]).astype(offsets.dtype)
-    face_of_node = np.repeat(np.arange(counts.size), counts)
-    return new_offsets, indices[keep_mask[face_of_node]]

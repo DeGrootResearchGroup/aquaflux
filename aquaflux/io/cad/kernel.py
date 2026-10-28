@@ -63,7 +63,13 @@ from OCP.collections import (
     Sequence_TDF_Label,
 )
 from OCP.GCPnts import GCPnts_AbscissaPoint
-from OCP.GeomAbs import GeomAbs_Cone, GeomAbs_Cylinder, GeomAbs_Plane, GeomAbs_Sphere
+from OCP.GeomAbs import (
+    GeomAbs_Cone,
+    GeomAbs_Cylinder,
+    GeomAbs_Plane,
+    GeomAbs_Sphere,
+    GeomAbs_Torus,
+)
 from OCP.GeomAPI import GeomAPI_ProjectPointOnSurf
 from OCP.gp import gp_Ax2, gp_Dir, gp_Pln, gp_Pnt, gp_Trsf, gp_Vec
 from OCP.GProp import GProp_GProps
@@ -96,6 +102,7 @@ from aquaflux.io.cad.faces import (
     PlaneFace,
     SolidDescription,
     SphereFace,
+    TorusFace,
 )
 from aquaflux.io.cad.placement import Placement
 from aquaflux.io.cad.topology import CadTopology, Projection
@@ -315,6 +322,23 @@ class OpenCascade:
                 centre=centre,
                 radius=float(sphere.Radius()),
                 solid_inside=bool(outward @ (point - centre) > 0.0),
+            )
+        if kind == GeomAbs_Torus:
+            torus = surface.Torus()
+            centre = _coords(torus.Axis().Location())
+            axis = _coords(torus.Axis().Direction())
+            major = float(torus.MajorRadius())
+            # The fluid in a bend is inside the tube: the normal out of it points away from the
+            # swept circle's centre nearest the point.
+            radial = (point - centre) - ((point - centre) @ axis) * axis
+            on_centreline = centre + major * radial / np.linalg.norm(radial)
+            return TorusFace(
+                centre=centre,
+                axis=axis,
+                major_radius=major,
+                minor_radius=float(torus.MinorRadius()),
+                angle=float(u1 - u0),
+                solid_inside=bool(outward @ (point - on_centreline) > 0.0),
             )
         return OtherFace(kind=str(kind).rsplit(".", 1)[-1].removeprefix("GeomAbs_"))
 

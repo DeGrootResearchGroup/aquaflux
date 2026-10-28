@@ -123,19 +123,49 @@ layered: [walls, lamp, lamp_tip]
 mapped: [lamp]
 ```
 
-Pipes are found by themselves: a cylindrical face the fluid fills, with nothing else inside it,
-bounded by two rims. Both rims are divided alike, into a multiple of four, so that the O-grid
-can join them at every mesh size: where Netgen's own division would not do, the region is
-triangulated again with the rims' division set. Its wall is meshed as a structured grid,
-layered if its patch is, and its core -- what the layers leave -- is filled with a structured
-O-grid of hexahedra ({class}`~aquaflux.meshing.PipeCore`): a square core, whose sides may bow
-outward (`core_bow`) to even out its corners, and a shell out to the layers. Where a pipe opens
-into the rest of the region, the O-grid stops a couple of rows short and the tetrahedra take over.
+Pipes are found by themselves: any face shaped as a tube the fluid fills -- a straight length, a
+bend, a coil, a reducer, a pipe swept along any curve -- with nothing else inside it, bounded by two
+rims. They are told from the shape of the face itself, not from the kind of surface the drawing
+stores it as. Both rims are divided alike, into a
+multiple of four, so that the O-grid can join them at every mesh size: where Netgen's own division
+would not do, the region is triangulated again with the rims' division set. Its wall is meshed as a
+structured grid whose rows are its cross-sections -- the rim slid along a straight pipe, turned
+round a bend or screwed along a coil, and for a pipe curving any other way, cross-sections found
+one after another along it -- layered if its patch is, and its core -- what the layers leave -- is
+filled with a structured O-grid of hexahedra ({class}`~aquaflux.meshing.PipeCore`): a square core,
+whose sides may bow outward (`core_bow`) to even out its corners, and a shell out to the layers.
+Pipes joined end to end at shared rims -- a straight length, a bend, another straight length --
+take one O-grid through all of them. Where a pipe opens into the rest of the region, the O-grid
+stops a couple of rows short and the tetrahedra take over.
 `pipes` names the patches whose faces are pipes instead (`[]` for none), and `pipe_core` sets how
 their cores are filled:
 
 ```yaml
 pipe_core: {kind: PipeCore, core_size: 0.5, core_bow: 0.3, shell: 2}
+```
+
+Along a straight pipe the cross-sections are by default as far apart as the cells round it are
+wide. `pipe_grading` lets them grow apart away from what the pipe joins -- a bend, another pipe, a
+vessel -- by `growth` a row, toward an inlet or outlet or the length's middle, to at most
+`max_length` ({class}`~aquaflux.meshing.PipeGrading`); bends keep theirs even:
+
+```yaml
+pipe_grading: {kind: PipeGrading, growth: 1.08, max_length: 0.02}
+```
+
+A length of pipe whose outflow is its own inflow -- for the fully developed flow an inlet of another
+case admits -- is meshed with its two ends as patches, then the two joined into one periodic seam
+({class}`~aquaflux.mesh.PeriodicJoin`), so neither is a patch of the mesh written. The faces of
+`first` stay, each now between its own cell and the cell beside its twin on `second`; the two must
+be meshed alike, each the other moved by the period, as a straight pipe's ends are. The mesh's
+recorded quality is the mesh's before the join, and a periodic mesh is written as an `.aqmesh`
+file only (an OpenFOAM polyMesh written here holds no periodic seam):
+
+```yaml
+patches:
+  start: {kind: FacesNear, points: [[0.0, 0.0, 0.0]]}
+  end: {kind: FacesNear, points: [[0.104, 0.0, 0.0]]}
+periodic: {kind: PeriodicJoin, first: end, second: start}
 ```
 
 Rectangular ducts are found by themselves too: four four-sided faces round the fluid, each meeting

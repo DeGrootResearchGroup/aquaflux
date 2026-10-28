@@ -1435,7 +1435,10 @@ def test_probed_diagonal_block_does_not_change_a_healthy_mesh() -> None:
         # per-cell equality would pin the iteration path rather than the accuracy, and would fail on
         # cells whose error is near zero for reasons that say nothing about either choice.
         for statistic in (jnp.median, lambda a: jnp.percentile(a, 99), jnp.max):
-            assert statistic(block_error) == pytest.approx(statistic(volume_error), rel=0.02)
+            # As floats: pytest 9.2's approx reads `.flat` off the expected value, which a JAX
+            # array does not have.
+            expected = float(statistic(volume_error))
+            assert float(statistic(block_error)) == pytest.approx(expected, rel=0.02)
 
 
 def test_calibration_carries_the_preconditioner_it_measured() -> None:
