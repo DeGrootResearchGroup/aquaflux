@@ -76,6 +76,11 @@ SUBPACKAGE_GROUPS = {
         ("Prism layers", ["layers"]),
         ("Structured quadrilaterals on chosen faces", ["mapped"]),
         ("Pipes, and their cores as structured O-grids", ["pipes", "pipe_core", "rows"]),
+        (
+            "Rectangular ducts, and their cores cross-section by cross-section",
+            ["ducts", "duct_core"],
+        ),
+        ("Pipes' and ducts' cores, taken out of the fill", ["conduits"]),
         ("Surfaces of triangles and quadrilaterals, and pyramid caps", ["polygons", "caps"]),
         ("A mesh of tetrahedra, prisms, hexahedra and pyramids", ["elements"]),
         ("An octree hexahedral core", ["near_surface", "hex_core", "regions"]),

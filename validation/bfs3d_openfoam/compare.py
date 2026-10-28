@@ -87,7 +87,7 @@ from aquaflux.schemes import (
     VenkatakrishnanLimiter,
 )
 from aquaflux.solve import Convergence, DualTimeLoop, LinearSolveSettings, MarchLogger, RetryPolicy, StateCheckpointer, combine_observers
-from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, PivotFloor, SimpleSmoothed
+from aquaflux.precondition import AirReduction, FieldSplit, JacobianProbeSpec, JacobiSmoothed, MaterializedJacobian, PivotFloor, SimpleSmoothed, StrongCouplings
 from aquaflux.solve.checkpoint import (InnerIterateCheckpointer,)
 from aquaflux.solve.march_log import (combine_metrics,)
 from aquaflux.turbulence import (
@@ -112,6 +112,12 @@ FIGS = HERE / "figures"
 # The operating point (0.orig/ and constant/): U_in = 10 m/s, nu = 1e-5, h = 0.01 -> Re_h = 10000.
 # k_in = 0.375 (5% turbulence intensity), omega_in = 1600 (length scale 0.07 H1). rho = 1.
 RHO, NU = 1.0, 1e-5
+#: A relative perturbation of the molecular viscosity (`BFS3D_NU_PERTURBATION`, default 0): `NU` becomes
+#: `1e-5 * (1 + eps)`. It exists to draw a SPREAD of marches rather than one. A last-bit change like
+#: `eps = 1e-14` moves nothing physical, but this march's rounding-decided steps make one run a single
+#: draw, so an A/B between two settings is read over several draws per arm (`eps` in 0, +-1e-14, ...).
+NU_PERTURBATION = float(os.environ.get("BFS3D_NU_PERTURBATION", "0"))
+NU *= 1.0 + NU_PERTURBATION
 U_IN, K_IN, OMEGA_IN = 10.0, 0.375, 1600.0
 H = 0.01  # step height
 WALLS = ["upperWall", "lowerWall", "sideWalls"]
@@ -406,6 +412,20 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # velocity columns reach four through the eddy viscosity under this scheme). Everything below was
 # measured under the corrected Green-Gauss scheme and holds only for it.
 #
+# The march agrees. With the pivot floor (2026-10-25, the shipped file otherwise, 4-core Linux, jax
+# 0.12.0.1), three draws per arm at `BFS3D_NU_PERTURBATION` 0 / +1e-14 / -1e-14: the uniform reach-three
+# probe took 17 steps / 147 restart cycles on every draw (1519-1632 s); every column at reach two took
+# 40 / 21 / 23 steps and 384 / 205 / 194 cycles (1957-3870 s), all to mid-span `x_r/h` 8.3611. The
+# probe per fit halves (~18.5 s -> ~8.6 s); the extra steps, each with its own refit, cost more than that.
+#
+# Why this case and not pitzDaily: the pressure column, on stretched cells. Reach is graph distance, and
+# across a cell this mesh grades thin, the cell three faces away can couple more strongly than the face
+# neighbour along the long side -- so dropping the distance-three pressure couplings removes some as
+# large as couplings kept (the largest dropped one is 1.3x a row's weakest face coupling at the median
+# in the 41 % of cells above 10:1; pitzDaily has 1.5 % of its cells there). Probing pressure alone at
+# reach two stalls the harder inner solves outright; the other columns alone change nothing
+# (`validation/reach_folding.py`, 2026-10-26).
+#
 # The coloured probe costs one directional derivative per
 # (colour, column field) and the colour count climbs steeply with the reach -- 11 colours at reach one,
 # 39 at two, 94 at three on this mesh -- so probing a column further than it reaches is pure cost. The
@@ -420,7 +440,7 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # schemes -- first-order upwind on k/omega with a non-orthogonal diffusion correction reaches two, while
 # the velocity columns carry the limited second-order upwind reconstruction out to three -- so it must be
 # re-measured for any case that changes them, NOT inherited. Shortening a column that does carry far
-# couplings corrupts its near entries rather than truncating them.
+# couplings both drops them and corrupts its near entries with them.
 #
 # Shortening all three would be 564 probes -> 399 (-29%), and the two Jacobians agree to 5.7e-16 relative
 # Frobenius, i.e. float64 rounding. The value shipped under that scheme shortened only k and omega:
@@ -450,12 +470,13 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 # 11 cycles to 8.474e-11 without. So they are pruned before the factorization sees them, which puts the
 # pressure column back in the configuration that diverges this case.
 #
-# Hence p stays at reach three. Only k and omega are shortened, and that split follows the SPLIT
-# PRECONDITIONER rather than the schemes: with the flow block leading, the field split applies
-# `d R_turb / d flow` and never `d R_flow / d turb`, so the turbulence COLUMNS are read only by the
-# turbulence ROWS -- whose hierarchy is smoothed by a per-cell block inverse that sees a cell's own 2x2
-# block and nothing else. Corruption confined to those columns cannot reach the saddle. The p column has
-# no such shelter: it feeds the [u, v, w, p] block, whose smoother is an incomplete LU.
+# Hence p stays at reach three. Under the multiple-correction gradient this case now runs, every column
+# reaches three, and the case file probes all but p at two. What decides it is no longer the
+# factorization (the leading smoother is a smoothed SIMPLE sweep, the pattern keeps reach three) but
+# the mesh: on this case's stretched cells the pressure column's distance-three couplings are as large
+# as the face couplings it keeps, and dropping them stalls the harder inner solves; the other columns'
+# far couplings are small enough to drop (validation/reach_folding.py, and the case file's comment
+# beside the probe).
 #
 # What shortening k and omega costs, measured: nothing at the shift the march runs at (every arm ties at
 # 4 restart cycles and 1.435e-13 at a step-initial state, preconditioner floored), and a factor of two at
@@ -465,7 +486,7 @@ PC_BETA_FLOOR = FILE_SOLVER.preconditioner.refit_beta_floor
 #
 # One caution that survives all of it: shortening a column is only sound where its mass beyond the
 # shortened reach is negligible AT EVERY STATE THE MARCH VISITS, and a short-probed column with far
-# couplings has its NEAR entries corrupted rather than its far entries dropped -- a colouring is
+# couplings has its far entries dropped AND its NEAR entries corrupted -- a colouring is
 # collision-free only for the pattern it was built from, so two cells sharing a reach-two colour can
 # both couple to one row at distance three and the response is charged entirely to the near one.
 # Measured structurally, that aliasing touches 53% of the entries of every shortened column here; it
@@ -493,6 +514,24 @@ else:
             f"BFS3D_COLUMN_REACH={_column_reach!r} gives {len(COLUMN_REACH)} reaches; this case has "
             f"six columns [u, v, w, p, k, omega]."
         )
+# `BFS3D_STRONG_COUPLINGS` takes `column:fraction` ("3:0.01"): probe that column at its column_reach plus
+# the couplings beyond it the Jacobian shows, at the first fit, to be at least `fraction` of their row's
+# weakest face coupling. `none` turns it off; unset, the case file's.
+_FILE_COUPLINGS = FILE_SOLVER.preconditioner.probe.strong_couplings
+_strong_couplings = os.environ.get("BFS3D_STRONG_COUPLINGS")
+if _strong_couplings is None:
+    STRONG_COUPLINGS = _FILE_COUPLINGS
+elif _strong_couplings == "none":
+    STRONG_COUPLINGS = None
+else:
+    try:
+        _column, _fraction = _strong_couplings.split(":")
+        STRONG_COUPLINGS = StrongCouplings(column=int(_column), fraction=float(_fraction))
+    except ValueError:
+        raise SystemExit(
+            f"BFS3D_STRONG_COUPLINGS={_strong_couplings!r} is not `column:fraction` (e.g. \"3:0.01\"), "
+            "nor \"none\"."
+        ) from None
 # Split the preconditioner's hierarchy in two -- the [u,v,w,p] saddle and the [k,omega] transported
 # scalars each get their own, with one triangle of the coupling between them retained exactly -- rather
 # than putting all six fields through one hierarchy with one smoother. ON, because it is measured 31%
@@ -764,7 +803,9 @@ PIVOT_FLOOR = (
 PRECONDITIONER = MaterializedJacobian(
     FieldSplit(LEADING_INVERSE, TRAILING_INVERSE, precision=SPLIT_PRECISION),
     probe=JacobianProbeSpec(
-        column_reach=COLUMN_REACH, stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach
+        column_reach=COLUMN_REACH,
+        stencil_reach=FILE_SOLVER.preconditioner.probe.stencil_reach,
+        strong_couplings=STRONG_COUPLINGS,
     ),
     refit_beta_floor=PC_BETA_FLOOR,
     pivot_floor=PIVOT_FLOOR,
@@ -773,7 +814,7 @@ PRECONDITIONER = MaterializedJacobian(
 #: Where the session sends what the split's blocks produce: the leading hierarchy's build record, and --
 #: under `BFS3D_DUMP_TRAILING_BLOCK` -- every block the trailing inverse is about to consume.
 SESSION_OPTIONS = dict(
-    reports={"leading": _flush_print},
+    reports={"leading": _flush_print, "probe": _flush_print},
     inverse_wrapper=(
         (lambda role, factory: _dumping(factory) if role == "trailing" else factory)
         if DUMP_TRAILING_BLOCK
@@ -1287,8 +1328,6 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         fields=coupled_fields(coupled),
         residuals=residuals,
         detail=("inner", "fields", "residuals", "pc"),
-        rtol=RTOL,
-        atol=ATOL,
     )
     # Every run states the configuration it was taken under, in its own log, before any result. A march
     # log is compared against archived ones months later, and a number whose configuration is not written
@@ -1328,6 +1367,12 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             "probe column reach",
             "uniform 3" if COLUMN_REACH is None else "/".join(map(str, COLUMN_REACH)),
         ),
+        (
+            "probe strong couplings",
+            "off"
+            if STRONG_COUPLINGS is None
+            else f"column {STRONG_COUPLINGS.column}, fraction {STRONG_COUPLINGS.fraction:g}",
+        ),
         ("refresh on cycles", REFRESH_ON_CYCLES or "off"),
         ("Reynolds continuation points", N_POINTS),
         (
@@ -1347,6 +1392,8 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
         # Printed unconditionally, including at its default: a damping ratio is invisible in a march
         # log otherwise, and two differently-damped runs would produce identical banners.
         ("turbulence damping", f"{TURB_DAMPING:g}"),
+        # A perturbed draw's banner must say so: two draws are otherwise configured identically.
+        ("viscosity perturbation", f"{NU_PERTURBATION:g}"),
         # Both are swept, so both must be printed: without them two differently-configured runs produce
         # identical banners, which is the failure this table exists to prevent.
         ("dual-time inner steps / tol", f"{INNER_STEPS} / {INNER_TOL:g}"),
@@ -1468,7 +1515,11 @@ def solve_aquaflux(*, log_path=None, checkpoint_dir=None, **solve_kwargs):
             # The case's solve: the file's march, with the environment's study overrides. The session is
             # opened from its preconditioner, once, and the ramp re-points it at each station.
             flow, k, omega = SOLVER.solve(
-                coupled, session_options=session_options, point_setup=point_setup, **observers
+                coupled,
+                session_options=session_options,
+                point_setup=point_setup,
+                on_station=logger.on_station,
+                **observers,
             )
         else:
             # A script-only study arm: the SAME span walked as a ladder of converged rungs, from the

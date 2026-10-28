@@ -37,6 +37,7 @@ import equinox as eqx
 import yaml
 
 import aquaflux
+from aquaflux.precondition import padded_product_path
 from aquaflux.solve import (
     MarchLogger,
     MarchRecorder,
@@ -177,6 +178,12 @@ class PreparedRun:
                 # short, recorded as one, rather than one that leaves no record of how it ended.
                 converged, message = False, "interrupted before it converged"
                 logger.note(f"did not converge: {message}")
+            # Which form the padded-row products took is decided at the first one, during the solve: a
+            # Mac without OpenMP runs XLA's form where a Linux machine runs the fused loop, so a run's
+            # timings are only comparable once it says which ran.
+            products = padded_product_path()
+            if products is not None:
+                logger.note(f"padded-row products: {products['form']} ({products['reason']})")
             if converged:
                 fields = RunFields(
                     cells=spec.physics.output_fields(problem, solution),
@@ -259,6 +266,9 @@ class PreparedRun:
             "message": record.message,
             "written": [os.path.relpath(path, self.directory) for path in record.written],
         }
+        products = padded_product_path()
+        if products is not None:
+            document["padded_products"] = products
         if record.results:
             document["results"] = record.results
         path = self.directory / _RUN_RECORD

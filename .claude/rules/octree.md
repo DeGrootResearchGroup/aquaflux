@@ -12,7 +12,7 @@ paths:
 
 **A generic package** (`tests/unit/test_layering.py::GENERIC_PACKAGES`): imports nothing of aquaflux but
 itself and the neutral leaves (`ragged`). Two consumers: the mesher's hex core (`meshing/hex_core.py`,
-refined by `meshing/near_surface.py::NearSurface`, `.claude/rules/meshing.md`) and the adaptive sampler
+refined by `meshing/near_surface.py::NearSurface` and the refinement regions' `meshing/refinement.py::LocatedRefinement`, `.claude/rules/meshing.md`) and the adaptive sampler
 here (#726), whose field is a callable and whose region is a `solids.Solid` used only through
 `signed_distance` and `intervals`. Radiation's side is `radiation.fluence_rate_at(scene, points)`; output
 through `aquaflux.io.write_hexahedra`. Dated record: `.claude/notes/octree-log.md`.
@@ -25,7 +25,7 @@ through `aquaflux.io.write_hexahedra`. Dated record: `.claude/notes/octree-log.m
 | `hierarchy.py` | `Hierarchy`: per-level sorted node keys and **surpluses**; the interpolant is `sum surplus * hat` (`at_units`), `with_values` adds nodes in ascending level. |
 | `cuts.py` | `merged_intervals`, `crossing_points`, `exit_points`, `leaf_cuts` (`LeafCuts`, CSR per leaf): cut points on cube edges where the region is a `standoff` deep. One placement rule, `_cut_parameters`/`_at_depth`. |
 | `ghosts.py` | `ghost_values`: values for nodes outside the region (edges to sampled neighbours + a lightly weighted linear extrapolation, `EXTRAPOLATION_WEIGHT`), bounded by the samples' range. |
-| `region.py` | the region's `signed_distance` and `intervals`, `jax.jit`-compiled per power-of-two batch. |
+| `region.py` | the region's `signed_distance` and `intervals`, `jax.jit`-compiled per power-of-two batch. `signed_distance` is exported (`__all__`) for the mesher's refinement regions, which ask a `solids` body which cubes it reaches (`meshing/refinement.py`). |
 | `sampling.py` | `sample_adaptively` → `SampledField` (callable; `hexahedra()`), `Linear`/`Logarithm`, `Round` per pass, `_Refinement` (the pass loop's state), `STANDOFF_FRACTION`. |
 
 ## The tree (binding)

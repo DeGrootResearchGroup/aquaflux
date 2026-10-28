@@ -37,7 +37,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 if TYPE_CHECKING:
-    from .sparse_jacobian import ProbeGather
+    from .probe_layout import ProbeGather
 
 import dataclasses
 from collections.abc import Callable
@@ -48,7 +48,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from ..solve import FieldLayout
+from ..solve import FieldLayout, with_transposes
 from .entry_map import DeviceMatrix, EntryMaps, SparsePattern, as_scipy
 from .hierarchy_inverse import HierarchyBlockInverse, block_for
 from .host_preconditioner import FrozenInverse, release, require_refactorable
@@ -419,7 +419,24 @@ class FieldSplitInverse:
         Its packing is a fixed gather on the coupling's pattern, held between refits with the gathers
         that cut the blocks, so a refit's re-composition moves only values, and those only on the device.
         """
-        return _padded_operator(self._coupling, maps=self._maps, slot="coupling")
+        fields = (self._groups.n_trailing_fields, self._groups.n_leading_fields)
+        return _padded_operator(self._coupling, maps=self._maps, slot="coupling", fields=fields)
+
+    def refit_keeps(self) -> tuple | None:
+        """What a re-fit reuses of what this split holds now, or ``None`` if either block cannot say.
+
+        Each block's own (:meth:`HierarchyBlockInverse.refit_keeps`), and the packing layouts held
+        between refits, which a re-fit packs the new coupling on; the coupling's values are new at every
+        refit. A block without the method, or one that re-coarsens, makes the whole split ``None``.
+        """
+        kept = []
+        for block in (self._leading, self._trailing):
+            keeps = getattr(block, "refit_keeps", None)
+            block_keeps = None if keeps is None else keeps()
+            if block_keeps is None:
+                return None
+            kept.append(block_keeps)
+        return (*kept, self._maps.held_objects())
 
     @property
     def n_dofs(self) -> int:
@@ -973,7 +990,7 @@ class AirReductionInverse:
             return np.asarray(self._solve(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                with_transposes(self.traced_cycle()), jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

@@ -17,6 +17,7 @@ The coupled RANS solve and the laminar flow solve each supply one.
 from __future__ import annotations
 
 import abc
+import dataclasses
 import time
 from collections.abc import Callable
 from typing import Protocol
@@ -26,6 +27,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..allocator import GlibcTrim, MemoryTrim
 from ..solve import FieldLayout, LinearSolveRegime, NewtonStrategy, RefreshTiming, shift_of
 from .block_inverse import BlockInverse
 from .block_preconditioner import MaterializedBlockPreconditioner
@@ -38,7 +40,7 @@ from .monolithic_policy import (
     with_traced_form,
 )
 from .pivot_floor import PivotFloor
-from .sparse_jacobian import FieldwiseMatvec
+from .sparse_jacobian import FieldwiseMatvec, block_stencil_colouring, block_stencil_gather_map
 from .traced_cycle import OffersTracedCycle, TracedForm, TracedSingleBlock
 from .traced_field_split import offers_traced_split, traced_field_split
 
@@ -47,6 +49,7 @@ __all__ = [
     "PROBE_BATCH_SIZE",
     "VCYCLE_LINEAR_SOLVE",
     "BetaTrackingRefresh",
+    "CouplingSelection",
     "FieldwiseResidual",
     "MaterializedProblem",
     "MaterializedSession",
@@ -320,6 +323,30 @@ def _release_superseded(superseded, current, inverse) -> None:
             leaf.delete()
 
 
+def _release_outgoing(form, inverse) -> bool:
+    """Free the arrays of the traced form a re-fit is about to replace, before it is fitted.
+
+    A re-fit computes every value its new form holds and reuses only the structure the inverse names
+    (``refit_keeps``: a frozen coarsening's plan, the smoother's plans, the coupling's packing layouts),
+    so every other array of the current form is dead once the re-fit starts. Freeing them before the
+    probe, rather than after the fit (:func:`_release_superseded`), keeps the superseded inverse from
+    being alive beside the one being fitted. Nothing applies the preconditioner between the start of a
+    re-fit and the update the session hands back, so no value changes.
+
+    Returns whether anything was released: ``False`` for a host-applied inverse (no form) or one that
+    cannot name what a re-fit reuses (an inverse that re-coarsens, or a block without ``refit_keeps``).
+    """
+    keeps = getattr(inverse, "refit_keeps", None)
+    kept = None if keeps is None or form is None else keeps()
+    if kept is None:
+        return False
+    held = {id(leaf) for leaf in jax.tree.leaves(kept)}
+    for leaf in jax.tree.leaves(form):
+        if isinstance(leaf, jax.Array) and id(leaf) not in held and not leaf.is_deleted():
+            leaf.delete()
+    return True
+
+
 def _held_state(inverse) -> list:
     """The traced state each block of an inverse currently holds, for :func:`_release_superseded`."""
     blocks = (
@@ -376,6 +403,14 @@ class BetaTrackingRefresh:
         The state's layout when the assembler is a :class:`FieldwiseResidual`, so each column field is
         probed by its own program (:func:`batched_field_jacobian_matvec`); ``None`` (default) probes
         with whole-state seeds.
+    memory_trim : MemoryTrim, optional
+        Called just before each re-fit's probe, to give the allocator's kept, freed memory back to the
+        operating system (:class:`~aquaflux.allocator.GlibcTrim`), so a re-fit's own transient lands on
+        a lower resident set. It changes no value. ``None`` (default) leaves the allocator alone.
+    before_refit : callable, optional
+        ``() -> None``, called just before each re-fit's probe and before ``memory_trim``, for its owner
+        to let go of what the re-fit will replace (the session frees the outgoing traced form, so the
+        trim then returns its memory). ``None`` (default) calls nothing.
 
     Attributes
     ----------
@@ -396,8 +431,12 @@ class BetaTrackingRefresh:
         pivot_floor: PivotFloor | None = None,
         floorable_rows: np.ndarray | None = None,
         by_field: FieldLayout | None = None,
+        memory_trim: MemoryTrim | None = None,
+        before_refit: Callable[[], None] | None = None,
     ) -> None:
         self._probe = probe
+        self._memory_trim = memory_trim
+        self._before_refit = before_refit
         self._by_field = by_field
         self._pivot_floor = pivot_floor
         # On the device, where the floor is applied, once rather than at every re-fit.
@@ -448,6 +487,10 @@ class BetaTrackingRefresh:
         # the re-fits the march's own cadence pays for from the ones its solves provoked.
         kind = "full" if self._full_rebuild_pending else "cost"
         self._full_rebuild_pending = False
+        if self._before_refit is not None:
+            self._before_refit()
+        if self._memory_trim is not None:
+            self._memory_trim()
         self._report(kind, started, self._materialize_at(active_step, state, float(beta)))
         return True
 
@@ -529,6 +572,31 @@ class BetaTrackingRefresh:
         """
         if self._observer is not None:
             self._observer(RefreshTiming(kind, time.perf_counter() - started, tuple(phases or ())))
+
+
+@dataclasses.dataclass(frozen=True)
+class CouplingSelection:
+    """What a probe's :class:`~aquaflux.precondition.StrongCouplings` chose at the first fit.
+
+    Attributes
+    ----------
+    column : int
+        The column field.
+    kept : int
+        Cell pairs beyond the column's own reach kept as strong.
+    reach_colours : int
+        Colours the column took at its own reach alone.
+    colours : int
+        Colours it takes for the selected pattern.
+    probes : int
+        Directional derivatives one materialize now costs, every column included.
+    """
+
+    column: int
+    kept: int
+    reach_colours: int
+    colours: int
+    probes: int
 
 
 class MaterializedProblem(abc.ABC):
@@ -621,6 +689,12 @@ class MaterializedProblem(abc.ABC):
         """
 
 
+#: The trim every session hands its refresh hook unless told otherwise. A re-fit's transient lands on top
+#: of the freed memory the previous step's program left in the allocator's arenas, so returning that
+#: memory first lowers the peak a re-fit sets; it changes no value.
+_RETURN_FREED_MEMORY = GlibcTrim()
+
+
 class MaterializedSession:
     """The materialized-Jacobian family's session: one probe, one inverse and one refresh hook.
 
@@ -666,13 +740,18 @@ class MaterializedSession:
         ``(timing: RefreshTiming) -> None``, told what each refresh did and what it cost.
     reports : dict, optional
         Where each field-split block inverse sends its build record, keyed ``"leading"`` /
-        ``"trailing"``.
+        ``"trailing"``, and where a probe's strong-couplings selection is described, keyed
+        ``"probe"`` (:attr:`coupling_selection` holds it too).
     on_build : callable, optional
         ``step -> step``, applied to every step the session builds, for instrumenting a driver.
     precondition_wrapper : callable, optional
         ``hook -> hook``, wrapping the per-step :attr:`refresh_preconditioner` once.
     inverse_wrapper : callable, optional
         ``(role, factory) -> factory``, wrapping a field-split block-inverse factory before it is used.
+    memory_trim : MemoryTrim or None, optional
+        Handed to the refresh hook, which calls it before each re-fit (:class:`BetaTrackingRefresh`).
+        The default is a :class:`~aquaflux.allocator.GlibcTrim`, which gives glibc's kept, freed memory
+        back to the operating system and does nothing without glibc; ``None`` leaves the allocator alone.
 
     Raises
     ------
@@ -690,6 +769,7 @@ class MaterializedSession:
         on_build: Callable[[NewtonStrategy], NewtonStrategy] | None = None,
         precondition_wrapper: Callable[[Callable], Callable] | None = None,
         inverse_wrapper: Callable[[str, Callable], Callable] | None = None,
+        memory_trim: MemoryTrim | None = _RETURN_FREED_MEMORY,
     ) -> None:
         if isinstance(spec.inverse, FieldSplit) and problem.groups() is None:
             raise TypeError(
@@ -715,7 +795,11 @@ class MaterializedSession:
         self._reports = dict(reports or {})
         self._on_build = on_build
         self._inverse_wrapper = inverse_wrapper
+        self._memory_trim = memory_trim
         self._probe: JacobianProbe | None = None
+        # Whether the strong-couplings column has been re-planned (once, at the first fit), and how.
+        self._couplings_chosen = False
+        self._selection: CouplingSelection | None = None
         self._hook: BetaTrackingRefresh | None = None
         self._preconditioner: object | None = None
         # The traced form of the fitted inverse, or `None` when it is applied on the host; taken once per
@@ -723,6 +807,8 @@ class MaterializedSession:
         # in the inverse's precision, so a step holding its own would keep one such copy alive per step
         # built, for as long as that step is.
         self._form: TracedForm | None = None
+        # Whether the re-fit in progress freed the form before fitting (`_release_outgoing_form`).
+        self._form_released = False
         # What the last build was made at and with, for building a step on another problem alike.
         self._reference_state: jnp.ndarray | None = None
         self._march: dict = {}
@@ -733,7 +819,16 @@ class MaterializedSession:
         def refresh_preconditioner(
             active_step: NewtonStrategy, state: jnp.ndarray, *, due: bool = False
         ) -> Callable[[NewtonStrategy], NewtonStrategy] | None:
-            refitted = self._refresh_hook()(active_step, state, due=due)
+            self._form_released = False
+            try:
+                refitted = self._refresh_hook()(active_step, state, due=due)
+            except BaseException:
+                if self._form_released:
+                    # The form was freed for a re-fit that did not finish, and the inverse is half
+                    # re-fitted: nothing held is usable, so the next build fits afresh.
+                    self._preconditioner = self._form = self._hook = None
+                    self._stopping_steps = {}
+                raise
             if not (refitted and self._form is not None):
                 return None
             superseded, self._form = self._form, None
@@ -756,6 +851,14 @@ class MaterializedSession:
     def problem(self) -> MaterializedProblem:
         """The residual the session currently serves (it changes on :meth:`rebind`)."""
         return self._problem
+
+    @property
+    def coupling_selection(self) -> CouplingSelection | None:
+        """What the probe's :class:`~aquaflux.precondition.StrongCouplings` chose, once it has.
+
+        ``None`` before the first fit, or for a probe without one.
+        """
+        return self._selection
 
     @property
     def preconditioner(self) -> object | None:
@@ -873,12 +976,16 @@ class MaterializedSession:
     def _probe_for(self) -> JacobianProbe:
         if self._probe is None:
             self._probe = self._problem.probe(
-                self._spec.probe.settings(),
+                self._spec.probe.build_settings(),
                 # A probe feeding a split stores neither the triangle the split never reads nor the whole
                 # matrix: its entries are laid out by the split's blocks.
                 self._problem.groups() if isinstance(self._spec.inverse, FieldSplit) else None,
             )
         return self._probe
+
+    def _release_outgoing_form(self) -> None:
+        """Free the arrays of the current traced form a re-fit is about to replace (:func:`_release_outgoing`)."""
+        self._form_released = _release_outgoing(self._form, self._preconditioner.inverse)
 
     def _refresh_hook(self) -> BetaTrackingRefresh:
         if self._hook is None:
@@ -896,6 +1003,8 @@ class MaterializedSession:
                 pivot_floor=self._spec.pivot_floor,
                 floorable_rows=self._floorable_row_mask(),
                 by_field=self._by_field,
+                memory_trim=self._memory_trim,
+                before_refit=self._release_outgoing_form,
                 **({} if refit_beta_floor is None else {"refit_beta_floor": refit_beta_floor}),
             )
         return self._hook
@@ -919,6 +1028,9 @@ class MaterializedSession:
         probe = self._probe_for()
         probed = probe.narrow(self._problem.assembler)
         frozen = jax.lax.stop_gradient(state)
+        if self._spec.probe.strong_couplings is not None and not self._couplings_chosen:
+            probe = self._probe = self._with_strong_couplings(probe, probed, frozen)
+            self._couplings_chosen = True
         matvec, batched_matvec = _probe_products(probed, frozen, self._by_field)
         build_beta = BUILD_BETA if self._spec.build_beta is None else self._spec.build_beta
         shift = frozen_shift_diagonal(base, build_beta, state)
@@ -947,6 +1059,76 @@ class MaterializedSession:
             # Held as the traced split applies it, like the blocks' hierarchies.
             stored_precision=self._precision,
             **probing,
+        )
+
+    def _with_strong_couplings(
+        self, probe: JacobianProbe, probed: object, state: jnp.ndarray
+    ) -> JacobianProbe:
+        """``probe`` with the strong-couplings column re-planned from the Jacobian at ``state``.
+
+        The column is probed once at the reach the stored pattern covers, and every fit from here on
+        probes it for the pattern :meth:`StrongCouplings.pattern` keeps. The stored pattern is
+        unchanged, so the gather map is rebuilt only for the new colouring.
+        """
+        couplings = self._spec.probe.strong_couplings
+        layout = self._problem.layout
+        n_fields = layout.n_fields
+        fields = (couplings.column, *couplings.row_fields)
+        if max(fields) >= n_fields:
+            raise ValueError(
+                f"StrongCouplings names field {max(fields)}, and the state has {n_fields} fields."
+            )
+        plan = probe.plan
+        if plan.edges is None:
+            raise ValueError(
+                f"the probe {type(self._problem).__name__} built does not carry its cell graph, so "
+                "StrongCouplings cannot tell a face neighbour from a cell further away; build its plan "
+                "with column_probe_plan."
+            )
+        owner, nb = plan.edges
+        column = couplings.column
+        n = layout.n_cells
+        if self._by_field is not None:
+
+            def products(seeds):
+                return batched_field_jacobian_matvec(
+                    probed, layout, state, column, jnp.asarray(seeds)
+                )
+
+        else:
+            start = layout.field_dofs(column)
+
+            def products(seeds):
+                whole = jnp.zeros((seeds.shape[0], layout.size), dtype=state.dtype)
+                return batched_jacobian_matvec(
+                    probed, state, whole.at[:, start : start + n].set(jnp.asarray(seeds))
+                )
+
+        rows, cols, kept = couplings.pattern(
+            products,
+            {field: layout.field_dofs(field) for field in couplings.row_fields},
+            owner,
+            nb,
+            n,
+            plan.reach[column],
+            block_stencil_colouring(owner, nb, n, plan.pattern_reach),
+            batch=PROBE_BATCH_SIZE,
+        )
+        planned = plan.with_column_pattern(column, rows, cols)
+        self._selection = CouplingSelection(
+            column, kept, plan.n_colours[column], planned.n_colours[column], planned.n_probes
+        )
+        report = self._reports.get("probe")
+        if report is not None:
+            report(
+                f"strong couplings: column {column} keeps {kept} pairs beyond reach "
+                f"{plan.reach[column]}, {plan.n_colours[column]} -> {planned.n_colours[column]} "
+                f"colours, {planned.n_probes} probes per fit"
+            )
+        groups = self._problem.groups() if isinstance(self._spec.inverse, FieldSplit) else None
+        leading = None if groups is None else groups.n_leading_fields
+        return JacobianProbe(
+            planned, block_stencil_gather_map(planned, leading_fields=leading), probe.narrowing
         )
 
     def _block_inverse(self, role: str) -> Callable:

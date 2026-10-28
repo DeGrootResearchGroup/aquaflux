@@ -420,7 +420,7 @@ old one.**
 | Adjoint of the coupled solve | `custom_vjp` around the linear solve | exact, memory-flat gradient independent of iteration count |
 | Transient integration | Diffrax | traced, shared with aquakin |
 | Mesh | static connectivity arrays + `segment_sum` scatter | XLA-friendly graph/message-passing layout |
-| Compiled host loops | **Numba** | a loop whose value is in the work it SKIPS (a ray walked to its first hit) cannot be traced — a traced loop pays its worst case on every item — and a host loop can also fuse several whole-array passes into one threaded loop. Used in `aquaflux/radiation/` (see `.claude/rules/radiation.md`). A core dependency, by the project owner's decision over keeping it optional. |
+| Compiled host loops | **Numba** | a loop whose value is in the work it SKIPS (a ray walked to its first hit) cannot be traced — a traced loop pays its worst case on every item — and a host loop can also fuse several whole-array passes into one threaded loop. Used in `aquaflux/radiation/` (`.claude/rules/radiation.md`) and, called from inside XLA programs, for the preconditioner's level products (`.claude/rules/solve-amg-multigrid.md`). A core dependency, by the project owner's decision over keeping it optional. |
 | Mesher (optional) | **Netgen** (`meshing` extra, LGPL-2.1, pinned) | CAD-face triangulation and a tet fill that keeps a supplied surface. Its own OCCT aborts a process holding OCP's, so it runs **only in a child process** (`.claude/rules/meshing.md`) |
 | Browser interface (optional) | **PyVista/VTK + trame + plotly** (`aquaflux_ui`, `ui` extra) | a local browser interface needing no JavaScript toolchain: VTK renders locally and trame streams images, so a large mesh never reaches the browser. A separate top-level package that imports neither aquaflux nor JAX (`import aquaflux` enables x64), asking the solver through an `aquaflux serve` process (`.claude/rules/ui.md`) |
 | Case file | **PyYAML** (`aquaflux/case/`) | a case's mesh, physics, boundaries, (for a flow) fluid and numerics, and solver in one YAML document, read by YAML 1.2 rules for plain values (PyYAML's 1.1 rules read `1e-5` as a string and `no` as a boolean) and validated per position by `solve.SettingsMapping` — so no pydantic. The equation DSL (YAML → AST emitting terms) is different and is still the **last** layer, not built |
@@ -591,7 +591,7 @@ rule is not what protects you**: `tools/fastgate.sh … | tail -4` returns `0` *
 its last few lines.**
 
 **The fast tier runs across worker processes; the `slow` and `validation` tiers do not** — a memory
-decision (a bfs3d march peaks at ~8.5 GiB on Linux, each copy of its Jacobian 0.41 GiB; CI shards the heavy tiers at `-n 1`). The
+decision (a bfs3d march peaks at ~4.4 GiB on Linux, each copy of its Jacobian 0.41 GiB; CI shards the heavy tiers at `-n 1`). The
 fast tier distributes by **file** (`--dist loadfile`: module fixtures built once, file order kept) and
 pins **one BLAS/XLA (and Numba) thread per worker**. `FASTGATE_JOBS=<n>` sets the worker count;
 `FASTGATE_JOBS=0` (or your own `-n`) opts out — do that when bisecting. ⚠️ **Judge memory from the
@@ -642,8 +642,8 @@ attached — check for them before adding a solve to this tier:
 
 **⚠️ A unit CI job that slows down or times out is usually the runner swapping, not your change — and the
 fix is a shard, not a worker.** Workers grow as they draw modules, and unsharded `-n 3` on a 16 GB runner
-swapped tests past the 900 s timeout with no assertion failing. The tier runs as **three shards of two
-workers** (`--splits 3 --group N -n 2`), balanced by durations recorded **on CI, never locally**. When it
+swapped tests past the 900 s timeout with no assertion failing. The tier runs as **four shards of two
+workers** (`--splits 4 --group N -n 2`), balanced by durations recorded **on CI, never locally**. When it
 outgrows that, **add a shard; never add a worker.** Before blaming your branch, read the job's memory step
 (`vmstat` every 30 s) and check whether unrelated branches are slow too. Caching JAX compilations across CI
 runs buys nothing. `.github/workflows/ci.yml` carries these measurements.
@@ -820,8 +820,8 @@ the run-file, so its format and `kill -0` liveness rule keep one home. `tests/co
 - **A run that spanned a machine sleep is void for cost.** It converges correctly, but the wall-clock
   column silently absorbed the sleep. `run_case.sh` holds the machine awake; if a sleep happened anyway,
   keep its step and cycle counts and discard its timings.
-- **Sweep in one process, not N.** These jobs are memory-bound (a bfs3d march peaks at ~8.5 GiB, set by
-  its re-fits), so spare cores are not a reason to parallelize. Loop over β in one process, `del` the
+- **Sweep in one process, not N.** These jobs are memory-bound (a bfs3d march peaks at ~4.4 GiB on
+  Linux, 2026-10-25), so spare cores are not a reason to parallelize. Loop over β in one process, `del` the
   big arrays between iterations, and load a cached factor from disk rather than re-materializing it.
   Concurrent probes have exhausted this machine and suspended every application on it, including the
   driving session.

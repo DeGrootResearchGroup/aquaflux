@@ -1107,6 +1107,7 @@ def newton_march(
         previous = current
         current = float(residual_norm)
         stop_norm = judged(active_step, state, residual, current)
+        stop_target = atol + rtol * judged_reference()
         step_tolerance = tolerance
         if adaptive_tolerance is not None:
             # The reduction is the march's own, report to report, although the measure is rebuilt each
@@ -1119,7 +1120,7 @@ def newton_march(
                 alpha=float(outcome.alpha),
                 reduction=current / previous if previous > 0.0 else math.inf,
                 stopping_norm=stop_norm,
-                target=atol + rtol * judged_reference(),
+                target=stop_target,
             )
         refresh_due = bool(outcome.refresh_due)
         # Not every NewtonStrategy carries a relaxation schedule (a plain damped-Newton step has none), and
@@ -1143,6 +1144,7 @@ def newton_march(
             full_step_ratio=float(outcome.full_step_ratio),
             stopping_norm=stop_norm,
             stopping_ratio=stop_norm / judged_reference() if judged_reference() > 0.0 else 0.0,
+            stopping_target=stop_target,
             linear_tolerance=math.nan if step_tolerance is None else float(step_tolerance),
         )
         reports.append(report)

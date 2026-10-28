@@ -28,7 +28,8 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .entry_map import DeviceEntryMap, EntryMap, SparsePattern
+from .entry_map import DeviceEntryMap, EntryMap, SparsePattern, ValueMap
+from .kronecker_pattern import KroneckerGalerkin, KroneckerPattern, nodal_cell_transfer
 from .padded_rows import _PaddedLayout, _PaddedRowOperator
 
 #: Power-iteration steps behind a level's spectral estimate.
@@ -205,14 +206,14 @@ class _LevelPlan(eqx.Module):
     Attributes
     ----------
     layout : _PaddedLayout
-        The level operator's padded rows and their transpose.
+        The level operator's padded rows.
     diagonal : DeviceEntryMap
         Each row's diagonal entry (zero where none is stored).
     cells : DeviceEntryMap or None
         Each cell's dense block, flat ``(n_cells, b, b)``; ``None`` on a scalar level.
     dense : DeviceEntryMap or None
         The whole operator as a dense ``(n, n)`` matrix, flat, on the coarsest level only.
-    galerkin : DeviceEntryMap or None
+    galerkin : ValueMap or None
         The map to the next level's values (``R A P`` for the level's frozen transfers); ``None`` on the
         coarsest level.
     embed : DeviceEntryMap or None
@@ -234,7 +235,7 @@ class _LevelPlan(eqx.Module):
     diagonal: DeviceEntryMap
     cells: DeviceEntryMap | None
     dense: DeviceEntryMap | None
-    galerkin: DeviceEntryMap | None
+    galerkin: ValueMap | None
     embed: DeviceEntryMap | None
     constant: jnp.ndarray | None
     start: jnp.ndarray
@@ -271,8 +272,8 @@ class LevelValues(NamedTuple):
 
     Attributes
     ----------
-    slot_values, transposed_slot_values : jnp.ndarray
-        The level operator's padded-row values and those of its transpose, on the level's layout
+    slot_values : jnp.ndarray
+        The level operator's padded-row values, on the level's layout
         (:meth:`_PaddedLayout.with_values`). Only the values: an array a compiled function returns is a
         new buffer, so returning the whole operator would copy the layout's index arrays every fit.
     diagonal : jnp.ndarray
@@ -286,7 +287,6 @@ class LevelValues(NamedTuple):
     """
 
     slot_values: jnp.ndarray
-    transposed_slot_values: jnp.ndarray
     diagonal: jnp.ndarray
     lam_max: jnp.ndarray
     coarse_inv: jnp.ndarray | None
@@ -368,7 +368,6 @@ def fit_levels(
         fitted.append(
             LevelValues(
                 slot_values=operator.values,
-                transposed_slot_values=operator.t_values,
                 diagonal=diagonal,
                 lam_max=spectral_estimate(preconditioned, level.start),
                 coarse_inv=coarse_inv,
@@ -395,7 +394,6 @@ def level_plan(
     *,
     prolongation: sp.coo_matrix | None,
     width: int | None = None,
-    transpose_width: int | None = None,
     embed: DeviceEntryMap | None = None,
     constant: np.ndarray | None = None,
 ) -> tuple[_LevelPlan, SparsePattern | None]:
@@ -410,8 +408,8 @@ def level_plan(
     prolongation : scipy.sparse.coo_matrix or None
         The frozen prolongation to the next level; ``None`` makes this the coarsest level, solved by a
         dense inverse.
-    width, transpose_width : int, optional
-        The padded-row budgets (:meth:`_PaddedLayout.of`).
+    width : int, optional
+        The padded-row budget (:meth:`_PaddedLayout.of`).
     embed, constant : optional
         How this level's values follow from the previous level's product (:class:`_LevelPlan`).
 
@@ -433,8 +431,7 @@ def level_plan(
         dense = EntryMap.gathering(pattern, lambda m: m.toarray()).on_device()
     else:
         transfer = sp.csr_matrix(prolongation)
-        product = EntryMap.product(sp.csr_matrix(transfer.T), pattern, transfer)
-        galerkin, landing = product.on_device(), product.landing
+        galerkin, landing = _galerkin(pattern, block_size, transfer)
         n_coarse = transfer.shape[1]
         prolongation_arrays = (
             jnp.asarray(prolongation.row),
@@ -442,7 +439,7 @@ def level_plan(
             jnp.asarray(prolongation.data),
         )
     plan = _LevelPlan(
-        layout=_PaddedLayout.of(pattern, width, transpose_width),
+        layout=_PaddedLayout.of(pattern, width, fields=(block_size, block_size)),
         diagonal=EntryMap.gathering(pattern, lambda m: m.diagonal()).on_device(),
         cells=cells,
         dense=dense,
@@ -456,6 +453,24 @@ def level_plan(
         block_size=block_size,
     )
     return plan, landing
+
+
+def _galerkin(
+    pattern: SparsePattern, block_size: int, transfer: sp.csr_matrix
+) -> tuple[ValueMap, SparsePattern]:
+    """The map ``A -> Pᵀ A P`` onto the product's structural pattern, and that pattern.
+
+    At cell level (:class:`~aquaflux.precondition.kronecker_pattern.KroneckerGalerkin`) when the level
+    stores one cell pattern over every field pair and ``P`` carries each field on its own coarse unknown
+    through one cell transfer -- a nodal aggregation's tentative prolongation -- else over every term.
+    """
+    kronecker = KroneckerPattern.of_dof(pattern, block_size, block_size)
+    cell_transfer = None if kronecker is None else nodal_cell_transfer(transfer, block_size)
+    if cell_transfer is not None:
+        galerkin, coarse = KroneckerGalerkin.of(kronecker, cell_transfer)
+        return galerkin, coarse.dof_pattern()
+    product = EntryMap.product(sp.csr_matrix(transfer.T), pattern, transfer)
+    return product.on_device(), product.landing
 
 
 def landing_with_diagonal(landing: SparsePattern, slots: np.ndarray) -> _Landing:

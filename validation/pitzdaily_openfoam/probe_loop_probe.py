@@ -41,6 +41,7 @@ from aquaflux.precondition.materialized_session import (  # noqa: E402
     PROBE_BATCH_SIZE,
     batched_jacobian_matvec,
 )
+from aquaflux.precondition.sparse_jacobian import _dof_probe_gather  # noqa: E402
 from replay import MarchReplay  # noqa: E402
 
 REPEATS = int(os.environ.get("PITZ_COST_REPEATS", "5"))
@@ -62,9 +63,12 @@ print(
 
 CHUNKS = [(0, start, min(chunk, n_probes - start)) for start in range(0, n_probes, chunk)]
 WIDTH = structure.width(CHUNKS)
-# The looped arm places responses on the host, inside its callback, from host copies of the order.
-SOURCE, POSITION = np.asarray(structure._source), np.asarray(structure._position)
-STARTS = structure._probe_start
+# The looped arm places responses on the host, inside its callback, from host copies of the
+# entry-by-entry order (the session's own structure may hold its order at cell level), over the same
+# layout as the session's.
+_ORDER = _dof_probe_gather(plan, structure.layout.leading_dofs // plan.n_cells)._entries
+SOURCE, POSITION = np.asarray(_ORDER._source), np.asarray(_ORDER._position)
+STARTS = _ORDER._probe_start
 
 
 def shipped():

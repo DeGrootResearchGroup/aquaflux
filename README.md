@@ -103,6 +103,25 @@ pip install -e .
 > an intentional, documented side effect — other JAX code in the same process
 > will use float64 afterward.
 
+### macOS: OpenMP for the threaded preconditioner products (optional)
+
+On the CPU, aquaflux runs the preconditioner's sparse products as one threaded
+Numba loop, which needs a Numba threading layer that several threads may enter at
+once (OpenMP or TBB). Numba's macOS wheel includes its OpenMP layer but not the
+OpenMP runtime it loads, so a plain `pip install` on a Mac runs XLA's own form of
+those products instead: correct, only without the threaded loop. To enable it,
+install the runtime with Homebrew and link it where Numba looks for it:
+
+```bash
+brew install libomp && brew link --force libomp
+```
+
+Homebrew does not link `libomp` by default, so the second command is needed.
+Setting `DYLD_LIBRARY_PATH` is not a substitute: macOS removes it whenever a
+shell script starts Python. A conda environment needs neither, since conda's
+Numba installs its OpenMP runtime. Each run's `run.yaml` and log record which form
+the products took (`padded_products`) and why.
+
 ## Quick start
 
 A lid-driven cavity: build a mesh, assemble the coupled flow problem, and solve

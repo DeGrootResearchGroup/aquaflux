@@ -67,7 +67,9 @@ def newton_step(
     preconditioner : callable, optional
         A factory ``phi -> M`` giving the preconditioner ``M`` (a matvec approximating ``J^{-1}``) for
         the step's linear solve; built at the current iterate. ``M``'s coefficients must be
-        ``stop_gradient``-ed so preconditioning stays gradient-transparent.
+        ``stop_gradient``-ed so preconditioning stays gradient-transparent. Reverse-mode
+        differentiation through this step transposes ``M`` with the solve: a factory whose operators
+        pack their transposes only when asked must be passed through :func:`~aquaflux.solve.with_transposes` first.
     preconditioner_side : str
         The side ``M`` is applied on, ``"right"`` (default) or ``"left"`` — see
         :func:`~aquaflux.solve.linear.solve_linear`. Left suits a strong ``M`` on a badly conditioned

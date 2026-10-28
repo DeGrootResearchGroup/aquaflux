@@ -111,7 +111,8 @@ Three pure seams so most logic tests without a filesystem:
 - **Points are written at `repr` precision** (shortest exact decimal), so they read back bit-identical.
 - **Refused before anything is written**: a 2D mesh (no extrusion is built), a periodic mesh or a
   `cyclic`-typed patch (no `cyclic` pairs are written), a boundary face in no named patch (the format has no
-  unnamed boundary), a named patch holding interior faces (a baffle is a `faceZone`, not written).
+  unnamed boundary), a named patch holding interior faces (a `faceZone`, not written). A mesher's
+  baffle is boundary faces in an ordinary patch (`meshing.md`), so it is written, and reads back, as one.
 - ⚠️ **`overwrite=True` deletes every file in `MESH_FILES` first**, zones included, so a stale `cellZones`
   can never be read against the new mesh's labels; without it a polyMesh holding any of them is refused.
 - Tests: `tests/unit/test_openfoam_mesh_writer.py` checks order and winding as properties of the output on
@@ -326,6 +327,9 @@ chord=, facet_size=)` (an emitting surface).
   project owner, 2026-10-19): the ban is on recognition. The mesher's kernel needs are in `meshing.md`.
 - **Assemblies**: locations accumulate down the component tree; a part's own name beats its instance's; a
   repeated name gets `[k]`, several solids under one name `.k`.
+- **Sheets**: a part holding faces and no solid is read as a sheet (`kernel.read_step` returns solids and
+  sheets apart; `CadModel(sheets=)`, `CadModel.sheets`; names unique across both, `[k]` likewise).
+  `solid(name)` and a region's `solids` refuse a sheet's name by name. A sheet is a baffle (`meshing.md`).
 - **Triangulation bounds facet size by splitting the boundary shells** (`BRepAlgoAPI_Splitter`) with three
   families of planes `facet_size` apart, then meshing — OCCT bounds chord and angle only, leaving
   full-length slivers. ⚠️ Split the shells, never the solid (that meshes the cutting planes' interior faces).
@@ -333,8 +337,9 @@ chord=, facet_size=)` (an emitting surface).
   dropped (a point source to `radiation.Surfaces`). A reflecting placement keeps triangles outward
   (`BRepBuilderAPI_Transform` reverses faces itself).
 - **Regions for a mesher — built** (`topology.py` records, numpy only; kernel `region`, `topology`,
-  `write_brep`, `project`). `CadRegion(solids, without=())` is a plain value (union of `solids` less the
-  union of `without`); `CadModel` builds and caches its shape, so no kernel object leaves the model, and
+  `write_brep`, `project`). `CadRegion(solids, without=(), baffles=None)` is a plain value (union of
+  `solids` less the union of `without`, with sheets standing in it: unset every sheet of the model, a tuple
+  those named, `()` none); `CadModel` builds and caches its shape, so no kernel object leaves the model, and
   answers `topology(region) -> CadTopology`, `face_triangles(region, chord=, facet_size=) -> FaceTriangles`,
   `write_brep(region, path)` and `project(region, points, faces=None, edges=None) -> Projection` (onto
   the boundary, a given face, or a given edge; the face reported for an edge is the first meeting there).
@@ -349,6 +354,16 @@ chord=, facet_size=)` (an emitting surface).
     two faces; `seam` from `BRep_Tool.IsClosed_s` (a seam lists its one face twice among its ancestors, so
     faces are deduplicated by index). On the Sozzi water (lamp removed) the only concave edges are the two
     pipe junctions: the inlet riser on the vessel's cylinder, the outlet on its end plate.
+  - **Sheets stand in the region through `BRepAlgoAPI_Splitter`** (the region the argument, the sheets
+    the tools): the parts inside become faces of the solid oriented `TopAbs_INTERNAL`, in a shell of their
+    own, and the parts outside are dropped. `kernel.region` returns `(shape, embedded)`, each sheet's
+    whether any image of its faces (`Modified`, else itself) is an internal face; a named baffle that is
+    not is refused by the model, an unnamed one is simply absent. A split that changes the number of
+    solids (a sheet cutting the region in two) is refused. `CadTopology.sheet` marks the internal faces
+    (default all `False`, so a hand-built topology needs no field); a sheet's edges get `edge_angle`
+    `nan` (no fold is defined with the region on both sides), so every one is a feature. Netgen numbers
+    an internal face as the explorer does (box and plate: all seven faces matched, 2026-10-24).
+    `project` reaches a sheet's faces (its shell is among the boundary shells).
   - **`triangulate` now returns `(triangles, face)`**: a face cut by `facet_size` keeps its index, traced
     through the splitter's `Modified` history (`_cut` returns the splitter). `CadModel.triangles` keeps
     its return of triangles only.
@@ -361,7 +376,7 @@ chord=, facet_size=)` (an emitting surface).
 
 ## Deferred (additive; no seam changes)
 
-Binary polyMesh; `faceZones`/`pointZones` (reading, and writing baffles as `faceZones`); writing `cyclic`
+Binary polyMesh; `faceZones`/`pointZones` (reading, and writing interior-face patches as `faceZones`); writing `cyclic`
 pairs and 2D extrusions; `.gz` and multi-region cases; other formats as `MeshReader` subclasses under `io/<format>/`; `.pvtu` for
 `parallel/PartitionedMesh` (`xml.cell_data_arrays` already yields what a `.pvtu` declares).
 

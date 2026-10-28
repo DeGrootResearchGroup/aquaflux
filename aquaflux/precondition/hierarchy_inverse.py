@@ -39,6 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
+from ..solve import with_transposes
 from .entry_map import DeviceMatrix, as_scipy
 from .multigrid import (
     FrozenCoarsening,
@@ -252,8 +253,7 @@ class HierarchyBlockInverse:
             self._budget = self._hierarchy.shape_budget(self._shape_headroom)
             self._report(
                 f"      shape ladder: cells {self._budget.coarse_cells}, "
-                f"row widths {self._budget.operator_width}, transposed "
-                f"{self._budget.transpose_width} (headroom {self._shape_headroom})",
+                f"row widths {self._budget.operator_width} (headroom {self._shape_headroom})",
             )
             self._hierarchy = self._coarsen(matrix, self._budget)
         self._after_coarsening()
@@ -273,7 +273,8 @@ class HierarchyBlockInverse:
             self._hierarchy = _narrowed(levels, equilibration, self._stored_precision)
         # LAZY. `jax.linear_transpose` traces eagerly, and a forward march never applies the transpose
         # -- only the adjoint does. Building it at construction cost a measured 0.27 GB and 0.27 s per
-        # arm for something most callers never touch. Dropped rather than kept here, because it
+        # arm for something most callers never touch -- and it holds the level operators' packed
+        # transposes beside them (`with_transposes`). Dropped rather than kept here, because it
         # describes the hierarchy this call has just replaced.
         self._transpose_fn = None
 
@@ -293,6 +294,33 @@ class HierarchyBlockInverse:
             state=(self._hierarchy, self._extras),
             step=_HierarchyStep(self.cycle(), self.smoother()),
         )
+
+    def refit_keeps(self) -> tuple | None:
+        """What a re-fit reuses of what this inverse holds now, or ``None`` when it re-coarsens.
+
+        A re-fit on a frozen coarsening takes every level's structure -- its operator's index arrays, its
+        prolongation -- from the coarsening's plan, and the smoother's plans from the structure they were
+        made for (:meth:`_refit_structure`), and computes everything else afresh. So every other array
+        of the current :meth:`traced_cycle`'s state is dead once a re-fit starts, and a caller holding
+        that state may free it before the fit rather than after (the materialized session does, so the
+        superseded hierarchy is not alive beside the one being fitted). A re-fit that re-coarsens reads
+        nothing of the old hierarchy either, but builds new structure without a plan to say which, so
+        it answers ``None``: nothing is known to be reusable, and nothing should be freed early.
+
+        Returns
+        -------
+        tuple of pytrees or None
+            The pytrees whose array leaves a re-fit reuses.
+        """
+        if self._coarsening is None or not (
+            self._frozen_coarsening or not self._coarsening_reads_values()
+        ):
+            return None
+        return (self._coarsening.plan, *self._refit_structure())
+
+    def _refit_structure(self) -> tuple:
+        """The smoother's own structure a re-fit reuses, beside the coarsening's plan: none here."""
+        return ()
 
     def _solve(self, residual: jnp.ndarray) -> jnp.ndarray:
         """The cycle over what this inverse currently holds, traced in and not captured.
@@ -344,8 +372,9 @@ class HierarchyBlockInverse:
                 f"cannot refactor a {self._n_dofs}-dof inverse onto a {block.shape[0]}-dof block."
             )
         if self._frozen_coarsening or not self._coarsening_reads_values():
-            # The held hierarchy is let go first, so the old levels are not alive beside the new ones.
-            self._hierarchy = None
+            # The held hierarchy and the smoother's record of it are let go first, so the old levels are
+            # not alive beside the new ones.
+            self._hierarchy = self._extras = None
             self._hierarchy = self._coarsening.fit(block, "HierarchyBlockInverse.refactor_block")
             self._after_coarsening()
             return
@@ -381,7 +410,7 @@ class HierarchyBlockInverse:
             return np.asarray(self._solve(vector), dtype=np.float64)
         if self._transpose_fn is None:
             self._transpose_fn = jax.linear_transpose(
-                self._solve, jnp.zeros(self._n_dofs, dtype=jnp.float64)
+                with_transposes(self.traced_cycle()), jnp.zeros(self._n_dofs, dtype=jnp.float64)
             )
         return np.asarray(self._transpose_fn(vector)[0], dtype=np.float64)
 

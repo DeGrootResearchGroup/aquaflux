@@ -46,6 +46,9 @@ cad.names        # ('lamp', 'outlet_pipe', 'inlet_pipe', 'reactor_body')
 
 - **Names** are the solids' part names in the file; a part placed several times in an assembly
   gives one solid per placement, `name[0]`, `name[1]`, ….
+- **Sheets** — parts holding faces but no solid, such as a baffle plate drawn with no thickness —
+  are listed apart, in `cad.sheets`; a mesh has them standing in its fluid as baffles
+  ({doc}`mesh_files`).
 - **Lengths are always metres**, whatever unit the drawing was made in.
 - **A {class}`~aquaflux.io.cad.Placement`** maps the drawing's frame to the mesh's,
   `x_mesh = matrix @ x_drawing + offset`. The matrix must be orthogonal — a rotation, or a

@@ -55,8 +55,11 @@ MESH_SECTION_ICONS = {
     "pipes": "mdi-pipe",
     "pipe_core": "mdi-pipe",
     "pipe_grading": "mdi-pipe",
+    "ducts": "mdi-rectangle-outline",
+    "duct_core": "mdi-rectangle-outline",
     "planarizer": "mdi-vector-square",
     "core": "mdi-cube-outline",
+    "refinements": "mdi-magnify-plus-outline",
     "periodic": "mdi-sync",
     "output": "mdi-folder-outline",
 }
@@ -67,8 +70,17 @@ DRAWING_SUFFIXES = (".step", ".stp")
 #: Seconds between reads of a meshing's console while it runs.
 POLL_SECONDS = 1.0
 
-#: The settings that change what the drawing shows: when one is edited, the solver is asked again.
+#: The sections that change what the drawing shows (with the feature angle, :func:`_drawn`): when one
+#: is edited, the solver is asked again.
 _DRAWN = ("drawing", "region", "patches", "others")
+
+
+def _drawn(document: Mapping) -> tuple:
+    """What of a mesh file the drawing shows: its :data:`_DRAWN` sections, and the feature angle,
+    which decides which faces are ducts' sides."""
+    sizes = document.get("sizes")
+    angle = sizes.get("feature_angle") if isinstance(sizes, Mapping) else None
+    return (*(document.get(key) for key in _DRAWN), angle)
 
 
 def quality_tiles(made: Mapping | None) -> list[dict]:
@@ -202,7 +214,7 @@ class MeshSection:
 
     def _changed(self, before: Mapping | None, after: Mapping) -> None:
         """An edit of what the drawing shows asks the solver again."""
-        if before is None or any(before.get(key) != after.get(key) for key in _DRAWN):
+        if before is None or _drawn(before) != _drawn(after):
             self.form.spawn(self.load_drawing())
 
     def _names(self, document: Mapping) -> dict[tuple, list[str]]:
@@ -216,18 +228,19 @@ class MeshSection:
             ("patches", ANY, "solids"): solids,
             ("layered",): patches,
             ("mapped",): patches,
-            ("pipes",): self._pipe_patches(),
+            ("pipes",): self._patches_within(self.view.pipes),
+            ("ducts",): self._patches_within(self.view.ducts or ()),
         }
 
-    def _pipe_patches(self) -> list[str]:
-        """The patches whose every face is a pipe."""
+    def _patches_within(self, faces) -> list[str]:
+        """The patches every face of which is one of ``faces`` (the pipes, or the ducts' sides)."""
         names = self.view.patches or []
-        pipes = set(self.view.pipes)
+        within = set(faces)
         return [
             row["name"]
             for row in self.server.state.meshing_patches
-            if (faces := [f for f, name in enumerate(names) if name == row["name"]])
-            and set(faces) <= pipes
+            if (mine := [f for f, name in enumerate(names) if name == row["name"]])
+            and set(mine) <= within
         ]
 
     # --- the drawing ------------------------------------------------------------------------------

@@ -83,6 +83,7 @@ from OCP.TDocStd import TDocStd_Document
 from OCP.TopAbs import (
     TopAbs_EDGE,
     TopAbs_FACE,
+    TopAbs_INTERNAL,
     TopAbs_REVERSED,
     TopAbs_SHAPE,
     TopAbs_SHELL,
@@ -145,12 +146,18 @@ class OpenCascade:
     # Reading
     # -----------------------------------------------------------------------------------------
 
-    def read_step(self, path, placement: Placement) -> dict:
-        """The named solids in a STEP file, placed, keyed by name.
+    def read_step(self, path, placement: Placement) -> tuple[dict, dict]:
+        """The named solids in a STEP file, and its sheets, placed, each keyed by name.
 
-        A solid's name is its product name in the file. An unnamed solid is called ``solid<k>``;
-        a name that repeats gets ``[k]`` appended to every occurrence, so no solid is dropped for
-        sharing a name. An assembly is walked into its components, each at its own location.
+        A body's name is its product name in the file. An unnamed one is called ``solid<k>``; a
+        name that repeats gets ``[k]`` appended to every occurrence, so no body is dropped for
+        sharing a name. An assembly is walked into its components, each at its own location. A
+        part holding faces but no solid is a sheet: a surface of no thickness, such as a baffle.
+
+        Returns
+        -------
+        solids : dict of str to kernel solid
+        sheets : dict of str to kernel shape
 
         Raises
         ------
@@ -169,30 +176,32 @@ class OpenCascade:
         reader.Transfer(document)
         tool = XCAFDoc_DocumentTool.ShapeTool_s(document.Main())
 
-        named: list[tuple[str, object]] = []
+        named: list[tuple[str, object, bool]] = []
         roots = Sequence_TDF_Label()
         tool.GetFreeShapes(roots)
         for i in range(1, roots.Length() + 1):
             self._collect(tool, roots.Value(i), TopLoc_Location(), named)
-        if not named:
+        if not any(not sheet for _, _, sheet in named):
             msg = f"{path} holds no solid"
             raise ValueError(msg)
 
         transform = self._transform(placement)
         counts: dict[str, int] = {}
-        for name, _ in named:
+        for name, _, _ in named:
             counts[name] = counts.get(name, 0) + 1
         seen: dict[str, int] = {}
-        solids = {}
-        for name, shape in named:
+        solids, sheets = {}, {}
+        for name, shape, sheet in named:
             if counts[name] > 1:
                 seen[name] = seen.get(name, 0) + 1
                 name = f"{name}[{seen[name] - 1}]"
-            solids[name] = BRepBuilderAPI_Transform(shape, transform, True).Shape()
-        return solids
+            placed = BRepBuilderAPI_Transform(shape, transform, True).Shape()
+            (sheets if sheet else solids)[name] = placed
+        return solids, sheets
 
     def _collect(self, tool, label, location, named: list, fallback: str = "") -> None:
-        """Every solid under ``label``, placed by ``location``, with the name it is best known by.
+        """Every solid under ``label``, or the label's sheet when it holds faces but no solid, placed
+        by ``location``, with the name it is best known by and whether it is a sheet.
 
         An assembly's components each carry a location relative to it, so the location is
         accumulated on the way down rather than read from any one level. A part's own name is
@@ -216,7 +225,9 @@ class OpenCascade:
             explorer.Next()
         for k, piece in enumerate(pieces):
             name = base or f"solid{len(named)}"
-            named.append((name if len(pieces) == 1 else f"{name}.{k}", piece))
+            named.append((name if len(pieces) == 1 else f"{name}.{k}", piece, False))
+        if not pieces and TopExp_Explorer(shape, TopAbs_FACE).More():
+            named.append((base or f"solid{len(named)}", shape, True))
 
     @staticmethod
     def _name(label) -> str:
@@ -410,20 +421,60 @@ class OpenCascade:
     # Meshing: a region built from solids, its topology, its file, and points moved onto it
     # -----------------------------------------------------------------------------------------
 
-    def region(self, solids, without):
-        """The union of the kernel solids ``solids``, less the union of ``without``."""
+    def region(self, solids, without, sheets=()):
+        """The union of the kernel solids ``solids``, less the union of ``without``, with the parts
+        of ``sheets`` inside it standing in it as faces with the region on both sides.
+
+        Returns
+        -------
+        shape
+            The region.
+        embedded : list of bool
+            For each sheet, whether any of it stands in the region.
+
+        Raises
+        ------
+        ValueError
+            If the sheets cut a solid of the region in two: a sheet must leave a way round it.
+        """
         shape = self.fuse(list(solids))
-        if not without:
-            return shape
+        if without:
+            arguments, tools = List_TopoDS_Shape(), List_TopoDS_Shape()
+            arguments.Append(shape)
+            for tool in without:
+                tools.Append(tool)
+            cut = BRepAlgoAPI_Cut()
+            cut.SetArguments(arguments)
+            cut.SetTools(tools)
+            cut.Build()
+            shape = cut.Shape()
+        if not sheets:
+            return shape, []
         arguments, tools = List_TopoDS_Shape(), List_TopoDS_Shape()
         arguments.Append(shape)
-        for tool in without:
-            tools.Append(tool)
-        cut = BRepAlgoAPI_Cut()
-        cut.SetArguments(arguments)
-        cut.SetTools(tools)
-        cut.Build()
-        return cut.Shape()
+        for sheet in sheets:
+            tools.Append(sheet)
+        splitter = BRepAlgoAPI_Splitter()
+        splitter.SetArguments(arguments)
+        splitter.SetTools(tools)
+        splitter.Build()
+        before, shape = _indexed(shape, TopAbs_SOLID).Size(), splitter.Shape()
+        pieces = _indexed(shape, TopAbs_SOLID).Size()
+        if pieces != before:
+            msg = (
+                f"the sheets cut the region's {before} solid(s) into {pieces}; a sheet standing in "
+                "a region must leave a way round it"
+            )
+            raise ValueError(msg)
+        inside = [face for face in _faces(shape) if face.Orientation() == TopAbs_INTERNAL]
+        embedded = []
+        for sheet in sheets:
+            images = []
+            for face in _faces(sheet):
+                modified = splitter.Modified(face)
+                images += list(modified) if modified.Size() else [face]
+            embedded.append(any(image.IsSame(face) for image in images for face in inside))
+        return shape, embedded
 
     def topology(self, shape) -> CadTopology:
         """How a shape's faces, edges and vertices connect, each numbered in exploration order."""
@@ -433,10 +484,12 @@ class OpenCascade:
         ancestors = IndexedDataMap_TopoDS_Shape_List_TopoDS_Shape_TopTools_ShapeMapHasher()
         TopExp.MapShapesAndAncestors_s(shape, TopAbs_EDGE, TopAbs_FACE, ancestors)
 
-        records, areas = [], []
+        inside = [face for face in _faces(shape) if face.Orientation() == TopAbs_INTERNAL]
+        records, areas, sheet = [], [], []
         for index in range(1, faces.Size() + 1):
             face = TopoDS.Face(faces.FindKey(index))
             records.append(self._describe_face(face))
+            sheet.append(any(face.IsSame(other) for other in inside))
             properties = GProp_GProps()
             BRepGProp.SurfaceProperties_s(face, properties)
             areas.append(properties.Mass())
@@ -459,7 +512,8 @@ class OpenCascade:
             offsets.append(len(members))
             first = TopoDS.Face(faces.FindKey(touching[0] + 1))
             seams.append(bool(BRep_Tool.IsClosed_s(edge, first)))
-            if len(touching) == 2 and not degenerate:
+            # A fold is not defined where a sheet meets a face: the region is on both sides of it.
+            if len(touching) == 2 and not degenerate and not any(sheet[f] for f in touching):
                 second = TopoDS.Face(faces.FindKey(touching[1] + 1))
                 angles.append(self._fold(edge, first, second))
             else:
@@ -479,6 +533,7 @@ class OpenCascade:
             edge_face_indices=np.array(members, dtype=np.int64),
             edge_angle=np.array(angles),
             seam=np.array(seams, dtype=bool),
+            sheet=np.array(sheet, dtype=bool),
         )
 
     def _fold(self, edge, first, second) -> float:

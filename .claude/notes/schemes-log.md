@@ -3511,3 +3511,25 @@ property worth checking on any future change here; a drift that grew with depth 
   established. The same module ratchets the custom-fusion
   count for the `vectors.dot` class (root `CLAUDE.md`). jax 0.11.2, Linux x86_64, 4 cores.
 
+
+## Where the second pass is active (2026-10-26)
+
+`validation/gradient_defect_by_grading.py`, geometry only (no case or solve; library at `bbe8a62`, `main` `9bb0f98` merged
+into `claude/bfs3d-preconditioner-reach-hiwoy9`). `MultipleCorrectionGradient` returns
+`first - gradient_defect . hessian`, so a cell with zero defect takes nothing from the second pass.
+`|defect| / V^(1/3)` per cell, interior median (max) and boundary median:
+
+| mesh | interior | boundary |
+|---|---|---|
+| uniform cubes, 8^3 | 0 (0) | 0.125 |
+| uniform, stretched 10:1, 8^3 | 1.2e-15 (4.7e-14) | 0.27 |
+| graded 1.25 along y, 8^3 | 5.2e-2 (7.5e-2) | 0.15 |
+| bfs3d, 23 040 hexahedra (every cell graded 1.219 wall-normal: `yGrade` 4 over 8 cells) | 5.0e-2 (0.20) | 0.15 |
+| pitzDaily, 12 225 cells | 1.2e-2 (0.12) | 0.10 |
+
+pitzDaily's interior, by the largest volume ratio to a face neighbour: 1.0001–1.05 4.1e-3 (5 560 cells),
+1.05–1.2 2.0e-2 (5 382), above 1.2 5.4e-2 (728). This replaces the rule's former "on orthogonal bfs3d the
+second pass vanishes", which generalized the uniform orthogonal duct control of
+`schemes-435-tetrahedral-gradient-log.md` to a graded mesh; the measured 1.1e-3 of p's norm beyond reach 2
+on bfs3d is the second pass's ring. It pairs with `solve-direct-preconditioners-log.md`, "WHY bfs3d NEEDS
+REACH 3": grading puts the distance-3 pressure couplings there, and stretching makes dropping them costly.

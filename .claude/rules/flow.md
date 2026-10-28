@@ -257,6 +257,14 @@ the pseudo-transient shift strength. `pressure_pin=` / `pressure_pin_value=` →
   through-flow boundary it returns the plug `scales.body_force_velocity(momentum)` (body-force channel);
   a moving-lid cavity correctly returns zero (`test_potential_flow_is_zero_on_a_closed_domain` — do not
   widen the fallback to `characteristic_velocity`, which reports the lid speed).
+  - **`laplace_field` compiles its solve as a function defined per call, under `jax.jit`, so the program
+    is released when the call returns (2026-10-25).** It closes over that call's residual and hierarchy and
+    can never run again. ⚠️ Never hand per-call closures to a module-level `eqx.filter_jit` (the form it
+    replaced, `eqx.filter_jit(newton_step)(residual, …)`): a closure is a static argument, so every call
+    compiles its own program with the closure's arrays built in, and equinox's cache keeps program and
+    closure for the life of the process — 0.19 GiB on bfs3d for the three Laplace solves of a coupled
+    initialization (`.claude/notes/flow-log.md`, "laplace_field's per-call programs"). Pinned by
+    `test_laplace_field_releases_its_compiled_solve_when_it_returns`.
   - ⚠️ `potential_flow` takes **no `gradient_scheme`** and must not be given one back: it uses
     `momentum.gradient_scheme` (condition-free) so the initializer and the solve share a discretization
     (`schemes.md`).

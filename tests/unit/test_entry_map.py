@@ -17,6 +17,7 @@ import pytest
 import scipy.sparse as sp
 from aquaflux.precondition import JacobiSmoothedInverse, hierarchy_inverse
 from aquaflux.precondition.entry_map import EntryMap, EntryMaps, SparsePattern
+from aquaflux.precondition.kronecker_pattern import KroneckerPattern
 from aquaflux.precondition.level_fit import cell_blocks as _cell_blocks
 from aquaflux.precondition.multigrid import (
     _block_tentative,
@@ -25,7 +26,14 @@ from aquaflux.precondition.multigrid import (
     _onto_pattern,
     build_convection_hierarchy,
 )
-from aquaflux.precondition.padded_rows import _padded_operator, _padded_rows, _PaddedRowOperator
+from aquaflux.precondition.padded_rows import (
+    _HeldColumns,
+    _KroneckerColumns,
+    _padded_operator,
+    _padded_rows,
+    _PaddedLayout,
+    _PaddedRowOperator,
+)
 
 EPS = np.finfo(np.float64).eps
 
@@ -139,16 +147,95 @@ def test_a_padded_gather_holds_its_filled_slots_as_a_mask_and_still_names_each_t
 
 
 def test_a_held_padded_layout_packs_exactly_what_a_fresh_packing_does() -> None:
-    """``_padded_operator`` through a held layout equals ``_PaddedRowOperator.from_scipy``, both ways."""
+    """``_padded_operator`` through a held layout equals ``_PaddedRowOperator.from_scipy``, slot for slot."""
     pattern = _random_pattern(25, 25, 0.2, seed=5)
     maps = EntryMaps()
     for seed in (6, 7):
         operand = _revalued(pattern, seed)
         got = _padded_operator(operand, maps=maps, slot="level")
         want = _PaddedRowOperator.from_scipy(operand)
-        for leaf_got, leaf_want in zip(jax.tree.leaves(got), jax.tree.leaves(want), strict=True):
-            assert np.array_equal(np.asarray(leaf_got), np.asarray(leaf_want))
+        for name in ("columns", "row_lengths", "values"):
+            assert np.array_equal(np.asarray(getattr(got, name)), np.asarray(getattr(want, name)))
         assert got.shape == want.shape
+        assert got.transposed is None and got.t_values is None
+
+
+@pytest.mark.parametrize(
+    ("fields", "budget"), [((1, 1), None), ((3, 3), None), ((2, 4), None), ((4, 1), 3)]
+)
+def test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays(fields, budget) -> None:
+    """A cell pattern over full field-pair blocks, held at cell level, gives the held layout's every slot.
+
+    The cell-level form computes each slot's column and the stored entry filling it; equal to the arrays
+    the held form reads off :func:`_padded_rows`, and so the products are equal exactly, not to rounding
+    -- transposed too, once each operator packs its transpose. Square and rectangular field blocks, a
+    cell pattern with an empty row, and padding to a budget wider than the widest row.
+    """
+    rows, columns = fields
+    cells = _random_pattern(9, 7, 0.3, seed=11).tolil()
+    cells[2, :] = 0.0  # an empty cell row
+    cells = SparsePattern(sp.csr_matrix(cells))
+    pattern = KroneckerPattern(cells, rows, columns).dof_pattern()
+    lengths = np.diff(cells.indptr)
+    width = None if budget is None else columns * (int(lengths.max()) + budget)
+
+    cell_level = _PaddedLayout.of(pattern, width, fields=fields)
+    held = _PaddedLayout.of(pattern, width)
+    assert isinstance(cell_level.rows, _KroneckerColumns)
+    assert isinstance(held.rows, _HeldColumns)
+    for name in ("columns", "row_lengths"):
+        assert np.array_equal(
+            np.asarray(getattr(cell_level, name)), np.asarray(getattr(held, name))
+        )
+    assert np.array_equal(np.asarray(cell_level.rows.entries()), np.asarray(held.rows.entries()))
+
+    values = jax.numpy.asarray(np.random.default_rng(4).standard_normal(pattern.nnz))
+    x = jax.numpy.asarray(np.random.default_rng(5).standard_normal(pattern.shape[1]))
+    y = jax.numpy.asarray(np.random.default_rng(6).standard_normal(pattern.shape[0]))
+    packed = (cell_level.packed(values), held.packed(values))
+    assert np.array_equal(np.asarray(packed[0].apply(x)), np.asarray(packed[1].apply(x)))
+    transposed = [jax.linear_transpose(op.with_transpose().apply, x)(y)[0] for op in packed]
+    assert np.array_equal(np.asarray(transposed[0]), np.asarray(transposed[1]))
+    want = sp.csr_matrix((np.asarray(values), pattern.indices, pattern.indptr), shape=pattern.shape)
+    assert np.allclose(np.asarray(packed[0].apply(x)), want @ np.asarray(x), rtol=1e-13, atol=1e-13)
+
+
+def test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field() -> None:
+    """The product of an operator held at cell level gathers ``x`` at ``(n_cells, width)``, not per row.
+
+    Every row field's rows read the same columns, so the product gathers them once and every row field
+    multiplies its own entries against that one gather. Gathering per row instead decodes and gathers
+    ``fields`` identical copies, which a loop then keeps live for its whole length. The values are pinned
+    by the test above; this pins the shape of the work. It reads XLA's gathered form directly: on the CPU
+    the product may route to the fused loop instead, which decodes each slot itself and gathers nothing.
+    """
+    fields = (4, 4)
+    cells = SparsePattern(_random_pattern(9, 9, 0.3, seed=3))
+    pattern = KroneckerPattern(cells, *fields).dof_pattern()
+    layout = _PaddedLayout.of(pattern, None, fields=fields)
+    operator = layout.packed(jax.numpy.ones(pattern.nnz))
+    x = jax.numpy.ones(pattern.shape[1])
+
+    jaxpr = jax.make_jaxpr(lambda x: operator.rows._gathered_product(operator.values, x))(x)
+    gathered = [
+        equation.outvars[0].aval.shape
+        for equation in jaxpr.jaxpr.eqns
+        if equation.primitive.name == "gather" and equation.invars[0].aval.shape == x.shape
+    ]
+    assert gathered == [(cells.shape[0], operator.width)]
+
+
+def test_a_pattern_missing_a_field_pair_is_held_as_arrays_whatever_its_fields() -> None:
+    """Told its fields, a pattern that is not one cell pattern over every field pair keeps the held form."""
+    cells = SparsePattern(_random_pattern(6, 6, 0.4, seed=3))
+    full = KroneckerPattern(cells, 2, 2).dof_pattern()
+    matrix = full.csr(np.ones(full.nnz)).tolil()
+    matrix[0, 6] = 0.0  # one field pair of one cell entry dropped
+    matrix = sp.csr_matrix(matrix)
+    matrix.eliminate_zeros()
+    layout = _PaddedLayout.of(SparsePattern(matrix), fields=(2, 2))
+    assert isinstance(layout.rows, _HeldColumns)
+    assert KroneckerPattern.of_dof(full, 2, 2) is not None
 
 
 def test_an_operation_that_combines_entries_has_no_gathering_map() -> None:

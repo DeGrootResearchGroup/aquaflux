@@ -1617,6 +1617,38 @@ pitzDaily and bfs3d (2026-10-14/15)".
   frozen operators are assembled from. **Detail:** `.claude/notes/turbulence-log.md`, "Segmented
   refresh, the carried shift factor (#156), and refresh under `jax.grad`".
 
+## Fitting a refit's leading block last, with the other probed blocks let go first — REFUTED (2026-10-25)
+
+Built on `claude/refit-release-blocks` (`1e128348`, not merged): `FieldSplitInverse.refactor_blocks` took a
+list it emptied as it used each block, fitted the trailing block and stored the coupling first, and fitted
+the leading block last with no other probed block held. The aim was to free the float64 coupling (80 MiB)
+and trailing block (40 MiB) before the leading fit, which sets a 2-step bfs3d march's peak. Measured on
+bfs3d (`memory_attribution.py`, 2 steps, census at the leading block re-fit, peak-instant sampling, split
+checksums; `main` with #825, one run per arm): live device arrays at the leading re-fit's peak **1.36 GiB at
+base, 1.45 reordered**; run peak 5.82 against 5.87; every split leaf bit-identical. It lost because the
+trailing block's new hierarchy and the new coupling then sit under the leading fit beside the old ones,
+which live until the re-fit ends, and they outweigh the blocks freed. A variant storing only the coupling
+first would save at most ~80 MiB (~1 % of the peak) for a contract change on `refactor_blocks`; not built.
+The live-array excess at this peak is the old and new leading inverse held together (backlog §14f). Detail:
+`.claude/notes/solve-direct-preconditioners-log.md`, "Fitting the leading block last".
+
+
+## Assembling the residual's face sums in blocks of faces to bound the probe's JVP temporary — MARGINAL, NOT BUILT (2026-10-24, the project owner's decision)
+
+On bfs3d at the hybrid start (`validation/face_blocked_gradient_screen.py`; table in
+`.claude/notes/discretization-log.md`, "Face-blocked assembly screen"), a `lax.scan` over face ranges was
+tried on the whole-state batch-8 probe JVP (828.9 MiB temporary). The flux balance alone could not move
+the temporary, because the peak is the multiple-correction gradient's Green–Gauss face loop. Blocking that
+loop moved the peak into the flux operators. Blocking both (2 ranges, each limiter evaluated whole since it
+reduces over a cell's faces) reached 472 MiB, at +9–12 % per tangent over batch 8. Halving the batch reaches
+478 MiB at +19–26 %. More ranges floor the temporary at ~440 MiB and only cost time: compiler copies, the
+whole-mesh boundary closures and the limiter set the floor. It passed the pre-registered bar (b) by 1.2 % of
+memory, and the owner chose not to build it. Building it would need a cell stage split out of
+`AdvectionScheme`/`Limiter` and a declared face-indexed-leaf seam for ~10 % of probe time over batch 4. Not
+measured: the per-field probe programs the re-fit actually runs, and a converged state. Reopen only if
+those show a wider margin.
+
+
 ## Treating bfs3d's march variance with the Krylov tolerance, or production frozen everywhere — REFUTED (2026-10-18)
 
 Both tried against bfs3d's corner `k` collapse (`turbulence.md`; full record in
@@ -1817,6 +1849,55 @@ are probed through the aggregates, a re-fit still holds the fine Jacobian and th
 the re-fits, does not fall by 887 MiB.
 
 **Reopen with** an exact, cheap `|S_i|²`: for instance, forming `S` in row chunks at the fit from transiently
-held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. Or with a Schur
+held `D` and `G`, which on a polyhedral dual is about a fifth of the full Jacobian. The stored split does
+this since 2026-10-25 (`_schur_rows`, from the held `D` and `M G`), on `S`'s row columns, which it keeps;
+without them the row norms need a sort of each chunk's terms, ~4× the whole fit's time on a bfs3d-sized
+lattice (`solve-flow-block.md`, "`S` is never held"). Or with a Schur
 relaxation that needs no row norms and is shown to work: plain damped Jacobi is the one other candidate, and
 `solve-flow-block.md` records that an undamped one diverges.
+
+## The true residual out of the `lax.cond`, to share the step's hoisted decode — REFUTED (2026-10-25)
+
+**What.** The march step holds every padded operator's decoded `s32[n_rows, width]` columns twice at its
+peak: one copy XLA hoisted to the entry computation (the Arnoldi and final `x = M y` applications) and
+one rebuilt inside `_ResidualStopGMRES`'s true-residual `lax.cond` (`solve/linear.py`), where every arm
+peaks. Running that branch as a `while_loop` of at most one trip, out of which XLA could hoist, was
+expected to merge the two (up to −273 MiB on bfs3d's split arm, −118 on the identity arm).
+
+**On what.** bfs3d's first step (anchor station, hybrid start), `validation/step_temporaries.py` arms
+`split-loop` / `identity-loop` against `split` / `identity` in one process, compile only, jax 0.12.0.1.
+
+**Why it lost.** Temp 1022.7 → 1036.5 MiB (split) and 392.9 → 393.5 (identity). The conditional is gone
+from the compiled step, but the one-trip loop rebuilds the decode (272.8 MiB) in its body just as the
+branch did. The arm reproduced the cond's solution and operator applications exactly (self-check in the
+harness). Why XLA hoists the Arnoldi loop's decode and not this loop's is not established; a toy did not
+reproduce the step.
+
+**Detail.** `solve-direct-preconditioners-log.md`, "What the march step's temporary holds". **Reopen with**
+an account of why the Arnoldi decode is hoisted (XLA's pass order or its size rule) that predicts a
+construct which shares it.
+
+## Rescuing a reach-2 pressure probe on bfs3d through the fine-level smoother, or by stacking leading V-cycles — REFUTED (2026-10-26)
+
+bfs3d step 5 inner 2 (and step 6 inner 1), a uniform-reach-3 march's states on `8dd92e7f`, shipped
+float32 split and pivot floor, the fit made at the step's start as the march makes it. A preconditioner
+fitted with the pressure column probed at reach 2 stagnates there (16 cycles, row-scaled 2.48) where
+reach 3 takes 6. **Smoother settings do not rescue it**: pressure smoother weight 0.7 / 0.85,
+`pressure_sweeps` 4, Frobenius off, each at `sweeps` 2 and 4 — best 10 cycles at ~2x the smoothing work,
+and damping the pressure sweep makes it worse. **Swapping any finest-level component from a reach-3 fit
+does not either** (level operator, SIMPLE pieces, Schur diagonal, `C`, the coupling); swapping the
+coarse levels alone does (16 → 6). **Stacking leading V-cycles diverges** for every fit, reach 3
+included (2 V-cycles: 6 → 16 stagnant), so "raise the cycles until the leading inverse is exact" is not
+available. The failure needs the lag between fit and iterate: fitted at the iterate, the reach-2 fit
+matches reach 3. What is left open is in `solve-open-directions.md`, entry 16. Detail:
+`validation/reach_research/option4_diagnostic.md`; log `solve-direct-preconditioners-log.md`, "WHY A
+REACH-2 PRESSURE FIT FAILS IN THE MARCH".
+
+## Ending the step to re-fit a reach-2 probe more often (`refresh_on_cycles` 2 / 3) on bfs3d — LOST (2026-10-26)
+
+Every column probed at reach 2 on bfs3d, with the step ended for a re-fit once an inner solve cost 2 or
+3 restart cycles (the shipped probe keeps pressure at 3 and re-fits at 4): 37–50 steps at 2, 25–51 at 3
+with one of three draws failing on a NaN, against the shipped 17 on every draw (1318–2567 s against
+904–994 s). It was raced as a stand-in for re-fitting inside the inner loop; because it also ends the
+outer step, it does not settle whether a true in-loop re-fit would work (`solve-open-directions.md`,
+entry 16a). Detail: `solve-direct-preconditioners-log.md`, "THE REACH-2 RACE".

@@ -87,9 +87,9 @@ def patch_triangles(
     ------
     ValueError
         If the mesh is not 3D, no patch or a repeated patch is named, a patch is empty or holds
-        interior faces (a baffle has two sides, and which one faces the domain is not a property of
-        the face), or, unless ``allow_folded``, a face is not star-shaped from its vertex mean, so
-        that its fan would overlap itself.
+        interior faces (such a face has the domain on both sides, so which one it faces is not a
+        property of the face), or, unless ``allow_folded``, a face is not star-shaped from its
+        vertex mean, so that its fan would overlap itself.
     """
     if mesh.dim != 3:
         raise ValueError(f"patch_triangles needs a 3D mesh; this one is {mesh.dim}D")

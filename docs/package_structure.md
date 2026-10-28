@@ -47,6 +47,7 @@ cfd/                                  # repo root
 │
 ├── aquaflux/                         # the package
 │   ├── __init__.py                   # enables JAX x64 (process-wide); __version__; public API
+│   ├── allocator.py                  # leaf: GlibcTrim — malloc_trim(0), freed memory given back to the kernel (a materialized session's default before each re-fit); the only ctypes
 │   ├── morton.py                     # leaf: morton_order — points sorted along a Z-order curve (each axis scaled to its own extent), so a run of them is a local patch
 │   ├── vectors.py                    # leaf: per-element vector algebra — dot / norm_squared / scale (buries axis/[:,None] bookkeeping; imported everywhere)
 │   ├── context.py                    # leaf: MeshContext (face_cells/geometry/properties) + FieldContext (mesh + one field's boundary_values/gradient) — below schemes/boundary so both can take it without a cycle
@@ -187,6 +188,8 @@ cfd/                                  # repo root
 │   │   ├── saddle_multigrid.py       #   SimpleSmoothedInverse: a traced multigrid over the flow saddle, smoothed by SIMPLE relaxation
 │   │   ├── simple_fit.py             #   SimplePlan / fit_simple_level: a SIMPLE level's pieces, fitted on the device
 │   │   ├── sparse_jacobian.py        #   materialize_block_jacobian: the sparse Jacobian by compressed graph-coloured probing
+│   │   ├── probe_layout.py           #   BlockLayout / ProbeGather / ProbedBlocks: where a probed Jacobian's entries are stored and which response fills each
+│   │   ├── kronecker_pattern.py      #   KroneckerPattern: a cell pattern over a full block of field pairs, its index arrays at cell level
 │   │   ├── host_preconditioner.py    #   FrozenInverse / RefactorableInverse / ReleasableInverse + HostPreconditioner: the frozen-inverse contract and its jit-callable apply
 │   │   ├── block_inverse.py          #   BlockInverse → SimpleSmoothed / JacobiSmoothed / AirReduction: the block inverses as settings values
 │   │   ├── traced_cycle.py           #   OffersTracedCycle / TracedCycle: a hierarchy held as array leaves, applied inside a traced solve; TracedForm / TracedSingleBlock: what a step applies on device
@@ -197,6 +200,7 @@ cfd/                                  # repo root
 │   │   ├── materialized_session.py   #   MaterializedSession over a MaterializedProblem: one probe, one inverse and one refresh hook per march
 │   │   ├── monolithic_policy.py      #   MonolithicFactorShiftPolicy / TracedFormShiftPolicy: a base shift policy paired with a frozen monolithic inverse, on the host or on device
 │   │   ├── padded_rows.py            #   _PaddedRowOperator: the padded-row (ELLPACK) level operator and its held packing
+│   │   ├── fused_product.py          #   the padded-row product as one fused, threaded Numba loop, an XLA foreign function on the CPU
 │   │   ├── entry_map.py              #   EntryMap / EntryMaps: a refit's fixed-pattern sparse operations as fixed linear maps of the values; DeviceMatrix: a host pattern with device values
 │   │   ├── level_fit.py              #   CoarseningPlan / fit_levels: a frozen coarsening's level values, fitted on the device
 │   │   └── phase_timer.py            #   PhaseTimer: a refresh split into named, consecutive timed phases
@@ -207,7 +211,7 @@ cfd/                                  # repo root
 │   │   ├── mesh_source.py            #   MeshSource.read(directory) -> Mesh: AquafluxMesh (.aqmesh) / OpenFOAMMesh (polyMesh); a case only reads its mesh
 │   │   ├── mesh_file.py              #   MeshSpec (+ Drawing, DrawingRegion, MeshSizes, MeshOutput): a mesh file, a STEP region meshed by CadMesher
 │   │   ├── mesh_run.py               #   make_mesh(path, overwrite, on_stage) -> MeshRecord: what `aquaflux mesh mesh.yaml` does (refuses an occupied output before meshing; records the quality)
-│   │   ├── drawing_view.py           #   view_drawing(...) -> DrawingView: a mesh file's drawing for choosing its patches (`aquaflux drawing`)
+│   │   ├── drawing_view.py           #   view_drawing(DrawingSections, ...) -> DrawingView: a mesh file's drawing for choosing its patches, its pipes and ducts (`aquaflux drawing`)
 │   │   ├── drawing.py                #   CadPlacement: where a STEP drawing sits in the case's frame (shared by the mesh file and the radiation sources)
 │   │   ├── fluid.py                  #   Fluid: density and exactly one of the kinematic / dynamic viscosity
 │   │   ├── axes.py                   #   the axis letters a file names (x, y, z) and the extruded-axis refusal for a three-dimensional mesh
@@ -224,21 +228,27 @@ cfd/                                  # repo root
 │   │   ├── lattices.py               #   BlockLattice in a CartesianFrame / CylindricalFrame: a grid of blocks shaped by editing arrays
 │   │   ├── block_assembly.py         #   BlockMesh.assemble: blocks joined conformally -> hexahedra, tagged boundary quads, Mesh
 │   │   ├── block_topologies.py       #   PipeOGrid / Annulus (lattice configurations) and CubedSphereCap
-│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches
+│   │   ├── cad_mesher.py             #   CadMesher(..., core).mesh(model, region, patches, layered, mapped, pipes, ducts, baffle_patch, on_stage) -> Mesh; FaceSelection -> FacesNear / FacesOn; assign_patches; BAFFLE_PATCH
 │   │   ├── dual.py                   #   PolyhedralDual: the feature-preserving dual, cells at sharp concave edges cut into pieces
-│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, patches, patch_types) -> Mesh
+│   │   ├── elements.py               #   element_mesh(points, tetrahedra, prisms, hexahedra, pyramids, tents, patches, patch_types) -> Mesh
 │   │   ├── near_surface.py           #   NearSurface: refine an octree towards a region's boundary; cube_samples
 │   │   ├── regions.py                #   Region: ClosedSurface (a closed triangle surface, exact over a TriangleGrid) / SampledRegion (an inside test)
 │   │   ├── hex_core.py               #   OctreeCore(size, wall_size, clearance).mesh(region, ...) / .within(points, triangles, ...) -> HexCore: conformal hex core, pyramid caps
-│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
-│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, bands' grids swept along the RimMotion (slide or turn) between their rims
+│   │   ├── refinement.py             #   Refinement: RefinedBox / RefinedSphere / RefinedCylinder / RefinedNear(patches, distance) -> LocatedRefinement (octree criterion + Netgen LocalSizes)
+│   │   ├── layers.py                 #   PrismLayers.extrude(points, faces, layered, replaced, twins) -> LayerExtrusion: prisms over triangles, hexahedra over quadrilaterals, sized for the dual
+│   │   ├── mapped.py                 #   MappedQuads.remesh -> MappedSurface: structured quadrilaterals on chosen bands and four-sided faces, and their grids; bands swept along the RimMotion (slide or turn) between their rims, or marched along the tube
 │   │   ├── rows.py                   #   PipeGrading: a straight pipe's rows grown away from what it joins
 │   │   ├── sections.py               #   TubeWall.march: a tube's cross-sections, each the plane its wall normals lie in, marched along it
-│   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> PipeCoreFill: an O-grid (square core, bow, shell) inside rings of points
-│   │   ├── pipes.py                  #   find_pipes / rim_divisions / pipe_runs / pipe_ends / fill_pipes: pipes (any tube the fluid fills: straight, bent, swept) found from the face's triangulation (rims divided alike), joined end to end into runs, their cores O-gridded inside their layers
+│   │   ├── conduits.py               #   Conduit / ConduitEnds / ConduitFill; conduit_ends / fill_conduits: pipes' and ducts' structured cores taken out of the fill, open ends and junctions
+│   │   ├── pipe_core.py              #   PipeCore.fill(points, rings) -> ConduitFill: an O-grid (square core, bow, shell) inside rings of points
+│   │   ├── pipes.py                  #   find_pipes / rim_divisions / pipe_runs / open_ends: pipes (any tube the fluid fills: straight, bent, swept) found from the face's triangulation (rims divided alike), joined end to end into runs
+│   │   ├── duct_core.py              #   DuctCore.fill(points, rings, width) -> ConduitFill: four-sided cross-sections by transfinite interpolation, joined
+│   │   ├── ducts.py                  #   Duct; find_ducts / duct_divisions / duct_rings: rectangular ducts (chained four-face segments) found from the CAD, rails' points on normal cross-sections
 │   │   ├── polygons.py               #   Polygons (triangles + quadrilaterals); PyramidCaps on quadrilaterals for a tetrahedral fill
+│   │   ├── fans.py                   #   fanned / merged: a surface split where layered faces fold back (a sheet's free edge), so layers fan round it; wedges, corner tetrahedra, tents
+│   │   ├── sheets.py                 #   baffles: opened (a surface opened along its sheets, a side each), SlitSurface (the sheet once, for the fill), parted (tets given their side's points)
 │   │   ├── caps.py                   #   ClearedCaps: each pyramid cap as tall as its room (fold, gap); capped(points, surface, height)
-│   │   ├── netgen_process.py         #   NetgenProcess (triangulate / fill) run in a child; check_closed_surface
+│   │   ├── netgen_process.py         #   NetgenProcess (triangulate, edges divided by count or EdgePoints / fill; each with optional LocalSizes) run in a child; check_closed_surface
 │   │   └── _netgen_child.py          #   the only module importing Netgen, run by path in a fresh interpreter
 │   └── parallel/                     # distributed memory: decomposition and halo exchange (the concern kept out of Mesh)
 │       ├── partitioner.py            #   Partitioner → BlockPartitioner (RCM-block, dependency-free default) / ScotchCLIPartitioner / ScotchPartitioner; consumes cell_adjacency_csr

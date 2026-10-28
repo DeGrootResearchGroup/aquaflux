@@ -82,7 +82,8 @@ class PolyhedralDual:
         Points stacked over boundary points, as layers grown from a wall are: each row a primal
         boundary point, then the points above it in turn. Where a boundary point's dual cell is
         cut at a sharp concave edge, so are those of the points above it, by the same walls --
-        their cells turn the same corner.
+        their cells turn the same corner -- except a point above that lies on a sharp concave edge
+        itself, which is cut by its own.
     """
 
     feature_angle: float
@@ -198,6 +199,13 @@ class TracedDual:
     vertex_cell: np.ndarray
 
 
+#: How near ``-1`` the cosine between two boundary faces' normals must be for them to be folded
+#: right back onto each other. A domain cannot fold convexly by so much (it would have no thickness
+#: there), so such a fold is the free edge of a sheet the domain wraps round. Layers grown on such
+#: faces fan round it (:mod:`~aquaflux.meshing.fans`).
+FOLDED_BACK = 1e-9
+
+
 def boundary_folds(face_geometry: FaceGeometry, pairs: np.ndarray) -> np.ndarray:
     """The signed fold between pairs of boundary faces: positive convex, negative concave.
 
@@ -212,13 +220,16 @@ def boundary_folds(face_geometry: FaceGeometry, pairs: np.ndarray) -> np.ndarray
     -------
     np.ndarray, shape ``(n,)``
         The angle, in radians, between the two faces' outward normals, negative where the second
-        face's centroid lies outside the first's plane (the domain is concave there).
+        face's centroid lies outside the first's plane (the domain is concave there). Two faces
+        folded right back onto each other -- the two sides of a sheet standing in the domain, at
+        its free edge -- fold by ``-pi``: the domain wraps all the way round the edge.
     """
     normal, centroid = np.asarray(face_geometry.normal), np.asarray(face_geometry.centroid)
     first, second = pairs[:, 0], pairs[:, 1]
     cosine = np.clip(np.einsum("ij,ij->i", normal[first], normal[second]), -1.0, 1.0)
     rises = np.einsum("ij,ij->i", centroid[second] - centroid[first], normal[first]) > 0.0
-    return np.where(rises, -1.0, 1.0) * np.arccos(cosine)
+    folded_back = cosine <= FOLDED_BACK - 1.0
+    return np.where(rises | folded_back, -1.0, 1.0) * np.arccos(cosine)
 
 
 def _check_primal(primal: Mesh) -> None:
@@ -237,13 +248,15 @@ def _check_primal(primal: Mesh) -> None:
     patches = primal.face_patches
     label = np.asarray(patches.label)
     interior = np.asarray(primal.face_cells.neighbour) >= 0
-    baffles = [
+    on_interior = [
         name
         for name in patches.names
         if name not in _AUTOMATIC and np.any(interior & (label == patches.id_of(name)))
     ]
-    if baffles:
-        raise ValueError(f"patch(es) {baffles} hold interior faces, which the dual does not keep")
+    if on_interior:
+        raise ValueError(
+            f"patch(es) {on_interior} hold interior faces, which the dual does not keep"
+        )
     used = np.zeros(primal.n_nodes, dtype=bool)
     used[np.asarray(primal.face_nodes.face_node_indices)] = True
     if not used.all():
@@ -577,7 +590,13 @@ class _Pieces:
         if columns is not None and len(columns):
             columns = np.asarray(columns, dtype=np.int64)
             is_cut = set(cut_points.tolist())
-            above = {int(row[0]): row[1:] for row in columns if int(row[0]) in is_cut}
+            # A point of a column that lies on a concave edge itself -- a column sliding along a
+            # sheet's free edge -- is cut by its own walls, not its base's.
+            above = {
+                int(row[0]): [p for p in row[1:].tolist() if p not in is_cut]
+                for row in columns
+                if int(row[0]) in is_cut
+            }
         centroid = np.asarray(geometry.cell.centroid)
         area_vector = np.asarray(geometry.face.normal) * np.asarray(geometry.face.area)[:, None]
         points = np.asarray(primal.node_coords, dtype=np.float64)

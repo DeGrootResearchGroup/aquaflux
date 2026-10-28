@@ -1,0 +1,21 @@
+[configuration] case bfs3d_openfoam, 23040 cells, step 5 (station 4) from state-00004 {'step': array(3), 'residual_norm': array(0.03279565), 'shift': array(0.01851852)}, solving at inner 2 (after inner-00005-01.npz: 2 cycles, alpha 1), beta 0.00617284, split precision float32, file probe JacobianProbeSpec(stencil_reach=3, column_reach=None, gradient_sweeps=None), jax 0.12.0.1
+[probe] column 3 coloured for R2 + S(0.01): 48 colours, 528 probes per fit (kept distance-3 entries per row 2.45)
+[arm] p coloured for R2 + S(0.01), rest at 3: fitted in 107 s, floored rows 32 (u 0, v 0, w 0, p 0, k 32, omega 0)
+  march rtol  cycles   6  Euclidean 2.11e-01  row-scaled 2.969e-01  (29 s)
+              by row field u 4.51e-02 v 1.20e-02 w 8.69e-03 p 1.35e-01 k 2.18e-01 omega 1.41e-01
+              p rows in cells above 10:1 (41% of cells): 7.00e-02 of p's 1.35e-01
+              ladder 0.398 0.597 0.785 0.888 0.968
+  rtol 1e-05  cycles  16  Euclidean 6.25e-05  row-scaled 2.343e-04  (56 s)
+              by row field u 4.91e-05 v 1.08e-05 w 8.55e-06 p 2.06e-04 k 8.43e-05 omega 5.08e-05
+              p rows in cells above 10:1 (41% of cells): 1.32e-04 of p's 2.06e-04
+[probe] column 3 coloured for R2 + S(0.03): 46 colours, 526 probes per fit (kept distance-3 entries per row 2.01)
+[arm] p coloured for R2 + S(0.03), rest at 3: fitted in 65 s, floored rows 32 (u 0, v 0, w 0, p 0, k 32, omega 0)
+  march rtol  cycles   6  Euclidean 2.11e-01  row-scaled 2.945e-01  (26 s)
+              by row field u 4.47e-02 v 1.19e-02 w 8.66e-03 p 1.35e-01 k 2.16e-01 omega 1.40e-01
+              p rows in cells above 10:1 (41% of cells): 6.97e-02 of p's 1.35e-01
+              ladder 0.395 0.597 0.785 0.888 0.968
+  rtol 1e-05  cycles  16  Euclidean 3.28e-05  row-scaled 1.169e-04  (50 s)
+              by row field u 2.37e-05 v 5.41e-06 w 4.54e-06 p 1.03e-04 k 4.23e-05 omega 2.39e-05
+              p rows in cells above 10:1 (41% of cells): 6.97e-05 of p's 1.03e-04
+
+[run_case] the case exited with status 0

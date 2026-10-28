@@ -161,11 +161,7 @@ class ClosedSurface:
         used, local = np.unique(triangles, return_inverse=True)
         check_closed_surface(np.asarray(points, dtype=float)[used], local.reshape(-1, 3))
         vertices = np.asarray(points, dtype=float)[triangles]
-        extent = vertices.reshape(-1, 3).max(axis=0) - vertices.reshape(-1, 3).min(axis=0)
-        counts = np.maximum(np.ceil(extent / spacing), 1).astype(np.int64)
-        while np.prod(counts, dtype=float) > MAX_VOXELS:
-            counts = np.maximum(counts // 2, 1)
-        grid = TriangleGrid.build(vertices, resolution=tuple(int(n) for n in counts))
+        grid = triangle_grid(vertices, spacing)
         held = (np.diff(grid.starts) > 0).reshape(tuple(grid.resolution))
         label, n_labels = ndimage.label(~held)
         within = np.zeros(n_labels + 1, dtype=bool)
@@ -198,10 +194,50 @@ class ClosedSurface:
         """See :meth:`Region.meets`: whether any voxel a box overlaps holds a triangle, so never
         False where the surface passes through the box. A box clear of the grid, which holds the
         surface, overlaps none (the grid's own test would read it against its edge voxels)."""
-        lower, upper = np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
-        high = self.grid.low + self.grid.spacing * self.grid.resolution
-        overlaps = np.all((upper >= self.grid.low) & (lower <= high), axis=1)
-        return overlaps & self.grid.holds_any(lower, upper)
+        return grid_meets(self.grid, lower, upper)
+
+
+def triangle_grid(vertices: np.ndarray, spacing: float) -> TriangleGrid:
+    """Triangles registered in a grid of voxels about ``spacing`` across over their box, coarsened
+    where that would need more than :data:`~aquaflux.triangle_grid.MAX_VOXELS`.
+
+    Parameters
+    ----------
+    vertices : np.ndarray, shape ``(n, 3, 3)``
+        Each triangle's corners.
+    spacing : float
+        The voxels' edge wanted.
+
+    Returns
+    -------
+    TriangleGrid
+    """
+    extent = vertices.reshape(-1, 3).max(axis=0) - vertices.reshape(-1, 3).min(axis=0)
+    counts = np.maximum(np.ceil(extent / spacing), 1).astype(np.int64)
+    while np.prod(counts, dtype=float) > MAX_VOXELS:
+        counts = np.maximum(counts // 2, 1)
+    return TriangleGrid.build(vertices, resolution=tuple(int(n) for n in counts))
+
+
+def grid_meets(grid: TriangleGrid, lower: np.ndarray, upper: np.ndarray) -> np.ndarray:
+    """Whether any voxel each box overlaps holds a triangle of ``grid``, so never False where a
+    triangle passes through the box; a box clear of the grid, which holds every triangle, overlaps
+    none (the grid's own test would read it against its edge voxels).
+
+    Parameters
+    ----------
+    grid : TriangleGrid
+    lower, upper : np.ndarray, shape ``(m, 3)``
+        Opposite corners of each box.
+
+    Returns
+    -------
+    np.ndarray of bool, shape ``(m,)``
+    """
+    lower, upper = np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
+    high = grid.low + grid.spacing * grid.resolution
+    overlaps = np.all((upper >= grid.low) & (lower <= high), axis=1)
+    return overlaps & grid.holds_any(lower, upper)
 
 
 def _parity(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
@@ -214,11 +250,7 @@ def _parity(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
         If the directions disagree at a point, as a ray through a triangle's edge or along its
         plane may.
     """
-    votes = np.array(
-        [[ray_hits(point, direction, vertices).size % 2 == 1 for direction in _RAY_DIRECTIONS]
-         for point in points],
-        dtype=bool,
-    ).reshape(-1, _RAY_DIRECTIONS.shape[0])  # fmt: skip
+    votes = parity_votes(points, vertices)
     torn = np.flatnonzero(np.any(votes != votes[:, :1], axis=1))
     if torn.size:
         raise ValueError(
@@ -226,6 +258,17 @@ def _parity(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
             "about which side of the surface it lies on: one grazes the surface"
         )
     return votes[:, 0]
+
+
+def parity_votes(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    """For each point and each of :data:`_RAY_DIRECTIONS`, whether a ray from it that way crosses
+    the closed surface ``vertices`` (shape ``(n, 3, 3)``) an odd number of times, shape
+    ``(n_points, n_directions)``: inside, by that ray."""
+    return np.array(
+        [[ray_hits(point, direction, vertices).size % 2 == 1 for direction in _RAY_DIRECTIONS]
+         for point in points],
+        dtype=bool,
+    ).reshape(-1, _RAY_DIRECTIONS.shape[0])  # fmt: skip
 
 
 def first_hits(points, faces, origins, directions, reach, skipped) -> np.ndarray:

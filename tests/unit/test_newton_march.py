@@ -1017,6 +1017,18 @@ def test_each_report_carries_the_residual_the_stopping_test_read() -> None:
     assert [r.stopping_ratio for r in plain.reports] == [r.residual_ratio for r in plain.reports]
 
 
+def test_each_report_carries_the_target_the_stopping_test_compared_with() -> None:
+    """``stopping_target`` is ``atol + rtol * |R0|`` with ``|R0|`` in the measure the stop reads.
+
+    Judged in the target's measure (``|R0| = 1`` there) the bar is ``0.001 + 0.05 * 1``; steered and
+    judged in the ten-times-looser measure (``|R0| = 0.1``) it is ``0.001 + 0.05 * 0.1``.
+    """
+    judged = _march_judged(10.0, rtol=0.05, atol=0.001, stopping_step=_judged_on(1.0))
+    assert [r.stopping_target for r in judged.reports] == pytest.approx([0.051] * 2)
+    plain = _march_judged(10.0, rtol=0.05, atol=0.001, max_steps=2)
+    assert [r.stopping_target for r in plain.reports] == pytest.approx([0.006] * 2)
+
+
 def test_a_stopping_step_needs_a_measure_built_from_a_step() -> None:
     """Without ``norm_builder`` there is no measure to build from the stopping step."""
     with pytest.raises(ValueError, match="needs a norm_builder"):

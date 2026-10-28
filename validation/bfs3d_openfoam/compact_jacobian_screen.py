@@ -91,8 +91,8 @@ import scipy.sparse as sp  # noqa: E402
 from aquaflux.initialization import hybrid_initialize  # noqa: E402
 from aquaflux.precondition import SmoothedHierarchy  # noqa: E402
 from aquaflux.precondition.materialized_session import jacobian_matvec  # noqa: E402
-from aquaflux.precondition.sparse_jacobian import ProbedBlocks  # noqa: E402
-from aquaflux.solve import ConstantRelaxation  # noqa: E402
+from aquaflux.precondition.probe_layout import ProbedBlocks  # noqa: E402
+from aquaflux.solve import ConstantRelaxation, with_transposes  # noqa: E402
 from aquaflux.solve.continuation import _shifted_solve  # noqa: E402
 from aquaflux.solve.linear import in_progress_measure  # noqa: E402
 from aquaflux.turbulence import (  # noqa: E402
@@ -598,7 +598,7 @@ def schur_diagonal_estimate(split, assembler, phi, fitted_shift, n, samples):
 
 
 def wiring_simple(split, simple, n) -> None:
-    """The matrix-free divergence, velocity correction and Schur against the stored pieces."""
+    """The matrix-free divergence, velocity correction and Schur against the pieces' products."""
     _, pieces = leading_fine(split)
     divergence, gradient, schur, _ = simple.by_velocity[3 * n]
     rng = np.random.default_rng(3)
@@ -609,7 +609,7 @@ def wiring_simple(split, simple, n) -> None:
     pairs = (
         ("divergence", divergence(u), pieces.divergence.apply(u.astype(dtype))),
         ("velocity correction", dg, pieces.dg.apply(p.astype(dtype))),
-        ("Schur", schur(p, dg), pieces.schur.apply(p.astype(dtype))),
+        ("Schur", schur(p, dg), pieces.schur_apply(p.astype(dtype))),
     )
     for name, exact, stored in pairs:
         exact, stored = np.asarray(exact, np.float64), np.asarray(stored, np.float64)
@@ -681,6 +681,8 @@ def measure_state(
         march_m = traced_apply(
             split, mode, fine, assembler, phi, truncation.fitted_shift, n, **options
         )
+        # The transpose below needs the widened split's operators to hold their transposes.
+        widened = with_transposes(widened)
         wide = traced_apply(
             widened, mode, fine, assembler, phi, truncation.fitted_shift, n, **options
         )

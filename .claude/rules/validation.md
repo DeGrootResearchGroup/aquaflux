@@ -127,6 +127,17 @@ branches.
   makes, not a best call (`krylov_overhead.py`). Through `mallopt` both thresholds are C `int`s: a 4 GiB
   trim threshold wraps to 0. Measurements: `.claude/notes/solve-open-directions.md`, "Inside the step
   program (2026-10-18)".
+- **Resident memory that is not a live array is mostly JAX's compiled-program cache** (2.1 GiB on bfs3d,
+  1.1 on pitzDaily, 2026-10-24): read it as what `jax.clear_caches()` + `gc.collect()` + `malloc_trim(0)`
+  frees (`memory_residue.py`, `RESIDUE_CLEAR`, which also counts executables and compilations at every
+  stage, so a mid-run clear's recompile cost shows); `RESIDUE_FUNCTIONS` counts the programs by jitted
+  function and `RESIDUE_DROP` clears chosen functions' caches only, which is how to test whether a program
+  is needed again (2026-10-25, log, "Which setup programs hold the reclaimable cache"). ⚠️ A function's
+  `_cache_size()` counts cache entries, several times its programs: count executables. `RESIDUE_HLO` ranks the programs by HLO size, where an
+  array compiled in as a constant shows. ⚠️ **A reading taken after a solve returns also counts
+  its session as cyclic garbage** (1.6 GiB of arrays on bfs3d) until a collection; collect first, and
+  count what the harness itself keeps (captured step arguments) apart. Detail:
+  `.claude/notes/solve-direct-preconditioners-log.md`, "What the resident memory holds beyond live arrays".
 - **On macOS a footprint includes freed large blocks unless the run sets `MallocLargeCache=0`**: libmalloc
   keeps them charged to the process, so a stage's "held" memory and a peak read high (up to ~40 % on the
   mesher). Set it when the number is the question (`meshing.md`, memory bullet).
@@ -170,8 +181,7 @@ branches.
   move (2026-10-15, PR #721).
 - ⚠️ **A single bfs3d march is one draw from a wide spread: judge a change on several perturbed draws per
   arm** (failure count and step spread). A last-bit viscosity change (`1 ± 1e-14`) moves it from ~20 to ~80
-  steps or to a failure, so a one-run-per-arm bfs3d A/B -- the 2026-10-14 guard choice, PR #722's reach-2
-  cost, #742's "doubling" -- cannot rank arms closer than that. The cause: wall cells whose shifted `k`
+  steps or to a failure, so a one-run-per-arm bfs3d A/B -- the 2026-10-14 guard choice, #742's "doubling" -- cannot rank arms closer than that. The cause: wall cells whose shifted `k`
   pivot nears zero make the **float32** field split's `A·M` wrong by order one around them, so the
   step's solve stalls at its cap and its direction is decided by rounding. `BFS3D_PIVOT_FLOOR=0.15` /
   `PITZ_PIVOT_FLOOR` (`MaterializedJacobian.pivot_floor`, `solve.md`) removes it: 21 steps both at `1 ± 0`
@@ -187,11 +197,52 @@ branches.
   previous one returned (#761), and a freshly evaluated one differs at round-off, which flipped one such
   step from descent to a tenfold rise. Reproduce such a step from a capture of its `_march_step` arguments,
   or read it as a spread over perturbed residuals.
-- **A per-column probe reach is licensed by the gradient scheme and the split; re-audit it when either
-  changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships `MultipleCorrectionGradient` at a
-  uniform reach of 3 — p, k and ω carry 1e-3–4e-5 of their norm beyond reach 2, and a reach-2 colouring
-  cost it 18→21 steps / 137→216 cycles (PR #722; one run per arm, so a single draw -- see the ensemble bullet above). pitzDaily deliberately probes every column at reach 2
-  inside its reach-3 pattern: its march is unchanged and the probe 40 % cheaper (2026-10-14).
+- **A per-column probe reach is licensed by the gradient scheme, the split AND the mesh's cell aspect
+  ratio; re-audit it when any changes** (`probe_reach_audit.py`, widest pattern 3). bfs3d ships
+  `MultipleCorrectionGradient` with the pressure column at reach 3 and every other at 2 inside a reach-3
+  pattern (`column_reach: [2, 2, 2, 3, 2, 2]`, 2026-10-26; `BFS3D_STRONG_COUPLINGS=column:fraction` tries
+  `StrongCouplings`, unset the file's, `none` off): with the pivot floor, three perturbed draws
+  per arm (`BFS3D_NU_PERTURBATION` 0 / ±1e-14) gave 17 steps on every draw both uniform and pressure-only,
+  and a reach-2 colouring of every column 21–40 (2026-10-25). pitzDaily probes every column at reach 2:
+  its march is unchanged and the probe 40 % cheaper (2026-10-14). The difference is the pressure column
+  on stretched cells (spacing ratio above 10:1: bfs3d 41 %, pitzDaily 1.5 %; `solve-direct-preconditioners.md`,
+  probe colouring).
+- **`reach_folding.py` replays one inner solve of either step case per probe arm** (`REACH_FOLDING_CASE`,
+  `_STEP`, `_INNER` from a march run with `*_INNER_DUMP_ABOVE=1`; arms `3`, `2`, a field, `A/B` build vs
+  re-fit probe, `X*t` scaled fold, `X@drop` / `X@fold`, `p@S<tau>` (p coloured for `R2 + S(tau)`, the rest at 3, the probe built in the harness and
+  installed as the session's `_probe` before it builds); any arm `+component`, e.g. `p@drop+schur`, takes
+  that fitted component from a uniform-reach-3 re-fit on the same coarsening, `COMPONENTS` lists them).
+  `REACH_FOLDING_LEADING=cycles=8,pressure_sweeps=4` edits the leading `SimpleSmoothed` for every arm of
+  the process (`dataclasses.replace`; printed in the banner, and `run_case.sh` records every `REACH_` setting), and each arm prints
+  its leading inverse's `|b − A L b|/|b|` against the block it was fitted to and each operator (how
+  close `L` is to that block's inverse). `REACH_FOLDING_OPERATORS=iterate,start,start-drop:p` solves each
+  arm's preconditioner against the march's operator, the exact one at the fit state, or that with the
+  probe's dropped entries removed; `REACH_FOLDING_FIT_AT=iterate` re-fits at the solve's iterate (no lag).
+  `validation/reach_research/dropped_census.py` counts a short probe's dropped entries per row field.
+  ⚠️ A component swap's readout is the largest per-leaf change: one norm over all leaves is ruled by an
+  inverted near-singular diagonal and read 4e-13 for a real change. ⚠️ At most two arms per process on bfs3d (the
+  fifth died in LLVM's allocator on 15 GiB). ⚠️ It re-fits at the step's start, which matches the march
+  only where the step re-fitted there (every ramp step does); a pitzDaily inner replay ran 4 cycles where
+  its march logged 5, likely its post-setback tolerance. `mesh_anisotropy.py` (moved to `validation/`)
+  gives the per-cell spacing ratio it bins by (`spacing_ratio`, max/min `|d.n|`) and the conductance
+  ratio (`conductance_ratio`, max/min `|S_f|/|d.n|`, roughly its square). ⚠️ Before 2026-10-26
+  `conductance_ratio` returned the spacing ratio (a norm over the per-face scalar area), so a
+  "conductance ratio" quoted from it before then is a spacing ratio.
+- **`pressure_strength_skeleton.py` is the static pressure-strength skeleton** behind `p@S<tau>`: from
+  geometry alone (the bound multiple-correction gradient probed with zero boundary values, face
+  conductances, a geometric `V / a_P`), `S_ij = sum_f |d m_f / d p_j|` and the proxy continuity block,
+  the pattern `R2 + S(tau)`, a checked collision-free colouring of it (`_saturation_colouring` on
+  `P^T P`) and `pattern_probe_plan` (reach-3 stored pattern, one column read through the pattern).
+  Run alone it prints colour counts. ⚠️ A proxy: continuity rows only, boundary closures simplified.
+  **`reach_option1_audit.py`** materializes the station assembler's uniform-reach-3 Jacobian at one
+  `reach_folding.py` state and reads every (row field, p) block row by row against it: the largest
+  dropped distance-3 `|J_ij|` over the row's weakest face coupling, and the fold the pattern probe adds,
+  binned by spacing ratio. One state per process.
+  **`bfs3d_openfoam/pattern_probe_march.py`** runs bfs3d's march with that probe (`BFS3D_PATTERN_TAU`,
+  default 0.01; `BFS3D_PATTERN_OTHERS`, the other columns' reach, default 2), installed in place of the
+  session's own (`MaterializedSession._probe_for`); everything else is `compare.py`'s. ⚠️ Its march log's
+  `probe column reach` line prints the case file's, not the probe in force: the run log's `[probe]` line
+  names it.
 
 ## Machine contention and run records
 

@@ -1,4 +1,4 @@
-"""Pipes in a region: found from its faces, and their cores filled with structured O-grids.
+"""Pipes in a region: found from its faces, their rims divided for a structured O-grid.
 
 A pipe is a face of the region shaped as a tube with the fluid inside it -- a straight length, a
 bend, a coil, a reducer, a pipe swept along any curve -- bounded by two loops that a structured grid
@@ -6,9 +6,10 @@ joins row by row (:class:`~aquaflux.meshing.MappedQuads`), with nothing else ins
 from the face's own triangulation, not from the kind of surface the drawing records: closed across
 its two rims, the face must enclose a volume (so it is a tube, not a flat ring), with its triangles
 facing out of it (the fluid is inside, not round it as round a bore), and no other point of the
-region's surface inside it. Its wall is meshed as that grid and, where the walls carry layers, layered like any other wall;
-the core the layers leave is filled with a :class:`~aquaflux.meshing.PipeCore` O-grid, which meets the
-layers' top quadrilateral for quadrilateral.
+region's surface inside it. Its wall is meshed as that grid and, where the walls carry layers,
+layered like any other wall; the core the layers leave is filled with a
+:class:`~aquaflux.meshing.PipeCore` O-grid, which meets the layers' top quadrilateral for
+quadrilateral.
 
 The O-grid needs both loops of one point count, a multiple of four. The loops' points are the surface
 triangulation's, whose division of the rims follows the mesh size, so :func:`rim_divisions` says how to
@@ -16,14 +17,8 @@ divide each candidate's rim edges for the triangulation to give an O-grid's coun
 
 Pipes that share a rim -- a straight length, a bend, another straight length -- are one **run**
 (:func:`pipe_runs`), filled by one O-grid from end to end, so the cross-section where two of them
-meet is shared rather than left to the fill. At each end of a run:
-
-- **an open end** -- the pipe ends on a flat face without layers, such as an inlet, bounded only by
-  the pipe's own rim -- the O-grid runs to the end, and its last cross-section takes the place of
-  that face's own faces inside the layers' ring, in the same patch;
-- **a junction** -- the pipe opens into the rest of the region -- the O-grid stops ``junction_rows``
-  rows short, where the layers' columns still run straight, and the rows beyond are left to the
-  tetrahedral fill as before: the O-grid's last cross-section is the interface the fill meets.
+meet is shared rather than left to the fill. A run's ends are open or junctions as any conduit's
+(:mod:`~aquaflux.meshing.conduits`).
 """
 
 from __future__ import annotations
@@ -35,9 +30,8 @@ import numpy as np
 
 from aquaflux.io.cad import CadTopology
 
+from .conduits import is_cap, neighbours
 from .mapped import _loops
-from .pipe_core import PipeCore
-from .polygons import Polygons
 from .regions import ClosedSurface
 
 #: How much volume, as a share of its area times its rims' radius, a face closed across its two
@@ -45,33 +39,7 @@ from .regions import ClosedSurface
 #: flat ring none; the sign says which side the fluid is on.
 TUBE_VOLUME = 0.1
 
-__all__ = [
-    "PipeEnds",
-    "fill_pipes",
-    "find_pipes",
-    "open_ends",
-    "pipe_ends",
-    "pipe_runs",
-    "rim_divisions",
-]
-
-
-@dataclasses.dataclass(frozen=True)
-class PipeEnds:
-    """A run of pipes' faces and what each end of its grid meets.
-
-    Attributes
-    ----------
-    faces : tuple of int
-        The run's faces, in order along it.
-    first, last : int
-        For the grid's first and last row: the flat face it ends on (an open end), or ``-1`` where
-        the pipe opens into the rest of the region (a junction).
-    """
-
-    faces: tuple[int, ...]
-    first: int
-    last: int
+__all__ = ["find_pipes", "open_ends", "pipe_runs", "rim_divisions"]
 
 
 def find_pipes(
@@ -112,7 +80,7 @@ def find_pipes(
                 "a multiple of four"
             )
             continue
-        caps = [g for g in _neighbours(topology, f) if _is_cap(topology, g, [f])]
+        caps = [g for g in neighbours(topology, [f]) if is_cap(topology, g, [f])]
         others = np.setdiff1d(np.unique(triangles[~np.isin(face, [f, *caps])]), np.unique(own))
         if np.any(tube.holds(points[others])):
             refused[f] = "something else lies inside it"
@@ -296,27 +264,10 @@ def _shared_by_length(lengths: np.ndarray, count: int, edges: np.ndarray):
     return zip(edges.tolist(), segments.tolist(), strict=True)
 
 
-def _neighbours(topology: CadTopology, f: int) -> list[int]:
-    """The faces sharing an edge with face ``f``."""
-    found = set()
-    for edge in topology.edges_of_face(f):
-        found.update(topology.faces_of_edge(edge).tolist())
-    found.discard(f)
-    return sorted(found)
-
-
-def _is_cap(topology: CadTopology, end: int, pipes) -> bool:
-    """Whether face ``end`` is bounded by nothing but the edges of the faces ``pipes``: a pipe's
-    (or a run of pipes') end."""
-    edges = set()
-    for pipe in pipes:
-        edges.update(topology.edges_of_face(pipe).tolist())
-    return set(topology.edges_of_face(end).tolist()) <= edges
-
-
 def open_ends(topology: CadTopology, pipe: int, layered: np.ndarray) -> list[int]:
     """The faces a pipe opens through, joining nothing: flat ends bounded by its rim alone (an
-    inlet, an outlet) whose faces carry no layers -- the ends :func:`pipe_ends` finds open.
+    inlet, an outlet) whose faces carry no layers -- the ends
+    :func:`~aquaflux.meshing.conduits.conduit_ends` finds open.
 
     Parameters
     ----------
@@ -326,7 +277,7 @@ def open_ends(topology: CadTopology, pipe: int, layered: np.ndarray) -> list[int
         Which of the drawing's faces carry layers.
     """
     return [
-        g for g in _neighbours(topology, pipe) if _is_cap(topology, g, [pipe]) and not layered[g]
+        g for g in neighbours(topology, [pipe]) if is_cap(topology, g, [pipe]) and not layered[g]
     ]
 
 
@@ -398,140 +349,3 @@ def _continued(rim: np.ndarray, grid: np.ndarray) -> np.ndarray:
         grid = grid[:, ::-1]
         at = len(row) - 1 - at
     return np.roll(grid, -at, axis=1)
-
-
-def pipe_ends(topology, grid: np.ndarray, run, faces: Polygons, tag, layered) -> PipeEnds:
-    """What each end of a run of pipes' grid meets: the face it opens through
-    (:func:`open_ends`), if any.
-
-    Parameters
-    ----------
-    topology : CadTopology
-    grid : np.ndarray of int, shape ``(rows + 1, n)``
-        The run's grid, in the surface's numbering.
-    run : sequence of int
-        The run's faces, in order along it.
-    faces : Polygons
-        The surface, in the same numbering.
-    tag : np.ndarray of int
-        Each of its faces' face of the drawing.
-    layered : np.ndarray of bool, shape ``(topology.n_faces,)``
-        Which of the drawing's faces carry layers.
-    """
-    run = tuple(int(f) for f in run)
-    opening = {g for f in (run[0], run[-1]) for g in open_ends(topology, f, layered)}
-    pairs, owner = faces.edges()
-    keys = {
-        tuple(sorted(pair)): k
-        for k, pair in enumerate(pairs.tolist())
-        if int(tag[owner[k]]) not in run
-    }
-    ends = []
-    for rim in (grid[0], grid[-1]):
-        rim_edges = zip(rim, np.roll(rim, -1), strict=True)
-        beside = {int(tag[owner[keys[tuple(sorted((a, b)))]]]) for a, b in rim_edges}
-        end = beside.pop() if len(beside) == 1 else -1
-        ends.append(end if end in opening else -1)
-    return PipeEnds(run, *ends)
-
-
-def fill_pipes(
-    core: PipeCore, points: np.ndarray, fill: Polygons, walls: Polygons, wall_tag: np.ndarray,
-    pipes: list[tuple[PipeEnds, np.ndarray]],
-):  # fmt: skip
-    """The pipes' cores filled with O-grids, taken out of the fill's surface and the boundary.
-
-    Parameters
-    ----------
-    core : PipeCore
-    points : np.ndarray, shape ``(n_points, 3)``
-    fill : Polygons
-        The surface the tetrahedral fill would be given, wound out of the region it fills.
-    walls : Polygons
-        The region's boundary faces, ``wall_tag`` (shape ``(walls.n_faces,)``) the face of the
-        drawing under each.
-    pipes : list of (PipeEnds, np.ndarray)
-        Each run of pipes' ends, and its rings: its grid's rows of points round the core (the layers' top
-        over the grid, or the grid itself without layers), shape ``(rows + 1, n)``.
-
-    Returns
-    -------
-    points : np.ndarray
-        ``points`` with the O-grids' own after them.
-    hexahedra : np.ndarray of int, shape ``(n, 8)``
-    fill, walls : Polygons
-    wall_tag : np.ndarray of int
-    """
-    hexahedra = [np.zeros((0, 8), np.int64)]
-    drop_fill = []
-    walls_kept = np.ones(walls.n_faces, dtype=bool)
-    new_walls, new_tags, discs = [], [], []
-    for ends, rings in pipes:
-        last = rings.shape[0] - 1
-        first_row = 0 if ends.first >= 0 else core.junction_rows
-        last_row = last if ends.last >= 0 else last - core.junction_rows
-        if last_row - first_row < 1:
-            continue
-        cored = rings[first_row : last_row + 1]
-        filled = core.fill(points, cored)
-        points = filled.points
-        hexahedra.append(filled.hexahedra)
-        # The fill no longer meets the rings' quadrilaterals along the cored rows.
-        closed = np.concatenate([cored, cored[:, :1]], axis=1)
-        drop_fill.append(
-            np.stack(
-                [closed[:-1, :-1], closed[:-1, 1:], closed[1:, 1:], closed[1:, :-1]], axis=2
-            ).reshape(-1, 4)
-        )
-        for end, section, inward in ((ends.first, filled.first, +1), (ends.last, filled.last, -1)):
-            ring = cored[0] if inward > 0 else cored[-1]
-            if end >= 0:
-                # An open end: the O-grid's cross-section replaces the end face's own faces.
-                walls_kept &= wall_tag != end
-                new_walls.append(section)
-                new_tags.append(np.full(section.shape[0], end))
-            else:
-                # A junction: the fill meets the cross-section, wound out of the fill, into the pipe.
-                towards = points[cored[1 if inward > 0 else -2]].mean(axis=0) - points[ring].mean(
-                    axis=0
-                )
-                discs.append(_facing(points, section, towards))
-    drop = np.concatenate(drop_fill) if drop_fill else np.zeros((0, 4), np.int64)
-    end_faces = walls.where(~walls_kept)
-    kept_fill = ~_matches(
-        fill, Polygons(end_faces.triangles, np.concatenate([drop, end_faces.quads]))
-    )
-    fill = fill.where(kept_fill)
-    disc = np.concatenate(discs) if discs else np.zeros((0, 4), np.int64)
-    fill = Polygons(fill.triangles, np.concatenate([fill.quads, disc]))
-    kept_triangles, kept_quads = walls.split(walls_kept)
-    tag_triangles, tag_quads = walls.split(wall_tag)
-    new_quads = np.concatenate(new_walls) if new_walls else np.zeros((0, 4), np.int64)
-    new_tag = np.concatenate(new_tags) if new_tags else np.zeros(0, np.int64)
-    walls_out = Polygons(
-        walls.triangles[kept_triangles], np.concatenate([walls.quads[kept_quads], new_quads])
-    )
-    tags_out = np.concatenate([tag_triangles[kept_triangles], tag_quads[kept_quads], new_tag])
-    return points, np.concatenate(hexahedra), fill, walls_out, tags_out
-
-
-def _facing(points, quads, direction) -> np.ndarray:
-    """``quads`` each wound so its right-hand normal points along ``direction``."""
-    corner = points[quads]
-    normal = np.cross(corner[:, 2] - corner[:, 0], corner[:, 3] - corner[:, 1])
-    flip = normal @ direction < 0.0
-    quads = quads.copy()
-    quads[flip] = quads[flip][:, ::-1]
-    return quads
-
-
-def _matches(faces: Polygons, among: Polygons) -> np.ndarray:
-    """Which of ``faces`` have the same corners as one of ``among``, shape ``(faces.n_faces,)``."""
-
-    def keys(polygons):
-        return {tuple(sorted(ring[ring >= 0].tolist())) for ring in polygons.padded()}
-
-    wanted = keys(among)
-    return np.array(
-        [tuple(sorted(ring[ring >= 0].tolist())) in wanted for ring in faces.padded()], dtype=bool
-    )

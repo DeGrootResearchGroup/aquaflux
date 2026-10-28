@@ -127,6 +127,9 @@ class DrawingView:
         For each patch chosen by points, the face each of its points lands on, in order.
     pipes : list of int
         The faces that are pipes.
+    ducts : list of int or None
+        The faces that are rectangular ducts' sides; ``None`` until the mesh file states its
+        feature angle, which decides which edges are a duct's corners.
     selections_error : str or None
         Why the selections are refused, if they are: the drawing is still shown.
     """
@@ -138,6 +141,7 @@ class DrawingView:
     patches: list | None = None
     landed: dict = dataclasses.field(default_factory=dict)
     pipes: list = dataclasses.field(default_factory=list)
+    ducts: list | None = None
     selections_error: str | None = None
 
 
@@ -260,6 +264,7 @@ class SolverCommands:
             reply.get("patches"),
             reply.get("landed", {}),
             reply.get("pipes", []),
+            reply.get("ducts"),
             reply.get("selections_error"),
         )
 

@@ -9,10 +9,12 @@ residual. The coupled solve self-starting from this IC is the slow integration t
 
 from __future__ import annotations
 
+import gc
 import inspect
 
 import aquaflux  # noqa: F401  (enables x64)
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import pytest
 from aquaflux.boundary import BoundaryConditions, Dirichlet, ZeroGradient
@@ -104,6 +106,37 @@ def test_laplace_field_reproduces_a_linear_harmonic() -> None:
     phi, _ = laplace_field(mesh, geometry, boundary, gradient_scheme=CompactGreenGauss())
     expected = geometry.cell.centroid[:, 0] / lx
     assert float(jnp.max(jnp.abs(phi - expected))) < 1e-8
+
+
+def _laplace_solve_programs() -> int:
+    """How many compiled programs of a Laplace solve are loaded, whichever wrapper compiled them."""
+    names = ("jit_solve_laplace", "jit_newton_step")
+    count = 0
+    for executable in jax.devices()[0].client.live_executables():
+        if executable.hlo_modules()[0].name in names:
+            count += 1
+    return count
+
+
+def test_laplace_field_releases_its_compiled_solve_when_it_returns() -> None:
+    # The solve closes over this call's residual and multigrid hierarchy, so its program can never run
+    # again; a setup that solves several Laplace fields would otherwise keep one program per field.
+    mesh = structured_grid_2d(12, 8, lx=3.0, ly=1.0, named_boundaries=True)
+    geometry = mesh.geometry()
+    boundary = BoundaryConditions(
+        {
+            "left": Dirichlet(0.0),
+            "right": Dirichlet(1.0),
+            "bottom": ZeroGradient(),
+            "top": ZeroGradient(),
+        }
+    )
+    gc.collect()
+    before = _laplace_solve_programs()
+    phi, _ = laplace_field(mesh, geometry, boundary, gradient_scheme=CompactGreenGauss())
+    phi.block_until_ready()
+    gc.collect()
+    assert _laplace_solve_programs() == before
 
 
 def test_potential_flow_matches_the_through_flow_without_wall_penetration() -> None:

@@ -129,7 +129,7 @@ def main():
 
     flow, k, omega = hybrid_initialize(coupled)
     state = np.asarray(coupled.state_from_physical(flow, k, omega))
-    print("[state] target-Re cold initial field; uniform reach 3 (the shipped arm)", flush=True)
+    print("[state] target-Re cold initial field; uniform reach 3 (the case probes every column but p at 2 inside this pattern)", flush=True)
 
     plan = ColumnProbePlan.uniform(block_stencil_colouring(owner, nb, n, REACH), n_fields)
     structure = block_stencil_gather_map(plan)

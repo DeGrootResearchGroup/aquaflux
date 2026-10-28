@@ -222,21 +222,6 @@ def _surface_alone(core):
     return core.points[used], np.searchsorted(used, core.surface)
 
 
-def _core_beside_a_refinement():
-    """Cubes of 0.2 halved twice near a small ball, kept 0.1 clear of a large one: coarse cubes
-    beside finer ones on the core's boundary make transition cubes there, whose boundary faces
-    are fans of triangles. A core graded towards its own boundary never has them (below), so the
-    tree is built here by hand."""
-    region, inner = SampledRegion(_centred_ball(0.9)), SampledRegion(_centred_ball(0.3))
-    tree = Octree.lattice([0, 0, 0], [2, 2, 2], 0.2).refined_by([NearSurface(inner, 0.05)])
-    tree = tree.balanced()
-    grown = tree.lower - 0.1
-    clear = ~region.meets(grown, grown + tree.size[:, None] + 0.2)
-    candidates = np.flatnonzero(clear & region.inside(tree.lower + 0.5 * tree.size[:, None]))
-    faces = _CubeFaces(tree, candidates)
-    return OctreeCore._assembled(tree, faces, _without_pinches(faces), 0.25)
-
-
 def _off_the_lattice(points):
     # A box whose wall x = 0.09 falls between the cubes' planes, 0.01 short of the clearance.
     return np.all((points >= [0.09, 0.0, 0.0]) & (points <= [2.0, 2.0, 2.0]), axis=1)

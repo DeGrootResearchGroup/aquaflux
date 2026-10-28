@@ -74,21 +74,30 @@ def test_the_stopping_test_is_stated_once_rather_than_on_every_row() -> None:
 
     The residual alone cannot say how close the solve is to stopping -- the test is
     ``|R| <= atol + rtol*|R0|`` -- so the reference has to be somewhere; it just does not belong in
-    every line.
+    every line. The target is the one the march's report says it tested, not a copy handed to the log.
     """
-    logger, buffer = _log(rtol=1e-3)
-    logger.on_step(_report(residual_norm=2.0e-2, residual_ratio=4.0e-2))
-    logger.on_step(_report(residual_norm=1.0e-2, residual_ratio=2.0e-2))
+    logger, buffer = _log()
+    logger.on_step(_report(residual_norm=2.0e-2, residual_ratio=4.0e-2, stopping_target=5.0e-4))
+    logger.on_step(_report(residual_norm=1.0e-2, residual_ratio=2.0e-2, stopping_target=5.0e-4))
 
     banners = [line for line in buffer.getvalue().splitlines() if line.startswith("reference")]
     assert len(banners) == 1  # both steps share one |R0|, so it is announced once
     assert "|R0| = 5.0000e-01" in banners[0]  # 2.0e-2 / 4.0e-2
-    assert "stopping at |R| <= 5.000e-04" in banners[0]  # rtol * |R0|
+    assert "stopping at |R| <= 5.000e-04" in banners[0]  # the report's own target
+
+
+def test_a_report_without_a_target_announces_the_reference_alone() -> None:
+    """A report built without a target (``nan``) gets no ``stopping at`` clause rather than ``nan``."""
+    logger, buffer = _log()
+    logger.on_step(_report(residual_norm=2.0e-2, residual_ratio=4.0e-2))
+
+    banners = [line for line in buffer.getvalue().splitlines() if line.startswith("reference")]
+    assert banners == ["reference |R0| = 5.0000e-01"]
 
 
 def test_a_new_reference_is_announced_again() -> None:
     """A continuation rung re-bases ``|R0|``; a stale banner misstates the bar for every row under it."""
-    logger, buffer = _log(rtol=1e-3)
+    logger, buffer = _log()
     logger.on_step(_report(residual_norm=2.0e-2, residual_ratio=4.0e-2))
     logger.on_step(_report(residual_norm=1.0e-2, residual_ratio=1.0e-1))
 
@@ -103,7 +112,7 @@ def test_a_diverged_step_reports_no_reference_rather_than_nan() -> None:
     Every comparison against NaN is False, so a ``ratio <= 0`` guard would let a diverged step through
     into the division -- and the diverged step is exactly the line a reader is studying.
     """
-    logger, buffer = _log(rtol=1e-3)
+    logger, buffer = _log()
     logger.on_step(_report(residual_norm=float("nan"), residual_ratio=float("nan")))
 
     assert "reference" not in buffer.getvalue()  # not faked
@@ -710,17 +719,25 @@ def test_once_a_march_judges_its_stop_in_another_measure_the_log_reports_that_me
     A march judged in a stopping measure once arrived reports the residual it was steered in as
     ``residual_norm``; printed as ``R`` it would be a number the stop never compared with its tolerance.
     """
-    logger, buffer = _log(rtol=1e-3, atol=0.0)
+    logger, buffer = _log()
     # Before arrival the two measures are one; after it the stop reads 3x the steered residual and has
-    # its own starting residual (3.0e-2 / 3.0e-2 = 1.0).
+    # its own starting residual (3.0e-2 / 3.0e-2 = 1.0), and so its own target (rtol 1e-3).
     logger.on_step(
         _report(
-            residual_norm=2.0e-2, residual_ratio=4.0e-2, stopping_norm=2.0e-2, stopping_ratio=4.0e-2
+            residual_norm=2.0e-2,
+            residual_ratio=4.0e-2,
+            stopping_norm=2.0e-2,
+            stopping_ratio=4.0e-2,
+            stopping_target=5.0e-4,
         )
     )
     logger.on_step(
         _report(
-            residual_norm=1.0e-2, residual_ratio=2.0e-2, stopping_norm=3.0e-2, stopping_ratio=3.0e-2
+            residual_norm=1.0e-2,
+            residual_ratio=2.0e-2,
+            stopping_norm=3.0e-2,
+            stopping_ratio=3.0e-2,
+            stopping_target=1.0e-3,
         )
     )
 
@@ -732,3 +749,56 @@ def test_once_a_march_judges_its_stop_in_another_measure_the_log_reports_that_me
     assert "stopping at |R| <= 1.000e-03" in banners[1]
     steered = [line for line in _asides(buffer) if line.startswith("steered R")]
     assert steered == ["steered R 1.000e-02; R is the stopping measure"]
+
+
+def test_a_station_rides_beneath_the_step_that_entered_it_and_no_other() -> None:
+    """A homotopy's station heads the asides of the step that entered it, and is not repeated after.
+
+    Without it a ramp's steps read as one march, with nothing saying which problem each row solved.
+    """
+    logger, buffer = _log()
+    logger.on_station("station 1/2: viscosity x100")
+    logger.on_step(_report(arrived=False))
+    logger.on_step(_report(arrived=False))  # held at the same station: nothing new to say
+    logger.on_station("station 2/2: viscosity x10")
+    logger.on_step(_report(arrived=False))
+
+    asides = _asides(buffer)
+    stations = [line for line in asides if line.startswith("station")]
+    assert stations == ["station 1/2: viscosity x100", "station 2/2: viscosity x10"]
+    # Each heads its own step's block, ahead of that step's `cum`, which closes every block.
+    kinds = [line.split()[0] for line in asides]
+    assert kinds == ["station", "cum", "cum", "station", "cum"]
+
+
+def test_the_step_that_first_runs_the_target_is_announced_with_its_station() -> None:
+    """Arrival is the first step whose residual may stop the march, so it gets a line of its own.
+
+    The target station's description goes into that line rather than into an aside, and the line comes
+    ahead of the re-based reference it explains.
+    """
+    logger, buffer = _log()
+    logger.on_station("station 1/1: viscosity x10")
+    logger.on_step(_report(arrived=False, residual_norm=2.0e-2, residual_ratio=4.0e-2))
+    logger.on_station("the case's own viscosity")
+    logger.on_step(_report(arrived=True, residual_norm=1.0e-2, residual_ratio=1.0e-1))
+    logger.on_step(_report(arrived=True, residual_norm=1.0e-2, residual_ratio=1.0e-1))
+
+    lines = buffer.getvalue().splitlines()
+    arrivals = [line for line in lines if line.startswith("arrived")]
+    assert arrivals == [
+        "arrived at the target (the case's own viscosity) on step 2: the march may stop from here"
+    ]
+    assert lines.index(arrivals[0]) < max(
+        i for i, line in enumerate(lines) if line.startswith("reference")
+    )
+    assert not [line for line in _asides(buffer) if "own viscosity" in line]
+
+
+def test_a_march_without_a_homotopy_announces_no_arrival() -> None:
+    """Every step of a plain march runs the target (``arrived`` throughout), so there is no arrival."""
+    logger, buffer = _log()
+    logger.on_step(_report())
+    logger.on_step(_report())
+
+    assert "arrived" not in buffer.getvalue()

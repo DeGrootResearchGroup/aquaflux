@@ -37,20 +37,16 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.sparse as sp
 
-from .entry_map import DeviceMatrix, SparsePattern
 from .frozen_operator import require_valid_graph
-
-
-def _index_dtype(bound: int) -> type[np.signedinteger]:
-    """The narrowest signed integer type holding every value up to ``bound``.
-
-    The arrays this module builds carry one entry per Jacobian nonzero — tens of millions on a
-    three-dimensional coupled mesh — and several are live at once while the de-compression is assembled,
-    so the width of an index is the difference between a peak of a few hundred megabytes and several
-    gigabytes. Every such array here has a bound known before it is formed, which is what lets the type
-    be chosen up front and the wide form never materialize.
-    """
-    return np.int32 if bound < np.iinfo(np.int32).max else np.int64
+from .kronecker_pattern import KroneckerPattern
+from .probe_layout import (
+    BlockLayout,
+    ProbedBlocks,
+    ProbeGather,
+    _CellEntries,
+    _DofEntries,
+    _index_dtype,
+)
 
 
 class BlockColouring:
@@ -130,6 +126,11 @@ class ColumnProbePlan:
         Total directional derivatives one materialize costs.
     reach : tuple of int
         The stencil reach each column field is probed at.
+    pattern_reach : int
+        The stencil reach the assembly pattern covers, at least the widest of ``reach``.
+    edges : tuple of np.ndarray or None
+        The interior-face cell graph ``(owner, neighbour)`` the plan was coloured on, shape
+        ``(n_edges,)`` each, when its builder had it (:func:`column_probe_plan` does), else ``None``.
     in_reach : np.ndarray
         Per column field and pattern entry, whether that entry lies within the column's own reach;
         shape ``(n_fields, n_blocks)``. Entries outside it are **forced to zero** rather than read from
@@ -164,6 +165,8 @@ class ColumnProbePlan:
         reach: tuple[int, ...],
         in_reach: np.ndarray | None = None,
         active_rows: np.ndarray | None = None,
+        pattern_reach: int | None = None,
+        edges: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> None:
         self.n_cells = n_cells
         self.n_fields = n_fields
@@ -172,6 +175,8 @@ class ColumnProbePlan:
         self.colour = colour
         self.n_colours = n_colours
         self.reach = reach
+        self.pattern_reach = max(reach) if pattern_reach is None else int(pattern_reach)
+        self.edges = edges
         self.in_reach = (
             np.ones((n_fields, pattern_rows.shape[0]), dtype=bool) if in_reach is None else in_reach
         )
@@ -207,6 +212,74 @@ class ColumnProbePlan:
             (colouring.n_colours,) * n_fields,
             (colouring.reach,) * n_fields,
             active_rows=active_rows,
+            pattern_reach=colouring.reach,
+        )
+
+    def with_column_pattern(
+        self, field: int, rows: np.ndarray, cols: np.ndarray
+    ) -> ColumnProbePlan:
+        """This plan with column field ``field`` probed for the cell pattern ``(rows, cols)`` alone.
+
+        The column is given a colouring of its own, collision-free for that pattern
+        (:func:`_pattern_colouring`), and reads only the stored entries the pattern holds; the rest of
+        its stored entries are written as the explicit zeros a short-probed column's out-of-reach
+        entries are. The stored pattern, every other column and the active blocks are unchanged, so a
+        consumer of the materialized matrix sees the same sparsity. It is how a column is probed at a
+        short reach plus a chosen few couplings beyond it, which no single reach describes.
+
+        The column is recovered exactly only where its couplings lie inside the pattern; a coupling
+        outside it is folded onto a pattern entry sharing its colour, as for any short probe.
+
+        Parameters
+        ----------
+        field : int
+            The column field, counted over the per-cell fields.
+        rows, cols : np.ndarray
+            The pattern's cell coordinates ``(i, j)`` (row cell ``i`` couples to column cell ``j``),
+            shape ``(n_entries,)`` each; every pair must be in the stored pattern. Repeats are allowed.
+
+        Returns
+        -------
+        ColumnProbePlan
+            The plan.
+
+        Raises
+        ------
+        ValueError
+            If ``field`` is out of range or a pair lies outside the stored pattern.
+        """
+        if not 0 <= field < self.n_fields:
+            raise ValueError(f"column field {field} is not one of this plan's {self.n_fields}.")
+        n = self.n_cells
+        stored = self.pattern_rows.astype(np.int64) * n + self.pattern_cols
+        wanted = np.unique(np.asarray(rows, dtype=np.int64) * n + np.asarray(cols, dtype=np.int64))
+        in_stored = _members(wanted, np.sort(stored))
+        if not in_stored.all():
+            first = int(wanted[~in_stored][0])
+            raise ValueError(
+                f"the pattern couples cell {first // n} to cell {first % n}, which the stored pattern "
+                "does not hold; a column cannot be probed beyond the pattern it is assembled into."
+            )
+        pattern = sp.csr_matrix((np.ones(wanted.size), (wanted // n, wanted % n)), shape=(n, n))
+        colour, count = _pattern_colouring(pattern, n)
+        colours = np.array(self.colour, copy=True)
+        colours[field] = colour
+        n_colours = list(self.n_colours)
+        n_colours[field] = count
+        in_reach = np.array(self.in_reach, copy=True)
+        in_reach[field] = _members(stored, wanted)
+        return ColumnProbePlan(
+            n,
+            self.n_fields,
+            self.pattern_rows,
+            self.pattern_cols,
+            colours,
+            tuple(n_colours),
+            self.reach,
+            in_reach,
+            active_rows=self.active_rows,
+            pattern_reach=self.pattern_reach,
+            edges=self.edges,
         )
 
     def probe(self, index: int) -> tuple[int, int]:
@@ -377,10 +450,8 @@ def column_probe_plan(
     in_reach = np.empty((len(reaches), flat_pattern.size), dtype=bool)
     for field, r in enumerate(reaches):
         inner = by_reach[r]
-        flat_inner = np.sort(inner.pattern_rows.astype(np.int64) * n + inner.pattern_cols)
-        where = np.searchsorted(flat_inner, flat_pattern)
-        in_reach[field] = (where < flat_inner.size) & (
-            flat_inner[np.minimum(where, flat_inner.size - 1)] == flat_pattern
+        in_reach[field] = _members(
+            flat_pattern, np.sort(inner.pattern_rows.astype(np.int64) * n + inner.pattern_cols)
         )
     return ColumnProbePlan(
         n,
@@ -392,7 +463,17 @@ def column_probe_plan(
         reaches,
         in_reach,
         active_rows=active_rows,
+        pattern_reach=pattern_reach,
+        edges=(np.asarray(owner), np.asarray(nb)),
     )
+
+
+def _members(values: np.ndarray, sorted_set: np.ndarray) -> np.ndarray:
+    """Whether each of ``values`` is in ``sorted_set`` (ascending), as a boolean array like ``values``."""
+    if sorted_set.size == 0:
+        return np.zeros(values.shape, dtype=bool)
+    where = np.searchsorted(sorted_set, values)
+    return sorted_set[np.minimum(where, sorted_set.size - 1)] == values
 
 
 def block_stencil_colouring(
@@ -434,8 +515,16 @@ def block_stencil_colouring(
     require_valid_graph(n, owner, nb, "block_stencil_colouring")
     if reach < 1:
         raise ValueError(f"block_stencil_colouring: reach must be >= 1, got {reach}.")
-    owner, nb = np.asarray(owner), np.asarray(nb)
+    pattern = _stencil_pattern(owner, nb, n, reach)
+    colour, n_colours = _pattern_colouring(pattern, n)
 
+    coo = pattern.tocoo()
+    return BlockColouring(n, reach, colour, n_colours, coo.row, coo.col)
+
+
+def _stencil_pattern(owner: np.ndarray, nb: np.ndarray, n: int, reach: int) -> sp.csr_matrix:
+    """Every cell pair within graph distance ``reach`` on the interior-face graph, as a 0/1 CSR matrix."""
+    owner, nb = np.asarray(owner), np.asarray(nb)
     ones = np.ones(2 * owner.size + n)
     adjacency = sp.coo_matrix(
         (
@@ -452,14 +541,20 @@ def block_stencil_colouring(
     for _ in range(reach - 1):
         pattern = pattern @ adjacency
         pattern.data[:] = 1.0
+    return pattern
+
+
+def _pattern_colouring(pattern: sp.csr_matrix, n: int) -> tuple[np.ndarray, int]:
+    """A collision-free probe colouring of a 0/1 cell pattern (row cells couple to column cells).
+
+    Two column cells may share a colour only if no row cell couples to both, so the conflict graph is
+    ``pattern^T pattern``, coloured by saturation degree (:func:`_saturation_colouring`). Returns the
+    per-cell colour, shape ``(n,)``, and the number of colours.
+    """
     conflict = (pattern.T @ pattern).tocsr()
     conflict.data[:] = 1.0
-
     colour = _saturation_colouring(conflict, n)
-    n_colours = int(colour.max()) + 1 if n else 0
-
-    coo = pattern.tocoo()
-    return BlockColouring(n, reach, colour, n_colours, coo.row, coo.col)
+    return colour, int(colour.max()) + 1 if n else 0
 
 
 _WORD = 64
@@ -637,6 +732,47 @@ def block_stencil_gather_map(
     ProbeGather
         The fixed CSR structure (or block layout) and the de-compression, chunk by chunk.
     """
+    leading = plan.n_fields if leading_fields is None else leading_fields
+    stored = _stored_blocks(plan.active_rows, leading)
+    if stored is None:
+        return _dof_probe_gather(plan, leading)
+    return _cell_probe_gather(plan, leading, stored)
+
+
+def _stored_blocks(active: np.ndarray, leading: int) -> tuple[bool, bool, bool, bool] | None:
+    """Which of a two-group partition's four blocks are stored, when ``active`` keeps or drops each whole.
+
+    ``None`` when some block keeps part of its field pairs: its pattern is then no single cell pattern
+    over a full block of field pairs, and the probe is laid out entry by entry instead.
+    """
+    groups = (slice(0, leading), slice(leading, active.shape[0]))
+    stored = []
+    for rows, columns in ((g, h) for g in groups for h in groups):
+        block = active[rows, columns]
+        if block.size and not (block.all() or not block.any()):
+            return None
+        stored.append(bool(block.size) and bool(block.all()))
+    return tuple(stored)
+
+
+def _cell_probe_gather(
+    plan: ColumnProbePlan, leading: int, stored: tuple[bool, bool, bool, bool]
+) -> ProbeGather:
+    """The structure of :func:`block_stencil_gather_map` described at cell level (see :class:`_CellEntries`)."""
+    n = plan.n_cells
+    pattern, order = KroneckerPattern.of_coordinates(
+        plan.pattern_rows, plan.pattern_cols, (n, n), (plan.n_fields, plan.n_fields)
+    )
+    layout = BlockLayout.of_cells(pattern.cells, plan.n_fields, leading, stored)
+    entries = _CellEntries(plan, pattern.cells, plan.in_reach[:, order], layout, stored)
+    return ProbeGather(entries, plan.n_fields * n, layout)
+
+
+def _dof_probe_gather(plan: ColumnProbePlan, leading: int) -> ProbeGather:
+    """The structure of :func:`block_stencil_gather_map` described entry by entry (see :class:`_DofEntries`).
+
+    Every pattern takes this path when its field pairs are not kept or dropped a whole block at a time.
+    """
     n = plan.n_cells
     n_fields = plan.n_fields
     nf = n_fields * n
@@ -698,9 +834,8 @@ def block_stencil_gather_map(
         raise ValueError(
             "block_stencil_gather_map: duplicate (row, col) in the pattern (bad colouring)."
         )
-    leading = n_fields if leading_fields is None else leading_fields
     layout, order = BlockLayout.of(csr, leading * n)
-    return ProbeGather(csr.data[order], zero_slot, nf, layout)
+    return ProbeGather(_DofEntries(csr.data[order], zero_slot, nf), nf, layout)
 
 
 @functools.partial(jax.jit, static_argnames=("rows", "whole_state", "dtype"))
@@ -730,285 +865,6 @@ def _indicator_seeds(
     in_field = jnp.arange(n_fields)[None, :, None] == field[:, None, None]
     seeds = in_field & (colour[None] == wanted[:, None, None])
     return seeds.reshape(rows, n_fields * n_cells).astype(dtype)
-
-
-class BlockLayout:
-    """Where a two-group partition's four blocks lie in one block-major value array.
-
-    A partition whose leading group is every field is the one-group case: its leading block is the whole
-    matrix in CSR order (:attr:`whole`) and the other three are empty.
-
-    The stored entries of a field-major matrix are ordered leading-by-leading, leading-by-trailing,
-    trailing-by-leading, trailing-by-trailing, each block's entries in that block's own compressed-sparse-
-    row (CSR) order, so each block is a contiguous slice of the values. The structure of each block is
-    held here, on the host, as the pattern every inverse fitted to that block checks against; only the
-    values change from one materialize to the next, and those stay on the device.
-
-    Attributes
-    ----------
-    leading_dofs : int
-        The degrees of freedom of the leading group (the partition point).
-    n_dofs : int
-        The degrees of freedom of the whole matrix.
-    """
-
-    def __init__(
-        self,
-        leading_dofs: int,
-        n_dofs: int,
-        blocks: tuple[tuple[int, int, SparsePattern], ...],
-        diagonal: jnp.ndarray,
-    ) -> None:
-        self.leading_dofs = leading_dofs
-        self.n_dofs = n_dofs
-        # Per block: (start, stop) of its slice of the values, and its pattern.
-        self._blocks = blocks
-        # Position of each degree of freedom's diagonal entry in the values, shape (n_dofs,), on device.
-        self._diagonal = diagonal
-
-    @classmethod
-    def of(cls, csr: sp.csr_matrix, leading_dofs: int) -> tuple[BlockLayout, np.ndarray]:
-        """The layout of ``csr``'s stored entries, and the order taking CSR positions to block-major ones.
-
-        Raises
-        ------
-        ValueError
-            If a diagonal entry is not stored: the shift is added in place on the stored diagonal, so a
-            missing one would have nowhere to go.
-        """
-        n_dofs = csr.shape[0]
-        index_dtype = _index_dtype(max(n_dofs, csr.nnz))
-        rows = np.repeat(np.arange(n_dofs, dtype=index_dtype), np.diff(csr.indptr))
-        cols = csr.indices
-        key = (rows >= leading_dofs).astype(np.int8) * 2 + (cols >= leading_dofs)
-        # A stable order keeps each block's entries in the CSR order they had in the whole matrix.
-        order = np.argsort(key, kind="stable")
-        bounds = np.concatenate([[0], np.cumsum(np.bincount(key, minlength=4))])
-        offsets = (0, leading_dofs)
-        sizes = (leading_dofs, n_dofs - leading_dofs)
-        blocks = []
-        diagonal = np.full(n_dofs, -1, dtype=index_dtype)
-        for block in range(4):
-            start, stop = int(bounds[block]), int(bounds[block + 1])
-            taken = order[start:stop]
-            row0, col0 = offsets[block // 2], offsets[block % 2]
-            block_rows = rows[taken] - index_dtype(row0)
-            indptr = np.concatenate(
-                [[0], np.cumsum(np.bincount(block_rows, minlength=sizes[block // 2]))]
-            ).astype(index_dtype)
-            indices = (cols[taken] - index_dtype(col0)).astype(index_dtype, copy=False)
-            shape = (sizes[block // 2], sizes[block % 2])
-            blocks.append((start, stop, SparsePattern.of_arrays(shape, indptr, indices)))
-            if block in (0, 3):
-                on_diagonal = np.flatnonzero(block_rows == indices)
-                diagonal[block_rows[on_diagonal] + row0] = start + on_diagonal
-        if (diagonal < 0).any():
-            raise ValueError(
-                "BlockLayout: the pattern stores no diagonal entry for some degree of freedom, so the "
-                "shift has nowhere to be added."
-            )
-        return cls(leading_dofs, n_dofs, tuple(blocks), jnp.asarray(diagonal)), order
-
-    @property
-    def whole(self) -> SparsePattern | None:
-        """The whole matrix's pattern, when this layout keeps it as one group; ``None`` when it splits it."""
-        return self._blocks[0][2] if self.leading_dofs == self.n_dofs else None
-
-    def blocks(self, data: jnp.ndarray) -> tuple[DeviceMatrix, ...]:
-        """The four blocks over ``data`` (shape ``(nnz,)``), each its slice of the values, on the device.
-
-        Returns
-        -------
-        tuple of DeviceMatrix
-            ``(A_ll, A_lt, A_tl, A_tt)``, as :meth:`~aquaflux.precondition.FieldGroups.blocks` orders them.
-        """
-        return tuple(
-            DeviceMatrix(pattern, data[start:stop]) for start, stop, pattern in self._blocks
-        )
-
-    def diagonal(self, data: jnp.ndarray) -> jnp.ndarray:
-        """The stored diagonal of ``data`` in degree-of-freedom order, shape ``(n_dofs,)``."""
-        return _take(data, self._diagonal)
-
-    def add_to_diagonal(self, data: jnp.ndarray, shift_diagonal: jnp.ndarray) -> jnp.ndarray:
-        """``data`` with ``shift_diagonal`` (shape ``(n_dofs,)``) added to its stored diagonal.
-
-        ``data`` is consumed: its buffer is reused for the result, so the shift costs no second copy.
-        """
-        return _add_at(data, self._diagonal, jnp.asarray(shift_diagonal, dtype=jnp.float64))
-
-
-@jax.jit
-def _take(values: jnp.ndarray, positions: jnp.ndarray) -> jnp.ndarray:
-    """``values[positions]``, compiled (run eagerly, a gather is a dispatch of its own)."""
-    return values[positions]
-
-
-@functools.partial(jax.jit, donate_argnums=0)
-def _add_at(values: jnp.ndarray, positions: jnp.ndarray, amounts: jnp.ndarray) -> jnp.ndarray:
-    """``values`` with ``amounts`` added at ``positions`` (distinct), reusing ``values``'s buffer."""
-    return values.at[positions].add(amounts, unique_indices=True)
-
-
-class ProbeGather:
-    """The fixed CSR structure of a materialize, and how to fill it from the probe responses.
-
-    Both halves are fixed by the mesh graph, so they are built once and reused by every refresh: which
-    probe supplies which Jacobian entry does not change, only the response *values* do.
-
-    **The de-compression runs one probe-chunk at a time, which is what keeps the peak bounded.** The
-    obvious form — hold every response, then gather the whole matrix in one indexing expression — needs
-    ``n_probes x n_fields x n_cells`` floats live at once, several hundred megabytes on a
-    three-dimensional coupled case, and a naive sentinel for the out-of-reach entries doubles that again
-    by copying the lot. Sorting the entries by the probe that feeds them instead lets each chunk's
-    responses be consumed as soon as they are computed and then dropped, so the only large array left is
-    the matrix being built.
-
-    **The de-compression runs on the device**, where the probes are computed: the entry-to-response
-    order is held there, and each chunk is placed by one compiled program, so no response crosses to the
-    host. :func:`materialize_blocks` keeps them there (:class:`ProbedBlocks`); the public
-    :func:`materialize_block_jacobian` reads them back once, at its end, to return a host matrix.
-
-    Entries lying outside their column's reach have no source probe at all (see
-    :class:`ColumnProbePlan`); they simply never appear in the sorted order, so an output initialized to
-    zero leaves them zero and no sentinel is needed.
-
-    Attributes
-    ----------
-    layout : BlockLayout
-        Where the entries lie: block by block over a two-group partition, or, over one group, the whole
-        matrix in its own CSR order (:attr:`BlockLayout.whole`).
-    indptr, indices : np.ndarray or None
-        The whole ``(n_fields n, n_fields n)`` Jacobian's CSR structure, the very arrays of the layout's
-        whole pattern; ``None`` when the layout splits the matrix into blocks.
-    nnz : int
-        Stored entries, including the explicit zeros the full pattern keeps.
-    """
-
-    def __init__(
-        self, gather_map: np.ndarray, zero_slot: int, nf: int, layout: BlockLayout
-    ) -> None:
-        self.layout = layout
-        whole = layout.whole
-        self.indptr = None if whole is None else whole.indptr
-        self.indices = None if whole is None else whole.indices
-        self.nnz = int(gather_map.shape[0])
-        self._nf = nf
-        # Narrowed as each array is formed rather than at the end, so the wide form is never one of the
-        # several live at once. A source index is bounded by `zero_slot`, a position by the entry count.
-        # Choosing from the bound also removes a latent wrap: these were narrowed to 32-bit
-        # unconditionally, which is right for every mesh reached so far and silently truncates on one
-        # whose entry count or probe-response index does not fit.
-        index_dtype = _index_dtype(zero_slot)
-        position_dtype = _index_dtype(gather_map.shape[0])
-        live = gather_map != zero_slot
-        position = np.flatnonzero(live).astype(position_dtype, copy=False)
-        source = gather_map[live].astype(index_dtype, copy=False)
-        # Group the entries by the probe that supplies them, so a chunk's entries are one contiguous
-        # slice. Grouped by a `scipy.sparse` COO -> CSR conversion rather than `np.argsort`: treating
-        # `probe_of` as the row index of a throwaway sparse matrix makes the grouping a counting sort
-        # over `probe_of`'s own range -- a few hundred values -- so it never forms the full-entry-count
-        # index array `np.argsort` is forced to return (numpy has no narrower form for a sort
-        # permutation). Order within a probe is free -- `scatter` below writes each entry to a unique
-        # position regardless of it -- so the unstable grouping a counting sort gives is exact, not an
-        # approximation; there are no duplicate (probe, position) pairs (`position` values are already
-        # unique), so the conversion only reorders and never sums.
-        n_probes = zero_slot // nf
-        probe_of = source // index_dtype(nf)
-        grouped = sp.coo_matrix(
-            (source, (probe_of, position)), shape=(n_probes, gather_map.shape[0])
-        ).tocsr()
-        # On the device, where the responses are computed, so a materialize never moves one to the host.
-        # The host copies are dropped as soon as each is moved: only the probe boundaries stay here.
-        self._source = jnp.asarray(grouped.data)
-        self._position = jnp.asarray(grouped.indices.astype(position_dtype, copy=False))
-        # One boundary per probe plus a closing one, so a chunk ending at the last probe still has a
-        # `_probe_start[start + count]` to read -- exactly a CSR row-pointer array, which the conversion
-        # above already produces.
-        self._probe_start = grouped.indptr.astype(index_dtype, copy=False)
-
-    def width(self, chunks: Sequence[tuple[int, int, int]]) -> int:
-        """The most entries any one of ``chunks`` (``(field, start, count)`` each) fills.
-
-        :meth:`scatter` places every chunk's entries through this many lanes, so one compiled program
-        serves every chunk of a materialize.
-        """
-        return max(
-            (
-                int(self._probe_start[start + count] - self._probe_start[start])
-                for _, start, count in chunks
-            ),
-            default=0,
-        )
-
-    def scatter(
-        self, data: jnp.ndarray, responses: jnp.ndarray, start: int, count: int, width: int
-    ) -> jnp.ndarray:
-        """``data`` with every entry fed by probes ``[start, start + count)`` filled from their responses.
-
-        Parameters
-        ----------
-        data : jnp.ndarray
-            The values being filled, shape ``(nnz,)``, starting from zero -- entries outside their
-            column's reach are never written. Consumed: its buffer is reused for the result.
-        responses : jnp.ndarray
-            This chunk's responses, shape ``(rows >= count, n_fields * n_cells)``; rows beyond ``count``
-            are ignored, so a padded final chunk needs no special case.
-        start, count : int
-            The chunk's half-open probe range.
-        width : int
-            At least the chunk's entry count: :meth:`width` of the materialize's chunks.
-
-        Returns
-        -------
-        jnp.ndarray
-            The values, shape ``(nnz,)``.
-        """
-        lo, hi = int(self._probe_start[start]), int(self._probe_start[start + count])
-        if hi == lo:
-            return data
-        return _scatter_chunk(
-            data, responses, self._source, self._position, lo, hi, start * self._nf, width=width
-        )
-
-    def values(self, probing: _ChunkProbe) -> jnp.ndarray:
-        """Every stored entry's value, in this structure's order, by probing one chunk at a time.
-
-        De-compressed AS THE PROBES COME BACK: each chunk's responses are scattered into the fixed values
-        and then dropped, so the only large array live at once is the values being built. Holding every
-        response instead costs ``n_probes * nf`` floats -- comparable to the matrix itself.
-        """
-        chunks = tuple(probing.chunks())
-        width = self.width(chunks)
-        data = jnp.zeros(self.nnz, dtype=jnp.float64)
-        for field, start, count in chunks:
-            data = self.scatter(data, probing.responses(field, start, count), start, count, width)
-        return data
-
-
-@functools.partial(jax.jit, static_argnames="width", donate_argnums=0)
-def _scatter_chunk(
-    data: jnp.ndarray,
-    responses: jnp.ndarray,
-    source: jnp.ndarray,
-    position: jnp.ndarray,
-    lo: int,
-    hi: int,
-    offset: int,
-    *,
-    width: int,
-) -> jnp.ndarray:
-    """Entries ``[lo, hi)`` of the probe-grouped order placed from one chunk's responses.
-
-    Through ``width`` lanes whatever the chunk's entry count, so one program serves every chunk: a lane
-    past ``hi`` is sent past the end of ``data`` and dropped. Each entry's position is distinct, so the
-    write is a plain placement.
-    """
-    lane = lo + jnp.arange(width)
-    live = lane < hi
-    taken = jnp.where(live, source.at[lane].get(mode="fill", fill_value=0) - offset, 0)
-    placed = jnp.where(live, position.at[lane].get(mode="fill", fill_value=0), data.shape[0])
-    return data.at[placed].set(responses.reshape(-1)[taken], mode="drop", unique_indices=True)
 
 
 def materialize_block_jacobian(
@@ -1164,39 +1020,6 @@ def materialize_blocks(
         structure.values(_ChunkProbe(plan, probe_batch_size, matvec, batched_matvec)),
         structure.layout,
     )
-
-
-class ProbedBlocks:
-    """One materialize's values over a :class:`BlockLayout`, on the device: the blocks, and the shift.
-
-    Attributes
-    ----------
-    data : jnp.ndarray
-        The values, block-major, shape ``(nnz,)``.
-    layout : BlockLayout
-        Where each block lies in them.
-    """
-
-    def __init__(self, data: jnp.ndarray, layout: BlockLayout) -> None:
-        self.data = data
-        self.layout = layout
-
-    def blocks(self) -> tuple[DeviceMatrix, ...]:
-        """``(A_ll, A_lt, A_tl, A_tt)`` over :attr:`data`, each its own slice of the values."""
-        return self.layout.blocks(self.data)
-
-    def diagonal(self) -> jnp.ndarray:
-        """The Jacobian's diagonal in degree-of-freedom order, shape ``(n_dofs,)``."""
-        return self.layout.diagonal(self.data)
-
-    def add_shift(self, shift_diagonal: jnp.ndarray) -> None:
-        """Add the pseudo-transient shift to the diagonal, in place.
-
-        The in-place counterpart of :func:`shifted_jacobian`, for values this materialize owns: the
-        whole matrix is never formed, so there is no input to keep unmodified, and every diagonal entry
-        is stored (:meth:`BlockLayout.of` refuses a pattern without one), so no entry is created.
-        """
-        self.data = self.layout.add_to_diagonal(self.data, shift_diagonal)
 
 
 class FieldwiseMatvec:

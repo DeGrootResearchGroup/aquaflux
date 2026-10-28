@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
     import jax.numpy as jnp
 
-    from aquaflux.solve import StepReport
+    from aquaflux.solve import RampPosition, StepReport
 
     from .coupled import CoupledRANS
 
@@ -747,6 +747,12 @@ class ViscosityRampHomotopy:
         different claims about what an intermediate station *is*, and the choice changes which seed a
         march should open from. It is never called for the target, whose assembler is the caller's own
         object by identity.
+    on_station : callable, optional
+        ``description -> None``, told of every station **change** as the step entering it is set up:
+        ``"station 3/12: viscosity x46.4"`` (the position out of
+        :attr:`~aquaflux.solve.RampSchedule.stations`, given only when nothing can end the ramp early),
+        or ``"the case's own viscosity"`` for the target -- typically
+        :meth:`~aquaflux.solve.MarchLogger.on_station`. Observes only.
 
     Examples
     --------
@@ -774,6 +780,7 @@ class ViscosityRampHomotopy:
         redamping: float | None = None,
         rebind: Callable[[CoupledRANS], None] | None = None,
         companion: Callable[[CoupledRANS, float], CoupledRANS] = scale_both_blocks,
+        on_station: Callable[[str], None] | None = None,
     ) -> None:
         if anchor < 1.0:
             raise ValueError(
@@ -802,6 +809,7 @@ class ViscosityRampHomotopy:
         self.redamping = float(redamping)
         self.rebind = rebind
         self.companion = companion
+        self.on_station = on_station
         # This march's walk along the schedule: where each step ran, and whether the ramp has ended.
         self._walk = ramp.walk()
         # The station whose assembler `_assembler` currently holds. -1 is "none entered yet", which is
@@ -840,7 +848,23 @@ class ViscosityRampHomotopy:
             )
             if self.rebind is not None:
                 self.rebind(self._assembler)
+            if self.on_station is not None:
+                self.on_station(self.describe(position))
         return self._assembler.residual
+
+    def describe(self, position: RampPosition) -> str:
+        """A short human description of the station ``position`` runs, as :attr:`on_station` is told it.
+
+        The station is counted from one, out of :attr:`~aquaflux.solve.RampSchedule.stations` when the
+        ramp walks every station; a ramp that may end early does not know how many it will walk, so it
+        gives the count alone.
+        """
+        if position.arrived:
+            return "the case's own viscosity"
+        total = "" if self.ramp.end_when is not None else f"/{self.ramp.stations}"
+        return (
+            f"station {position.station + 1}{total}: viscosity x{self.scale(position.progress):.3g}"
+        )
 
     def arrived(self, step: int) -> bool:
         """Whether ``step`` runs the target problem, which is the only station that may stop the march."""
@@ -880,6 +904,7 @@ def solve_reynolds_ramp(
     point_setup: Callable[[CoupledRANS, jnp.ndarray, ReynoldsPoint], dict],
     redamping: float | None = None,
     companion: Callable[[CoupledRANS, float], CoupledRANS] = scale_both_blocks,
+    on_station: Callable[[str], None] | None = None,
     **solve_kwargs: object,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Walk the same Reynolds span :func:`solve_reynolds_continuation` walks, inside **one** march.
@@ -930,6 +955,8 @@ def solve_reynolds_ramp(
         Passed through to :class:`ViscosityRampHomotopy` -- which viscosity a station scales. It also
         decides this function's **seed**, which is built from the anchor companion it returns, so the
         two cannot disagree about what problem the march opens on.
+    on_station : callable, optional
+        Passed through to :class:`ViscosityRampHomotopy` -- told of each station the march enters.
     **solve_kwargs
         The ladder's options. Keywords the ladder owns and :func:`solve_coupled` does not
         (``schedule``, ``intermediate``, ``seed_projection``, ``n_points``)
@@ -974,6 +1001,7 @@ def solve_reynolds_ramp(
         redamping=redamping,
         rebind=shared.rebind,
         companion=companion,
+        on_station=on_station,
     )
     stopping = (
         {"stopping_step": shared.stopping_step(coupled)}

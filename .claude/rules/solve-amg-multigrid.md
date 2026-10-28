@@ -4,13 +4,16 @@ paths:
   - "aquaflux/precondition/hierarchy_inverse.py"
   - "aquaflux/precondition/entry_map.py"
   - "aquaflux/precondition/padded_rows.py"
+  - "aquaflux/precondition/fused_product.py"
   - "aquaflux/precondition/level_fit.py"
+  - "aquaflux/precondition/kronecker_pattern.py"
 ---
 
 # Rules — `aquaflux/precondition/` the traced multigrid (and the record of the deleted monolithic AMG)
 
 This file governs the traced multigrid (`precondition/multigrid.py`, `precondition/hierarchy_inverse.py`)
-the padded-row level operator (`precondition/padded_rows.py`), the entry maps a refit applies
+the padded-row level operator (`precondition/padded_rows.py`) and its fused CPU product
+(`precondition/fused_product.py`), the entry maps a refit applies
 (`precondition/entry_map.py`) and the device fit of a hierarchy's level values (`precondition/level_fit.py`).
 Package-wide contracts are in `solve.md`; the materialized base `MaterializedJacobianPreconditioner` is in
 `solve-direct-preconditioners.md`. Dated measurements and investigation behind every entry are in
@@ -185,16 +188,134 @@ path.
 - **A level operator is a padded-row (ELLPACK) operator, `_PaddedRowOperator`** (`padded_rows.py`, with
   `_padded_rows`, the one slot rule, and `_PaddedLayout`/`_padded_operator`; moved out of `multigrid.py`
   to keep it under its size budget, 2026-10-18). `columns` / `values` are
-  `(n_rows, width)`, `row_lengths` marks stored slots, `apply` is `sum(values * x[columns], axis=1)` (a
-  gather fusion then a row-sum kernel, not one fused loop). Measurements on both machines: log, "The
-  padded-row level operator — measurements".
-  - **The transpose is stored (`t_columns` / `t_values`) and applied as a gather** through
-    `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` gives a forward product, not a
-    scatter-add over every slot. Costs: a second copy of the storage; its own per-level budget
-    (`ShapeBudget.transpose_width`); and `apply` has **no `jax.vmap` rule** — nothing vmaps a
-    preconditioner apply today. Pinned by
-    `test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose`.
-  - ⚠️ **On macOS the row-sum kernel (a single-threaded `__ynn_fusion`) is the bottleneck for wide rows**
+  `(n_rows, width)`, `row_lengths` marks stored slots, and `apply` is `sum(values * x[columns], axis=1)`,
+  computed by the index half (`PaddedColumns.product`): on the CPU a fused loop (below), elsewhere a
+  gather fusion then a row-sum kernel. Measurements on both machines: log, "The padded-row level
+  operator — measurements".
+  - **On the CPU every padded-row product is one fused, threaded Numba loop called as an XLA foreign
+    function (`fused_product.py`, 2026-10-25).** XLA's form writes `values * x[columns]` out whole (177 MiB
+    on bfs3d's leading fine level, twice an application) and row-sums it on one thread; the loop reads each
+    stored slot once and threads over rows. Two targets: held columns (`held_product`) and cell-level
+    columns (`cell_product`, which decodes `_KroneckerColumns` itself, so `columns()` is never formed).
+    `PaddedColumns.product` routes through `fused_product.routed`, which takes the loop only for one
+    floating type on both operands and only where `fused_products()` holds, inside
+    `jax.lax.platform_dependent(cpu=...)`, so any other backend compiles the gathered form; the transpose
+    (`_HeldColumns`) is routed the same way.
+    - **`fused_products()` is decided once per process**: CPU backend present,
+      `AQUAFLUX_DISABLE_FUSED_PRODUCT` unset (the A/B switch; read at the first decision, recorded by
+      `run_case.sh`), Numba's threading layer `omp` or `tbb`, and both targets registered and agreeing with
+      numpy (`registered()`, `_self_check`). ⚠️ **`workqueue` keeps the gathered form, deliberately**: it
+      aborts the process when two threads enter it at once, and XLA can run two products concurrently; a
+      one-thread loop also loses to XLA on narrow rows (bfs3d trailing fine 14.1 vs 6.9 ms).
+    - **macOS: `omp` only with libomp installed (optional; README and `docs/index.md` installation).** Numba's
+      macOS wheel ships its OpenMP layer but links `@rpath/libomp.dylib`, which pip cannot supply (no TBB
+      layer at all), so a plain install has `workqueue` and runs the gathered form. Homebrew's libomp is
+      keg-only, so it takes `brew link --force libomp` (macOS strips `DYLD_LIBRARY_PATH` when `bash` starts
+      a process, as `run_case.sh` does); conda's Numba depends on `llvm-openmp` and needs nothing. Measured on
+      an M3 Pro (2026-10-25, jax 0.10.2, `omp` 11 threads): bfs3d march −14.4 %, pitzDaily **+3.0 %** (its
+      leading cycle, mean row 73, runs 21 % slower fused); log, "The fused level product on macOS". Which
+      path a run took is in its `run.yaml` (`padded_products`) and a log line after the solve, from
+      `padded_product_path()` (`case.md`).
+    - **The handlers read the typed-FFI call frame by its C layout and declare FFI version (0, 1)**, the
+      oldest XLA accepts; XLA asks each handler its version at registration (the metadata extension) and
+      keeps every accepted version's layout. The layout constants are at the top of the module, against
+      `xla/ffi/api/c_api.h` (`jax.ffi.include_dir()`). The legacy custom-call API is not an option: XLA:CPU
+      logs an error per call and has scheduled it for removal. Registration starts the CPU backend first,
+      since a refusal registered before the backend exists stops the backend itself.
+    - ⚠️ **Not bit-identical to the gathered form**: each row is summed serially in slot order (float32
+      rounding a few ulps), deterministic for any thread count. The held and cell-level loops agree exactly
+      with each other (`test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`).
+    - ⚠️ **A traced product is cached per function, so the choice is fixed at the first trace**: a test
+      flipping `fused_products` must `jax.clear_caches()` between arms, or the second arm reruns the first.
+    - Pinned by `tests/unit/test_fused_product.py` (each loop bit for bit against a serial numpy product,
+      the routing in the compiled program, the threading-layer and environment refusals). Measured: log,
+      "The fused level product (2026-10-25)".
+  - **The index half is a `PaddedColumns` (2026-10-24, the second stage of `solve-open-directions.md`
+    §14d): `columns()`, `row_lengths()` and `entries()` (the stored entry each slot is packed from,
+    `nnz` for padding), held (`_HeldColumns`) or computed at cell level (`_KroneckerColumns`, rows only:
+    a transpose is packed held, below).** The operator's `rows` and the layout's are the same objects;
+    `columns`, `row_lengths` are properties. `_PaddedLayout.of(pattern, ..., fields=(r, c))` holds a pattern at cell
+    level when `KroneckerPattern.of_dof` finds it one cell pattern over every field pair, else as arrays;
+    the callers that know their fields pass them (`level_plan`: `(block_size, block_size)`; `simple_plan`:
+    `F`, `G`, `D`, `M G`, `S`, the block inverse; `FieldSplitInverse.padded_coupling`: trailing × leading).
+    The decode is `_padded_rows`'s own slot rule (slot `s` of row `(f, d)`: other field `s // len(d)`,
+    place `s % len(d)`, padding at column 0), so every gather, product and row sum is unchanged; pinned
+    array for array and the products exactly by
+    `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays`. ⚠️ **The field is counted, never
+    divided** (`Σ_t [s ≥ t·len(d)]`): a vector integer division made an isolated apply 1.6× (4×4) to 8×
+    (2×2) the held form's; counted, 1.08× / 1.8× / 1.2× (4×4 / 2×2 / 2×4 forward, transposed 1.0 / 1.8 /
+    0.9; the transposed decode is deleted since). Inside a loop (a Krylov or V-cycle loop, as the march applies them) XLA hoists the decode out
+    and the two forms tie (ten 4×4 applies 168 vs 176 ms, 2×2 25.3 vs 25.4), the decoded columns then
+    living as the loop's temporary. bfs3d-sized lattice (23400 cells, reach 3, float32), 4-core Linux,
+    jax 0.12.0.1, 2026-10-24 (`solve-direct-preconditioners-log.md`, "Cell-level pattern (§14d), stages
+    1–3").
+    - **A cell-level operator's gathered form gathers `x` once per cell row
+      (`_KroneckerColumns._gathered_product`, 2026-10-25)** -- XLA's form, taken wherever the fused loop is
+      not (above); the loop decodes each slot itself and forms no columns. `columns()` repeats one
+      `(n_cells, width)` array across the row fields (`_by_row_field`); the gathered form gathers at `(n_cells, width)` and multiplies each row
+      field's entries (`values` viewed `(fields, n_cells, width)`) against that one gather, so the decode
+      and the gathered operand are a row field's, not all of them. In the march step XLA keeps every
+      operator's decode live per call site of the split (an entry-computation copy and one inside
+      `_ResidualStopGMRES`'s true-residual `lax.cond`), so this was the step's largest temporary: bfs3d's
+      first step 1022.7 → 683.7 MiB, decoded indices 590.5 → 294.6 (`validation/step_temporaries.py`).
+      float64 products are bit-identical; float32 rows may be summed in another order (≤ 0.71 eps of the
+      row's `Σ|terms|`): the pitzDaily and bfs3d marches keep every count (bfs3d 17 steps, 147 cycles,
+      `x_r/h` 8.361), two step residuals each moving in their last printed digit; bfs3d's march 1835 →
+      1513 s, its steps after the first −21 %, peak 5.29 → 5.12 GiB (one run each, 4-core Linux). Pinned by `test_a_cell_level_operator_gathers_each_cell_row_once_for_every_row_field`
+      (the gather's shape) and `test_a_layout_held_at_cell_level_is_the_layout_held_as_arrays` (the values).
+      Log, "What the march step's temporary holds".
+    - ⚠️ **Shape stability:** the cell arrays are padded to the dof budget over the other side's field
+      count, and the counts the decode needs (`cell_nnz`, `n_in`) are 0-d leaves, not static: either one
+      sized or static by the actual pattern retraced a budgeted rebuild
+      (`test_shape_budget_makes_a_repartitioning_rebuild_a_compilation_cache_hit` caught both). The
+      layout's own static `nnz` is what `simple_fit` sizes its outputs by. A level whose pattern stops
+      being one cell pattern between two rebuilds (a nodal level gaining `landing_with_diagonal`'s unit
+      diagonals) changes form and so retraces; a frozen refit keeps its layout and cannot.
+    - ⚠️ **Not bit-identical to the held form at default compiler flags, and that is FMA placement, not a
+      defect (accepted by the project owner, 2026-10-24).** Values and slots are equal, but a changed
+      program contracts multiply-adds elsewhere: pitzDaily's hybrid start moved ≤ 6.2e-15 (the
+      potential-flow solve's scalar hierarchy), identical under `XLA_FLAGS=--xla_cpu_max_isa=AVX`; the
+      pitzDaily march's step rows and bfs3d's split leaves were unchanged. Pin identity under that flag,
+      never at default flags.
+    - ⚠️ `SimpleSmoothedInverse._simple_plans` keys its plans on the identity of every leaf of each level
+      operator's `rows`, never on `columns` (a computed property, new on every read).
+  - **The Galerkin map of a nodal level is held at cell level (2026-10-24, the third stage of §14d).**
+    `level_fit._galerkin` takes `kronecker_pattern.KroneckerGalerkin` when the level stores one cell
+    pattern over every field pair and `nodal_cell_transfer` finds `P = I ⊗ T` (a nodal aggregation's
+    tentative prolongation; both shipped blocks run `prolongation_smoothing: "none"`): it builds the
+    cell product `Tᵀ C T` once, holds its terms (source, source row, target; sorted by target) and
+    places every field pair by `entry_position` on both sides, summing each target's terms in source
+    order as the dof map's segment sum does. Pinned bit for bit against `EntryMap.product`'s map, landing
+    and values, by `test_the_cell_level_galerkin_map_is_the_degree_of_freedom_map_exactly`; any other
+    level keeps `EntryMap.product`. `_LevelPlan.galerkin` is a `ValueMap`.
+  - **The transpose is packed only for an adjoint (2026-10-24, §14d's lazy transposes), and applied as a
+    gather** through `jax.custom_derivatives.linear_call`, so `jax.linear_transpose` gives a forward
+    product, not a scatter-add over every slot. A fit and a refit hold rows alone (`transposed`,
+    `t_values` are `None`: no leaves, no compile shape); `_PaddedRowOperator.with_transpose()` packs `Aᵀ`
+    on the host from `to_scipy()` by `_padded_rows` (held columns, the widest column, the values' own
+    precision), and **`solve.with_transposes(tree)` asks every `solve.PacksTranspose` leaf of a pytree**.
+    `root_adjoint` applies it to the adjoint's preconditioner factory at the start of each transpose
+    solve, so the copy lives only as long as that solve and reaches every residual (traced split, single
+    block, block-SIMPLE, scalar transport); the host inverses' `apply(transpose=True)` packs into their
+    lazy `_transpose_fn`, dropped at a refit. **Transposing an operator without its transpose raises
+    `RuntimeError` naming `with_transposes`**, never a scatter fallback. ⚠️ An adjoint factory must hold
+    its operators as pytree leaves, not close over them (`BlockPreconditioner.factory()` and
+    `bordered_preconditioner` return modules for this reason); a closure raises. ⚠️ Reverse mode through
+    a preconditioned `solve_linear` outside `root_adjoint` (`newton_step` under `jax.grad`) is transposed
+    by lineax, which asks nothing: that caller passes its factory through `with_transposes` itself
+    (`test_preconditioned_solve_is_differentiable`). ⚠️ Packing needs concrete values (it raises under a
+    trace); `root_adjoint`'s backward rule runs eagerly under `jax.grad`. `apply` has **no `jax.vmap`
+    rule** — nothing vmaps a preconditioner apply today. Pinned by
+    `test_a_padded_row_operator_transposes_by_gathering_its_stored_transpose`,
+    `test_a_padded_row_operator_holds_no_transpose_until_asked_and_then_packs_its_own_entries` and
+    `test_a_fitted_split_holds_no_transposes_and_an_adjoint_packs_them_for_its_solve_only`. Saved (both
+    case files' configuration, CPU, jax 0.12.0.1, 2026-10-24): pitzDaily march identical row for row,
+    peak 3.085 → 2.900 GiB; bfs3d: `solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)". The
+    adjoint pays the packing instead: ~30 s on bfs3d, ~115 transposed applications with the fused product,
+    ~7 % of a transpose solve (20 and ~1.3 % with XLA's form; `adjoint_transpose_cost.py`, 2026-10-25, log,
+    "The fused level product").
+  - ⚠️ **Where the gathered form runs (macOS without a thread-safe Numba layer), on macOS the row-sum
+    kernel (a single-threaded `__ynn_fusion`) is the bottleneck for wide rows**
     (bfs3d, up to ~364 wide), and no rewrite of the sum avoids it: `einsum`, a chunked sum, a column-major
     layout, a reduce-free halving sum and an unrolled sum were all measured slower. The XLA flag
     `--xla_cpu_experimental_ynn_fusion_type=-reduce` fixes the Mac and is neutral-to-worse on Linux, so it
@@ -248,7 +369,8 @@ path.
   - **A frozen coarsening's level values are fitted on the device, by one function for the first build
     and every refit (`level_fit.py`, 2026-10-22).** The host decides structure (aggregates, prolongations,
     every level's pattern) and holds it as a `CoarseningPlan` of `_LevelPlan`s, each carrying device entry
-    maps: the padded-row packing (`_PaddedLayout`), the diagonal and cell-block gathers, the Galerkin map
+    maps (`entry_map.ValueMap`, a `DeviceEntryMap` or a cell-level map): the padded-row packing
+    (`_PaddedLayout`), the diagonal and cell-block gathers, the Galerkin map
     `Pᵀ A P` to the next level's values, the coarsest level's dense gather, and the start vector of the
     spectral estimate. `fit_levels(plan, values, scale)` (one `eqx.filter_jit`) derives from the fine
     operator's stored values every level's operator, diagonal, cell-block inverse (`invert_cell_blocks`,
@@ -310,6 +432,13 @@ path.
       (2026-10-22)"; pinned by `test_the_product_map_holds_the_terms_of_the_plain_construction_in_its_order`).
       Host-map measurements: log, "Refit by entry maps (2026-10-17)"; harness
       `validation/pitzdaily_openfoam/refit_profile.py`.
+- **`HierarchyBlockInverse.refit_keeps()` names what a re-fit reuses (2026-10-25)**: the coarsening's
+  `CoarseningPlan` plus the smoother's `_refit_structure()` (`SimpleSmoothedInverse`: its SIMPLE plans and
+  the index arrays they were made for), or `None` when the re-fit re-coarsens. Everything else in the
+  current `traced_cycle()` state is dead once a re-fit starts, which is what lets the materialized session
+  free it before the fit (`solve.md`). A frozen re-fit lets go of `_hierarchy` and `_extras` before fitting.
+  A new block inverse family that holds structure across refits must return it here, or the session frees
+  it early and the re-fit reads deleted arrays (the bit-identity test catches it).
 - **A coarsening that reads no values is refitted, not re-aggregated** (`HierarchyBlockInverse.
   refactor_block`, `_coarsening_reads_values()`): at `strength_threshold` 0, `prolongation_smoothing`
   `"none"` and no `shape_headroom`, a rebuild provably reproduces the held aggregates and `P`, so the

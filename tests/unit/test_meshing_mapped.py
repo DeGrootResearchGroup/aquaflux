@@ -443,3 +443,12 @@ def test_a_bends_rows_stay_even_under_a_grading():
     )  # fmt: skip
     angle = _bend_angle(mapped.points[mapped.grids[0]][:, 0])
     np.testing.assert_allclose(np.abs(np.diff(angle)), np.abs(np.diff(angle)).mean(), rtol=1e-9)
+
+
+def test_triangles_wound_unalike_are_refused_rather_than_walked_for_ever():
+    from aquaflux.meshing.mapped import _loops
+
+    # A square of two triangles, the second wound the other way: its boundary edges do not chain.
+    with pytest.raises(ValueError, match="not wound alike"):
+        _loops(np.array([[0, 1, 2], [0, 3, 2]]))
+    assert [loop.tolist() for loop in _loops(np.array([[0, 1, 2], [0, 2, 3]]))] == [[0, 1, 2, 3]]

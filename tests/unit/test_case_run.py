@@ -306,6 +306,7 @@ class _Logger:
     """Stands in for a MarchLogger: each hook a distinct marker."""
 
     on_checkpoint, on_retry, on_inner, on_refresh = "step", "retry", "inner", "refresh"
+    on_station = "station"
 
     def __init__(self) -> None:
         self.notes: list[str] = []
@@ -382,20 +383,39 @@ def test_each_march_hands_each_refit_to_the_log_and_to_the_recorder(march) -> No
 
 
 def test_a_coupled_march_also_logs_its_refreshes_and_its_ramp() -> None:
+    """A ramp opens the log with its own description and reports each station it enters."""
     logger = _Logger()
-    assert "session_options" not in CoupledMarch(preconditioner=BlockDiagonal()).observers_for(
-        logger, None
-    )
+    plain = CoupledMarch(preconditioner=BlockDiagonal()).observers_for(logger, None)
+    assert "session_options" not in plain
+    assert "on_station" not in plain  # no ramp, no stations: solve_coupled would refuse the keyword
+    ramp = ViscosityRamp(anchor=10.0, stations=2, steps_per_station=1)
     observed = CoupledMarch(
         preconditioner=MaterializedJacobian(FieldSplit(SimpleSmoothed(), JacobiSmoothed())),
-        continuation=ViscosityRamp(anchor=10.0, stations=2, steps_per_station=1),
+        continuation=ramp,
     ).observers_for(logger, None)
     assert observed["session_options"] == {"observer": "refresh"}
-    assert (
-        observed["point_setup"]("companion", "state", types.SimpleNamespace(label="point 1/1"))
-        is None
+    assert observed["on_station"] == "station"
+    assert observed["point_setup"]("companion", "state", "point") is None
+    assert logger.notes == [ramp.description]
+
+
+def test_a_ramp_describes_its_span_its_stations_and_what_it_scales() -> None:
+    """The line a ramp's log opens with names the anchor, the stations, the hold and the viscosity."""
+    assert ViscosityRamp(
+        anchor=100.0, stations=12, steps_per_station=1, scale="flow"
+    ).description == (
+        "viscosity ramp: x100 down to the case's own in 12 stations of 1 step each, "
+        "scaling the flow's viscosity only"
     )
-    assert logger.notes == ["[point 1/1]"]
+    assert ViscosityRamp(anchor=10.0, stations=4, steps_per_station=3).description == (
+        "viscosity ramp: x10 down to the case's own in 4 stations of 3 steps each, "
+        "scaling the flow's and the closure's viscosity"
+    )
+    assert ViscosityRamp(
+        anchor=10.0, stations=4, steps_per_station=1, end="settled"
+    ).description.endswith(
+        "ended once the march has settled, scaling the flow's and the closure's viscosity"
+    )
 
 
 def test_the_segregated_loop_takes_no_observers() -> None:

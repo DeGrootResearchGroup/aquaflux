@@ -15,7 +15,14 @@ nested stages -- nothing they compute is changed -- and for each stage records:
 * for the stages marked with a census, every array of at least 1 MiB alive at its end -- numpy buffers
   (deduplicated through their ``base``), ``scipy.sparse`` arrays and JAX arrays -- named by the chain of
   objects (or the running function's local variable) that holds it, so a duplicated matrix shows as two
-  owners of one shape.
+  owners of one shape. ``BFS3D_MEMORY_CENSUS_STAGES`` names the stages that take one instead, so a
+  longer run can afford a census at the stage that sets its peak;
+* with ``BFS3D_MEMORY_SAMPLE_DEVICE=1``, the resident, live device and traced host bytes at the instant
+  of each stage's resident peak (from the sampler), so a peak is split into what was live then and what
+  was not -- the running programs' temporary buffers, the compiled-program cache, the allocator's
+  retention;
+* with ``BFS3D_MEMORY_PROGRAMS=1``, once the measured steps are done, the loaded programs ranked by
+  their temporary buffers.
 
 The march's own stages are the session's fit and re-fits, each split into its probe, its shift, the
 field split's block cut, each block's re-fit and the traced split, and the march step's first call (its
@@ -75,12 +82,30 @@ CENSUS = os.environ.get("BFS3D_MEMORY_CENSUS", "1") == "1"
 #: A class name whose live instances are traced back to their holders at each step's end (for a copy
 #: that should be gone, say), as referrer chains printed to the log; unset traces nothing.
 HOLDERS = os.environ.get("BFS3D_MEMORY_HOLDERS", "")
+#: Stage labels (as the table prints them, without indentation; separated by ``;``, since a label may
+#: hold a comma) whose end alone takes a census, in place of the stages the run marks; unset, the run's
+#: own. A census late in a run walks every Python object, so a 2-step run can afford one or two.
+CENSUS_STAGES = {
+    label.strip()
+    for label in os.environ.get("BFS3D_MEMORY_CENSUS_STAGES", "").split(";")
+    if label.strip()
+}
+#: ``1`` also samples the live device bytes every 10th resident sample (every 0.2 s), so each stage
+#: reports what the device held at its resident peak; the host bytes ``tracemalloc`` traces are sampled
+#: with every resident sample regardless.
+SAMPLE_DEVICE = os.environ.get("BFS3D_MEMORY_SAMPLE_DEVICE", "0") == "1"
+#: ``1`` prints the loaded programs ranked by their temporary buffers once the measured steps are done.
+PROGRAMS = os.environ.get("BFS3D_MEMORY_PROGRAMS", "0") == "1"
 #: ``1`` also times each entry map's build as a stage (a row per map: dozens per re-fit).
 MAPS = os.environ.get("BFS3D_MEMORY_MAPS", "0") == "1"
 RECORD = Path(os.environ.get("BFS3D_MEMORY_RECORD", HERE / "memory_attribution.json"))
 #: ``1`` prints a checksum of every leaf of each traced split the session composes (at the fit and at
 #: every re-fit), so two checkouts' runs show whether anything the solve applies differs, bit for bit.
 CHECKSUMS = os.environ.get("BFS3D_MEMORY_CHECKSUMS", "0") == "1"
+#: ``1`` (default, the session's own default) gives the allocator's kept memory back before every re-fit
+#: (``malloc_trim(0)``), each trim printing the resident size and glibc's retained bytes on either side
+#: of it; ``0`` opens every session with no trim. An arm, not a reading: it changes what the run holds.
+TRIM = os.environ.get("BFS3D_MEMORY_TRIM", "1") == "1"
 GIB = 2**30
 
 
@@ -216,17 +241,34 @@ def _machine_memory() -> dict[str, int]:
 
 
 class _Sampler(threading.Thread):
-    """The resident set every 20 ms, kept as a series so any nested stage can read its own peak."""
+    """The resident set every 20 ms, kept as a series so any nested stage can read its own peak.
+
+    Each sample also keeps the host bytes ``tracemalloc`` traces then, and with ``SAMPLE_DEVICE`` every
+    10th keeps the live device bytes, so a stage can say what was live at the instant of its peak.
+    """
 
     def __init__(self) -> None:
         super().__init__(daemon=True)
         self.times: list[float] = []
         self.rss: list[int] = []
+        self.traced: list[int] = []
+        self.device_times: list[float] = []
+        self.device: list[int] = []
 
     def run(self) -> None:
+        count = 0
         while True:
             self.times.append(time.perf_counter())
             self.rss.append(_rss_bytes())
+            self.traced.append(tracemalloc.get_traced_memory()[0])
+            if SAMPLE_DEVICE and count % 10 == 0:
+                import jax
+
+                with contextlib.suppress(Exception):  # an array deleted while it is read
+                    device = sum(a.nbytes for a in jax.live_arrays())
+                    self.device_times.append(time.perf_counter())
+                    self.device.append(device)
+            count += 1
             time.sleep(0.02)
 
     def peak(self, start: float, stop: float) -> int:
@@ -235,6 +277,23 @@ class _Sampler(threading.Thread):
         lo = bisect.bisect_left(self.times, start)
         hi = bisect.bisect_right(self.times, stop)
         return max(self.rss[lo:hi], default=0)
+
+    def at_peak(self, start: float, stop: float) -> dict[str, int]:
+        """The resident, traced and (if sampled) device bytes at the stage's highest resident sample."""
+        import bisect
+
+        lo = bisect.bisect_left(self.times, start)
+        # The sampler appends a sample's time before its readings, so the newest time may not have them.
+        hi = min(bisect.bisect_right(self.times, stop), len(self.rss), len(self.traced))
+        if hi <= lo:
+            return {}
+        index = max(range(lo, hi), key=self.rss.__getitem__)
+        reading = {"rss": self.rss[index], "traced": self.traced[index]}
+        nearest = bisect.bisect_right(self.device_times, self.times[index]) - 1
+        if nearest >= 0 and self.device_times[nearest] >= start:
+            reading["device"] = self.device[nearest]
+            reading["device_age"] = self.times[index] - self.device_times[nearest]
+        return reading
 
 
 # --- the census ---------------------------------------------------------------------------------
@@ -413,16 +472,23 @@ def _by_shape(census: dict[int, dict]) -> list[tuple[str, int, int]]:
 class Recorder:
     """Nested stages: each reports its own resident peak and traced peak, and optionally a census."""
 
-    def __init__(self) -> None:
+    def __init__(self, record: Path = RECORD) -> None:
         self.sampler = _Sampler()
         self.rows: list[dict] = []
         self._stack: list[dict] = []
         self._last_census: dict = {}
         self.extra: dict = {}
+        self.record = record
+        #: Further readings taken at every stage's end, each called with the stage's row to add to
+        #: (``validation/memory_residue.py`` adds its own); run after ``BFS3D_MEMORY_COLLECT``'s.
+        self.readings: list = []
+        #: Write the record at every stage's end, not only after a census (a run that may be stopped
+        #: early, by a container restart say, keeps every stage measured before it).
+        self.save_every_stage = False
 
     def save(self) -> None:
         """Write the record so far: a run stopped early still leaves everything measured before it."""
-        RECORD.write_text(json.dumps({"rows": self.rows, **self.extra}, indent=1, default=str))
+        self.record.write_text(json.dumps({"rows": self.rows, **self.extra}, indent=1, default=str))
 
     def start(self) -> None:
         tracemalloc.start(1)
@@ -432,7 +498,7 @@ class Recorder:
     def stage(self, label: str, *, census: bool = False):
         import jax
 
-        census = census and CENSUS
+        census = CENSUS and (label in CENSUS_STAGES if CENSUS_STAGES else census)
 
         if self._stack:  # hand the parent the peak so far before this stage resets it
             parent = self._stack[-1]
@@ -465,6 +531,7 @@ class Recorder:
                 "rss": rss,
                 "rss_delta": rss - frame["rss0"],
                 "stage_peak": max(self.sampler.peak(frame["t0"], t1), rss),
+                "at_peak": self.sampler.at_peak(frame["t0"], t1),
                 "hwm": _peak_bytes(),
                 "traced": traced,
                 "traced_delta": traced - frame["traced0"],
@@ -482,6 +549,8 @@ class Recorder:
                     "device_after": sum(a.nbytes for a in jax.live_arrays()),
                     "rss_after": _rss_bytes(),
                 }
+            for reading in self.readings:
+                reading(row)
             if census:
                 after = _census()
                 # Against the previous census anywhere, so one census per stage boundary suffices.
@@ -497,7 +566,7 @@ class Recorder:
                     "all_by_shape": _by_shape(after)[:25],
                 }
             self.rows.append(row)
-            if census:
+            if census or self.save_every_stage:
                 self.save()
             self._print(row)
             tracemalloc.reset_peak()
@@ -513,6 +582,14 @@ class Recorder:
             f"{row['malloc'].get('free_retained', 0) / GIB:.2f} | {row['tracer'] / GIB:.2f} |"
         )
         print(line, flush=True)
+        at_peak = row.get("at_peak", {})
+        if SAMPLE_DEVICE and "device" in at_peak:
+            print(
+                f"    at the stage peak: resident {at_peak['rss'] / GIB:.2f}, device "
+                f"{at_peak['device'] / GIB:.2f} (read {at_peak['device_age']:.2f} s before), host "
+                f"traced {at_peak['traced'] / GIB:.2f} GiB",
+                flush=True,
+            )
         collected = row.get("collected")
         if collected:
             print(
@@ -584,6 +661,7 @@ def _header() -> dict:
         "compilation_cache_entries": len(list(cache.iterdir())) if cache.is_dir() else 0,
         "malloc_env": {k: v for k, v in os.environ.items() if k.startswith(("MALLOC_", "Malloc"))},
         "steps": STEPS,
+        "memory_trim": TRIM,
     }
     print(json.dumps(header), flush=True)
     return header
@@ -598,13 +676,15 @@ def _instrument(recorder: Recorder, compare) -> dict:
         hierarchy_inverse,
         jacobian_probe,
         materialized_session,
+        probe_layout,
         sparse_jacobian,
     )
     from aquaflux.solve import march
     from aquaflux.turbulence import CoupledRANS, SSTTurbulence, reynolds, transport
 
     wrap = recorder.wrap
-    wrap(compare, "read_openfoam", "mesh read", first=1)
+    if hasattr(compare, "read_openfoam"):  # bfs3d reads its mesh itself; pitzDaily's case file does
+        wrap(compare, "read_openfoam", "mesh read", first=1)
     wrap(Mesh, "geometry", "geometry", first=1)
     wrap(compare, "build_case", "case build", census=True, first=1)
     wrap(MomentumContinuity, "build", "momentum + continuity build", first=1)
@@ -618,7 +698,8 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(jacobian_probe, "block_stencil_colouring", "pattern, conflict graph, colouring", first=1)
     wrap(sparse_jacobian, "_saturation_colouring", "saturation colouring", first=1)
     wrap(jacobian_probe, "block_stencil_gather_map", "gather map", first=1)
-    wrap(sparse_jacobian.ProbeGather, "__init__", "ProbeGather grouping", first=1)
+    wrap(probe_layout._CellEntries, "__init__", "probe entry order (cell level)", first=1)
+    wrap(probe_layout._DofEntries, "__init__", "probe entry order (entry by entry)", first=1)
     wrap(session, "_fit", "fit (first build)", census=True, first=1)
     wrap(
         materialized_session,
@@ -641,6 +722,7 @@ def _instrument(recorder: Recorder, compare) -> dict:
     wrap(materialized_session, "traced_field_split", "traced split (device leaves)")
     if CHECKSUMS:
         _print_split_checksums(materialized_session)
+    _hand_the_session_a_trim(materialized_session, TRIM)
     if MAPS:
         from aquaflux.precondition import entry_map
 
@@ -667,6 +749,34 @@ def _instrument(recorder: Recorder, compare) -> dict:
     march._march_step = march_step
     captured["step_program"] = step_program
     return captured
+
+
+def _hand_the_session_a_trim(materialized_session, trimmed: bool) -> None:
+    """Open every session with a reporting :class:`~aquaflux.allocator.GlibcTrim`, or with none."""
+    from aquaflux.allocator import GlibcTrim
+
+    trim = GlibcTrim()
+    count = [0]
+
+    def reported() -> None:
+        before_rss, before_free = _rss_bytes(), _malloc().get("free_retained", 0)
+        trim()
+        count[0] += 1
+        print(
+            f"    [trim {count[0]}] released {trim.released}: resident {before_rss / GIB:.3f} -> "
+            f"{_rss_bytes() / GIB:.3f} GiB, malloc free {before_free / GIB:.3f} -> "
+            f"{_malloc().get('free_retained', 0) / GIB:.3f} GiB",
+            flush=True,
+        )
+
+    session = materialized_session.MaterializedSession
+    opened = session.__init__
+
+    @functools.wraps(opened)
+    def with_trim(self, *args, **kwargs):
+        opened(self, *args, memory_trim=reported if trimmed else None, **kwargs)
+
+    session.__init__ = with_trim
 
 
 def _print_split_checksums(materialized_session) -> None:
@@ -699,6 +809,35 @@ def _print_split_checksums(materialized_session) -> None:
         return split
 
     materialized_session.traced_field_split = checksummed
+
+
+def _programs_by_temporaries(top: int = 15) -> list[tuple[str, int, int, int]]:
+    """The loaded programs grouped by name: (name, count, largest temporary, its arguments), largest first.
+
+    A program's temporary buffers are allocated for each call and freed after it, so the largest one a
+    stage runs sits on that stage's resident baseline at its peak.
+    """
+    import jax
+
+    grouped: dict[str, list[int]] = {}
+    for executable in jax.devices()[0].client.live_executables():
+        try:
+            name = executable.hlo_modules()[0].name
+            stats = executable.get_compiled_memory_stats()
+        except Exception:  # a reading, not a gate
+            continue
+        entry = grouped.setdefault(name, [0, 0, 0])
+        entry[0] += 1
+        if stats.temp_size_in_bytes > entry[1]:
+            entry[1], entry[2] = stats.temp_size_in_bytes, stats.argument_size_in_bytes
+    ranked = sorted(grouped.items(), key=lambda item: -item[1][1])[:top]
+    for name, (count, temp, argument) in ranked:
+        print(
+            f"program {name} x{count}: temporaries {temp / 2**20:.1f} MiB, arguments "
+            f"{argument / 2**20:.1f} MiB",
+            flush=True,
+        )
+    return [(name, count, temp, argument) for name, (count, temp, argument) in ranked]
 
 
 def _program_sizes(captured: dict, case) -> dict[str, dict]:
@@ -825,8 +964,27 @@ class _Stop(Exception):
     """Raised by the step observer once the measured steps are done."""
 
 
-def main() -> None:
-    recorder = Recorder()
+def _load_bfs3d():
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(HERE))
+    import compare  # imports aquaflux (x64) and reads case.yaml
+
+    return compare
+
+
+def main(
+    load_case=_load_bfs3d,
+    recorder: Recorder | None = None,
+    march_log: Path = HERE / "memory_attribution.march.log",
+    after_march=None,
+) -> None:
+    """Run the measured march.
+
+    ``load_case`` returns a step case's ``compare`` module (imported inside the ``imports`` stage);
+    ``after_march(recorder)``, if given, runs once the measured steps are done, before the programs'
+    memory analyses.
+    """
+    recorder = recorder or Recorder()
     recorder.start()
     header = _header()
     recorder.extra["header"] = header
@@ -836,12 +994,10 @@ def main() -> None:
         flush=True,
     )
     with recorder.stage("imports"):
-        sys.path.insert(0, str(ROOT))
-        sys.path.insert(0, str(HERE))
-        import compare  # imports aquaflux (x64) and reads case.yaml
+        compare = load_case()
         import jax
 
-    header["mesh"] = str(compare.MESH)
+    header["mesh"] = str(getattr(compare, "MESH", "the case file's"))
     header["jax"] = jax.__version__
     print(f"jax {jax.__version__}, mesh {header['mesh']}", flush=True)
 
@@ -862,8 +1018,11 @@ def main() -> None:
         if len(steps) >= STEPS:
             raise _Stop
 
+    # A one-step run captures its only step's arguments; a longer one captures the last step's, armed
+    # by `on_step` after the step before it.
+    captured["want_step"] = STEPS == 1
     with contextlib.suppress(_Stop), recorder.stage("march (to the last measured step)"):
-        compare.solve_aquaflux(log_path=HERE / "memory_attribution.march.log", on_step=on_step)
+        compare.solve_aquaflux(log_path=march_log, on_step=on_step)
     peak = _peak_bytes()
     print(
         f"peak (VmHWM, or the peak footprint on macOS) {peak / GIB:.2f} GiB after {len(steps)} steps",
@@ -871,10 +1030,15 @@ def main() -> None:
     )
 
     recorder.extra["peak"] = peak
+    if PROGRAMS:
+        recorder.extra["programs_by_temporaries"] = _programs_by_temporaries()
     recorder.save()
+    if after_march is not None:
+        after_march(recorder)
+        recorder.save()
     recorder.extra["programs"] = _program_sizes(captured, compare.build_case())
     recorder.save()
-    print(f"record written to {RECORD}", flush=True)
+    print(f"record written to {recorder.record}", flush=True)
 
 
 if __name__ == "__main__":

@@ -15,11 +15,11 @@ an accurate inverse of it -- so a cold-state failure says nothing about the adjo
 **converged checkpoint** instead.
 
 **The OPERATOR is probed at a uniform reach 3 (exact on this skew-free mesh); the PRECONDITIONER as the
-case configures it** (``compare.COLUMN_REACH``, uniform by default, ``BFS3D_COLUMN_REACH`` to shorten
-columns). A short colouring does not truncate a column -- it folds far couplings onto near entries -- so
+case configures it** (``compare.COLUMN_REACH``: the case file's, pressure at reach 3 and every other
+column at 2; ``BFS3D_COLUMN_REACH`` to change it, ``0`` for uniform). A short colouring both truncates a column and folds its far couplings onto near entries, so
 the operator must stay exact for the true residual to mean anything, while the preconditioner's copy is
 exactly what a shortened probe would hand the adjoint. Compare ``BFS3D_COLUMN_REACH=2,2,2,2,2,2``
-against the default to measure that.
+or ``0`` against the default to measure that.
 
 **Method** (each of these has produced a retracted verdict somewhere in this project):
 
@@ -30,13 +30,13 @@ against the default to measure that.
   state written by a differently configured case cannot be silently measured against this one;
 * one preconditioner in memory at a time -- the Jacobian is a couple of gigabytes a copy.
 
-⚠️ **The recorded result below was taken with the `petsc` leading inverse**, which was this case's
-default when it was measured: the field split converged at zero shift in 116 applications forward
-(`6.07e-09`) and 117 transposed (`2.67e-09`), and at its shipped floor in 105 / 104. The default has
-since moved on, and the `petsc` arm itself was removed with the library's PETSc split blocks (#371), so a
-fresh run measures a **different arm** and that result cannot be reproduced from this tree. Whether the
-shipped leading inverse preconditions the zero-shift operator as well is UNMEASURED, and it is the first
-thing to re-run here.
+**Measured with the shipped split** (smoothed SIMPLE leading inverse, float32, pivot floor) at the
+converged end of a march (``state-00017``, step 16, Euclidean ``|R|`` 6.87e-05), GMRES(30) to a true
+relative residual of 1e-8: fitted at zero shift it converges in 331 applications forward and 373
+transposed with the case's probe, 335 and 383 with a uniform one. Fitted at the default build shift
+instead (``floor None``: no floor, so the session's first-build shift of 2) neither reaches 1e-8 within
+20 restarts (6e-4 to 7e-4, still descending), so the adjoint needs a preconditioner fitted at zero shift. A `petsc` leading inverse once measured
+116 / 117 here; that arm no longer exists.
 
 Usage -- the checkpoint arrives as ENVIRONMENT, because the blessed launcher runs a script with no
 arguments and forwards none; argv works for a direct invocation::

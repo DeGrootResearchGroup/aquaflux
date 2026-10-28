@@ -18,6 +18,7 @@ from aquaflux.case import (
     CadPlacement,
     Drawing,
     DrawingRegion,
+    DrawingSections,
     MeshOutput,
     MeshSizes,
     MeshSpec,
@@ -34,6 +35,7 @@ from aquaflux.case import (
 from aquaflux.io import read_aqmesh, read_aqmesh_header, read_openfoam
 from aquaflux.mesh import PeriodicJoin, QualitySummary, structured_grid_3d
 from aquaflux.meshing import (
+    DuctCore,
     FacePlanarizer,
     FacesNear,
     FacesOn,
@@ -41,6 +43,8 @@ from aquaflux.meshing import (
     OctreeCore,
     PipeCore,
     PipeGrading,
+    RefinedBox,
+    RefinedNear,
 )
 
 DOCUMENT = {
@@ -60,7 +64,13 @@ DOCUMENT = {
         "shell": {"kind": "Graded", "cells": 3, "growth": 1.2},
     },
     "pipe_grading": {"kind": "PipeGrading", "growth": 1.1, "max_length": 0.05},
+    "ducts": ["vessel_walls"],
+    "duct_core": {"kind": "DuctCore", "junction_rows": 3},
     "core": {"kind": "OctreeCore", "size": 0.08, "clearance": 0.03},
+    "refinements": [
+        {"kind": "RefinedNear", "patches": ["lamp"], "distance": 0.03, "size": 0.005},
+        {"kind": "RefinedBox", "lower": [0.0, 0.0, 0.5], "upper": [0.2, 0.2, 0.8], "size": 0.01},
+    ],
     "output": {"path": "reactor.aqmesh"},
 }  # fmt: skip
 
@@ -77,7 +87,13 @@ def test_the_file_reads_into_its_sections_and_writes_back_as_given():
         pipes=("inlet",),
         pipe_core=PipeCore(core_bow=0.3, shell=Graded(3, 1.2)),
         pipe_grading=PipeGrading(growth=1.1, max_length=0.05),
+        ducts=("vessel_walls",),
+        duct_core=DuctCore(junction_rows=3),
         core=OctreeCore(size=0.08, clearance=0.03),
+        refinements=(
+            RefinedNear(patches=("lamp",), distance=0.03, size=0.005),
+            RefinedBox(lower=(0.0, 0.0, 0.5), upper=(0.2, 0.2, 0.8), size=0.01),
+        ),
         output=MeshOutput(path="reactor.aqmesh"),
     )
     assert mesh_spec_to_mapping(spec) == DOCUMENT
@@ -95,11 +111,13 @@ def test_the_mesher_takes_the_set_settings_and_leaves_the_rest_to_its_own_defaul
     mesher = mesh_spec_from_mapping(DOCUMENT).mesher()
     assert mesher.pipe_core == PipeCore(core_bow=0.3, shell=Graded(3, 1.2))
     assert mesher.pipe_grading == PipeGrading(growth=1.1, max_length=0.05)
+    assert mesher.duct_core == DuctCore(junction_rows=3)
     assert (mesher.max_size, mesher.feature_angle, mesher.grading, mesher.min_size) == (
         0.02, 0.785, 0.2, None,
     )  # fmt: skip
     # The core's unset wall size is the mesher's size; its clearance is as set.
     assert mesher.core.resolved(mesher.max_size) == (0.02, 0.03)
+    assert [type(r).__name__ for r in mesher.refinements] == ["RefinedNear", "RefinedBox"]
 
 
 def test_an_unset_setting_is_described_by_what_it_falls_through_to():
@@ -255,15 +273,33 @@ def test_the_command_makes_the_mesh_and_refuses_a_bad_file(tmp_path, boxed, caps
 
 def test_the_drawing_and_its_patches_are_read_while_the_rest_is_unfinished():
     unfinished = {key: DOCUMENT[key] for key in ("drawing", "region", "patches", "others")}
-    drawing, region, patches, others = drawing_sections_from_mapping(unfinished)
+    read = drawing_sections_from_mapping(unfinished)
     spec = mesh_spec_from_mapping(DOCUMENT)
-    assert (drawing, region, patches, others) == (
-        spec.drawing, spec.region, dict(spec.patches), spec.others,
-    )  # fmt: skip
+    assert read == DrawingSections(spec.drawing, spec.region, dict(spec.patches), spec.others)
+    assert read.feature_angle is None  # no sizes yet
     # A region not yet given, or naming no solid yet, is not a refusal: the drawing is still shown.
     for region_section in ({}, {"region": {"solids": []}}):
         read = drawing_sections_from_mapping({"drawing": DOCUMENT["drawing"], **region_section})
-        assert read[1:] == (None, {}, None)
+        assert (read.region, read.patches, read.others) == (None, {}, None)
+
+
+@pytest.mark.parametrize(
+    ("sizes", "angle"),
+    [
+        ({"max_size": 0.02, "feature_angle": 0.785}, 0.785),
+        ({"feature_angle": 1}, 1.0),
+        ({"max_size": 0.02}, None),
+        ({"feature_angle": 0.0}, None),
+        ({"feature_angle": "0.785"}, None),
+        ({"feature_angle": True}, None),
+        ({"feature_angle": float("nan")}, None),
+        ("not a section", None),
+    ],
+)
+def test_the_feature_angle_is_read_once_it_is_a_positive_number(sizes, angle):
+    # It decides which faces are ducts' sides; until it is usable the drawing is shown without.
+    read = drawing_sections_from_mapping({"drawing": DOCUMENT["drawing"], "sizes": sizes})
+    assert read.feature_angle == angle
 
 
 @pytest.mark.parametrize(
@@ -314,3 +350,31 @@ def test_a_periodic_mesh_is_not_also_written_as_a_polymesh():
         mesh_spec_from_mapping(
             {**DOCUMENT, "periodic": PERIODIC, "output": {"path": "a.aqmesh", "openfoam": "of"}}
         )
+
+
+def test_a_regions_baffles_are_read_named_none_or_unset_and_written_back_as_given():
+    # Unset is every sheet standing in the region; an empty list is none; a list names them.
+    for given, expected in (([], ()), (["plate"], ("plate",)), (None, None)):
+        region = {"solids": ["vessel"], **({} if given is None else {"baffles": given})}
+        spec = mesh_spec_from_mapping({**DOCUMENT, "region": region})
+        assert spec.region.cad_region().baffles == expected
+        assert mesh_spec_to_mapping(spec)["region"] == region
+
+
+def test_the_mesh_file_hands_the_mesher_its_patches_roles(monkeypatch, tmp_path):
+    # The roles a patch can be given -- layered, mapped, a pipe, a duct's side -- reach the mesh.
+    from aquaflux.case import mesh_file
+    from aquaflux.meshing import CadMesher
+
+    told = {}
+    monkeypatch.setattr(mesh_file, "read_step", lambda path, placement: "model")
+    monkeypatch.setattr(
+        CadMesher, "mesh", lambda self, model, region, patches, **options: told.update(options)
+    )
+    mesh_spec_from_mapping(DOCUMENT).mesh(tmp_path)
+    assert (told["pipes"], told["ducts"], told["mapped"]) == (
+        ("inlet",),
+        ("vessel_walls",),
+        ("lamp",),
+    )
+    assert told["others"] == "vessel_walls"

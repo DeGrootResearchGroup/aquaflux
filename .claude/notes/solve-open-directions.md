@@ -18,8 +18,8 @@ The recorded numbers (`solve-march.md`, `solve-march-log.md`, `solve-refuted-dir
 
 | case | cells | dofs | wall | compile | Krylov matvec |
 |---|---|---|---|---|---|
-| pitzDaily coupled RANS | 12 225 | ~73k | 363 s (ramp arm) | 396 s | 3.2–9.1 ms |
-| bfs3d coupled RANS | 23 040 | ~138k | ~50 min | — | 16.6–33.2 ms |
+| pitzDaily coupled RANS | 12 225 | 61 125 | 304 s cold before entry 15; back to back 265 s without it, 220 s with it, warm (2026-10-25, below) | ~100 s cold | JVP 27–34 ms, split 78–86 ms, 33 ms with entry 15 (standalone, below) |
+| bfs3d coupled RANS | 23 040 | 138 240 | 1635 s warm, 1749 s cold before entry 15; back to back later that day 1853 s without it, 1274 s with it (2026-10-25, below) | ~116 s warm | JVP 142–147 ms, split 525–576 ms, 206 ms with entry 15 (standalone, below) |
 
 The matvec actually run is `jax.jvp` through the full residual, which reconstructs nine gradients per
 evaluation on pitzDaily. Measured 2026-10-07 on pitzDaily (4-core Linux, jax 0.11.2): the jvp is 44 ms,
@@ -195,6 +195,65 @@ and unmeasured; the seam is `FieldwiseMatvec.seed_dtype`.
 ⚠️ **The probe's PATTERN is not a lever**: the colouring, the CSR structure and its gather map are
 built once per session and reused by every refit. A refit's probe (~1.5 s since #735, ~6 s before) is
 the ~165 JVPs that compute the new VALUES; keeping old values longer is what `refresh_on_cycles` already trades (2 / 3 / 4 within 7 % on pitzDaily; on bfs3d on 4-core Linux with the pivot floor, where a re-fit costs ~2.5 steps, 4 took 0.59x the solve of 3 and 5 1.18x, one sample each, 2026-10-19).
+
+### bfs3d against pitzDaily on one machine (2026-10-25): what the extra time is
+
+Container: Linux x86_64, 4-core Xeon @ 2.1 GHz, 15 GB, no swap, L3 260 MiB; Python 3.13.17, jax/jaxlib
+0.12.0.1, numba 0.68.0, glibc defaults unless an arm says otherwise; `main` `d7f5bf28`; both shipped
+`case.yaml`s (float32 split, `PivotFloor(0.15)`, reach 3, bfs3d `refresh_on_cycles` 4); nothing else running.
+
+**The marches** (`validation/run_case.sh <case>/compare.py`; the seconds are the march log's own `t(s)`
+column and `pc` lines):
+
+| | pitzDaily (cold) | bfs3d (cold) | bfs3d (warm) | ratio (warm bfs3d / pitzDaily) |
+|---|---|---|---|---|
+| steps / cycles / re-fits | 21 / 102 / 21 | 17 / 147 / 14 | 17 / 147 / 14, identical table | |
+| set-up through step 1 | 137 s | 353 s | 239 s | 1.7× |
+| re-fits (probe / refactor) | 34 s (19 / 13) | 411 s (295 / 113) | 401 s (286 / 112) | 12× (18× per re-fit) |
+| steps 2–end, outside the re-fits | 112 s over 99 cycles | 960 s over 142 cycles | 970 s | 8.7× (6.0× per cycle) |
+| solve | 304 s | 1749 s | 1635 s | |
+
+bfs3d's final `R` 3.672e-06, `x_r/h` 8.36 mid-span. The warm run's JAX work (from `JAX_LOG_COMPILES=1`): 1319
+compilations and 14 cache reads summing 50 s, tracing 49 s, lowering 17 s, all before step 1 (the largest
+compilation `_march_step` 4.7 s). Under `py-spy --idle --threads --nonblocking` the cold run sorted (by
+`profile_buckets.py`) into step program 761 s, coloured probe 301 s, other re-fit build 147 s, compilation and
+tracing 180 s; ~250 s fell into `driver` under a stack (`clean_up`/`clear_backends`) the wall clock shows did
+not happen (the process exited 6 s after the march ended), so `--nonblocking` mis-reads stacks here: use the
+march log's columns, not the capture, for bfs3d's split.
+
+**So the excess over the unknowns' 2.26× is per-unit cost, not counts**: bfs3d takes fewer steps and re-fits
+than pitzDaily and 1.44× the cycles. Two per-unit costs carry it, each set by the stencil the reach-3
+pattern stores in 3D (63 cells on hexahedra against 25 in 2D; `solve-refuted-directions.md`, "TRUNCATING the Jacobian"):
+
+- **One Krylov application is 6.9× pitzDaily's** (`validation/application_scaling.py`, hybrid start, mean
+  of 30 standalone calls, glibc defaults, so each standalone figure carries page faults the step's loop does
+  not pay):
+
+  | piece | pitzDaily ms | bfs3d ms | ratio | bfs3d cores |
+  |---|---|---|---|---|
+  | residual | 11–12 | 72–78 | 6.5× | 2.7 |
+  | JVP | 27–34 | 142–147 | 4.8× | 3.0 |
+  | split apply | 78–86 | 525–576 | 6.7× | 2.3 |
+  | — leading `[u, v, w, p]` cycle | 57–59 | 343–365 | 6.1× | 2.2 |
+  | — trailing `[k, ω]` cycle | 20–21 | 143–148 | 7.0× | 2.5 |
+  | — coupling product | 5–6 | 34–35 | 6.2× | 2.9 |
+
+  The split is ~78 % of an application on bfs3d. Its cost follows the stored entries: the leading fine
+  level holds 21.0M entries (mean row 228, widest 252 = 63 cells × 4 fields) against 2.68M (mean 73) on
+  pitzDaily, 7.8×, and the leading cycle costs 16–21 ns per fine-level entry on both cases. The trailing
+  hierarchy is 12 levels on bfs3d (5.2M fine entries; its last five levels coarsen 288 → 178 dofs), 2 on
+  pitzDaily.
+- **One re-fit is 18× pitzDaily's**: the probe 20.4 s against 0.89 s, 576 colours against 100 (5.8×, reach 3
+  in 3D) times ~4× per colour; the refactor 8.0 s against 0.64 s.
+
+**Inside the split apply** (`fusion_profile.py`, `FUSION_PROGRAMS=split`, bfs3d hybrid start, best of 15
+untraced calls 478 ms on 4 cores, 989 ms on one, parallel efficiency 52 %): 59 % of the one-core time is
+gather fusions (`values * x[columns]` written out whole: the leading fine level's is `f32[23224320]`, 177 MiB,
+two per apply), 37 % the row-sum custom fusions that read it back (`ynn_fusion`, never partitioned), the rest
+negligible. One kernel is in flight for 74 % of the 4-core span: a V-cycle is a chain, and each memory-bound
+gather is split into at most `ceil(sqrt(4))` = 2–4 parts. `--xla_cpu_experimental_ynn_fusion_type=-reduce`
+on Linux: split 525 → 586 ms (leading 343 → 482, trailing 143 → 107), not a lever, as recorded for macOS.
+**Built since: entry 15** (the split apply 576 → 206 ms on bfs3d, the march −31 %).
 
 ## 1–2. CLOSED — local Jacobian assembly and the materialized-`J` matvec
 
@@ -777,17 +836,59 @@ preconditioner is probably not the lever for that goal: with the split removed, 
 still about 4× the per-cell budget, and the compiled step's temporaries alone are about 44 KB a cell. **Take the
 measurement in 14a before any of 14b–14d.**
 
+**Re-baselined 2026-10-24 on `7fe27d07`** (`solve-direct-preconditioners-log.md`, "bfs3d memory by owner after
+the device fit, probe and seeds"): 2-step peak 8.87 GiB with the tracer, set in re-fit #2's leading block
+re-fit; the device holds 2.19 GiB of int32 pattern arrays against 0.66 GiB of float32 values, so the
+index storage, not the values, is now the split's memory, and 14d's "narrower column indices" means a
+cell-level (block) pattern with the field implicit, since global dof indices already need int32. The
+stored transposes are about half of every operator. Freed memory glibc keeps after the step program's
+first call (0.75 GiB) is in the baseline the peak sits on, so a `malloc_trim(0)` before each re-fit is
+an unmeasured, cheap arm on bfs3d (on pitzDaily it moved the peak 0.03 GiB).
+
+**The non-array residue is named (2026-10-24, same log, "What the resident memory holds beyond live arrays,
+on two meshes")**: JAX's compiled-program cache, 2.09 GiB on bfs3d against 1.06 on pitzDaily. About 0.7–0.9
+GiB is per-program runtime and compiler state over ~1300 executables; what doubles it between the meshes is
+not separated, so no 300k projection stands. Arrays XLA folded into every program holding the residual (14e)
+were 0.148 GiB of HLO on bfs3d but only ~0.05 GiB resident, measured on a march (2026-10-25).
+**Only the setup-only part of that cache can be given back, and most of it is three programs (2026-10-25,
+same log, "How much of the compiled-program cache a mid-run clear gives back" and "Which setup programs hold
+the reclaimable cache")**: the march recompiles and holds 1.4–1.5 GiB of the cache whatever is cleared; of
+the setup's ~0.38 GiB, `laplace_field`'s three per-call `newton_step` programs held 0.19 and never ran
+again; released since 14g.
+
 ### 14a. Attribute the compiled programs' temporaries — the deciding measurement
 
 **What.** `jit(...).lower(...).compile().memory_analysis()` on bfs3d's march step and on the probe's batched
 JVP, each compiled twice: with the shipped split and with an identity preconditioner. Compile only, no march.
 Optionally add one device-memory snapshot at the first re-fit's peak.
 
-**Why.** It splits the step's ~984 MiB of temporaries into the preconditioner's share and the residual
-JVP's. The preconditioner's share is chiefly the padded apply's gathered `(n_rows, width)` products.
+**Why.** It splits the step's ~1 GiB of temporaries into the preconditioner's share and the residual
+JVP's.
 - If the residual's share alone exceeds the per-cell budget once projected by face count, which is about
   2× on a polyhedral dual, the laptop target is closed whatever the preconditioner does.
 - If the padded products dominate, 14b–14d are worth doing.
+
+**The probe half, 2026-10-24:** the batched JVP's 829 MiB on bfs3d is the multiple-correction Green–Gauss
+face loop at its peak. Face-blocking it and the flux balance reaches ~440–472 MiB, no better than halving
+the batch, and is not built (`solve-refuted-directions.md`, "Assembling the residual's face sums in
+blocks").
+
+**The step half, 2026-10-25 (bfs3d, first step, `validation/step_temporaries.py`;
+`solve-direct-preconditioners-log.md`, "What the march step's temporary holds"):** the step's 1017 MiB of
+temporaries is 624 MiB the split's (the identity arm is 393), and 591 of that is int32 decoded padded
+columns, every operator's `s32[n_rows, width]` live twice at the peak: one copy XLA hoisted to the entry
+computation (the Arnoldi and final `x = M y` applications share it) and one rebuilt inside the true-residual
+`lax.cond` of `_ResidualStopGMRES`, where both arms peak. The gathered operand is one `f32[n_rows·width]`
+per application, not held; the solve's own vectors are 4 MiB. The residual's share without a split is ~2× a
+JVP (393 MiB, 17 KB a cell) because that cond branch recomputes a whole JVP while the Arnoldi loop's hoisted
+linearization is still held. So the split is the lever on the step's temporary, but through its decoded
+indices, not 14b–14c's values. The true residual moved out of the `lax.cond` into a one-trip loop saves
+nothing (+13.8 MiB; the decode is rebuilt in that loop too; ledger). **Built**: the cell-level padded
+product gathers once per cell row (`a0fca85b`): the step's temporary 1022.7 → 683.7 MiB, the split's share
+629.8 → 290.7; both marches unchanged in every count, bfs3d's 17.5 % faster, peak 5.29 → 5.12 GiB. Left: the decode is still held per call site
+(~295 MiB); keeping it in the loop body (`validation/padded_decode_hoisting.py`: four operators 443 → 161
+MiB) is untimed and would re-decode every apply. Unchanged on `main` after #825 (lazy transposes cut the step's arguments 1010 → 514 MiB,
+not its temporary).
 
 ### 14b. A consistent compact operator for the fit
 
@@ -812,11 +913,122 @@ Jacobian and the peak does not fall.
 ### 14d. Arithmetic-preserving storage cuts
 
 None of these needs a convergence study:
-- build the padded operators' stored transposes only when the adjoint asks;
-- do not store the fine Schur on its structural reach-6 pattern (133 MiB on bfs3d);
-- narrower column indices.
+- a cell-level pattern with the field implicit, in place of dof-level index arrays (2.19 GiB of int32 on
+  the device at bfs3d's step 1, 2026-10-24; the 36.7M dof entries are ~1.0M cell pairs × 36).
 
-They are worth doing for bfs3d's own sake, but not for the 300k target.
+The cell-level pattern was worth up to ~2 GiB on bfs3d; it scales with the entry count, so it is the one of
+these that also bears on the 300k target. The stored transposes, a third such cut, are built (below).
+
+**The Schur is no longer stored (2026-10-25, branch `claude/schur-storage`):** the smoother applies
+`S = C − D (M G)` from its pieces and the fit forms only `S`'s diagonal and row norms, a chunk of rows at a
+time (`solve-flow-block.md`, "`S` is never held"). After the lazy transposes it holds ~28 MiB less on a
+bfs3d-sized fine level and its fit's transient ~131 MiB less (lattice). It is not bit-identical (the apply
+sums in another order), so it is not strictly one of these cuts; measurements in `solve-flow-block-log.md`,
+"The Schur applied from its pieces (2026-10-25)".
+
+**The cell-level pattern is built for the probe, the padded layouts, nodal Galerkin maps and the SIMPLE
+cuts (2026-10-24, branch `claude/cell-level-pattern`):** bfs3d device int32 2.19 → 0.40 GiB at step 1's
+end, step-1 peak 8.07 → 7.19 GiB, resident 7.13 → 6.11 (`solve-direct-preconditioners-log.md`, "Cell-level
+pattern (§14d), stages 1–3"). The probe's host block patterns (140 MiB on bfs3d) followed
+(`CellLevelPattern`, branch `claude/host-cell-patterns`). Still dof level: the diagonal and cell-block
+gathers (small), a non-nodal or diagonal-padded level, the 1×1 pressure block `C` and `S`'s row columns, and the plan's own COO coordinates
+(`ColumnProbePlan.pattern_rows`/`pattern_cols`/`in_reach`, ~18 MiB host on bfs3d).
+
+**The transposes are packed only for an adjoint (2026-10-24, branch `claude/lazy-transposes`):** bfs3d
+device at step 1's end 1.20 → 0.69 GiB, step-1 peak 6.49 → 6.13 GiB (census runs), every forward leaf's
+digest and step 1's rows unchanged; pitzDaily march identical, peak 3.085 → 2.900 GiB
+(`solve-direct-preconditioners-log.md`, "Lazy transposes (§14d)"). Left in §14d: the fine Schur on its
+reach-6 pattern (since built, above).
+
+### 14e. BUILT (2026-10-24) — `BoundaryClosure.gradient_weight`'s unit tangents are broadcasts
+
+**What.** In `aquaflux/schemes/boundary_closure.py`, `gradient_weight`'s tangent
+`jnp.zeros_like(gradient).at[:, k].set(1.0)` becomes `jnp.broadcast_to(jnp.eye(dim, dtype=gradient.dtype)[k],
+gradient.shape)`. Pinned by `tests/unit/test_boundary_closure.py::test_the_gradient_weight_compiles_to_no_per_cell_constant`
+(red against the scatter form). `folded_constants.py`'s `RESIDUE_SCATTER_TANGENT=1` restores the old form in
+its own process, to re-measure.
+
+**Why.** XLA's constant folding evaluates the scatter at compile time and stores an `(n_cells, dim)` result per
+component and field in every program that holds the residual (15.87 MiB in bfs3d's residual alone, cells ×
+dim²); a broadcast is not folded. `validation/folded_constants.py` (on `50fe3be0`): bfs3d 15.87 → 0.05 MiB,
+pitzDaily 1.87 → 0.01, residual bit-identical on both. **Measured gain on a bfs3d march is small**: all programs'
+HLO 0.234 → 0.086 GiB, but the cache the clear frees 1.61 → 1.56 GiB and the 1-step peak 6.25 → 6.43 (inside the
+0.4 GiB spread); one run per arm (log entry above). Kept because it costs nothing and removes a per-cell term.
+
+### 14f. What the leading block re-fit holds at the march's peak (proposals, measured 2026-10-25)
+
+**Evidence.** A 2-step bfs3d march peaks in re-fit #2's leading block re-fit: 6.80 GiB with the tracer on
+`1bd8d292`, +1.06 GiB of live device arrays over step 1's end (log, "What sets bfs3d's 2-step peak"); after
+#825, 5.82 GiB and +0.67 (log, "Fitting the leading block last"; one run each).
+
+**What.** Three library changes, each to be measured with `memory_attribution.py`
+(`BFS3D_MEMORY_CENSUS_STAGES="block re-fit #3"`, `BFS3D_MEMORY_SAMPLE_DEVICE=1`, two steps):
+- CLOSED (2026-10-25): letting the probe's other float64 blocks go before the leading fit, by fitting it
+  last, measured no lower (ledger, "Fitting a refit's leading block last"); the leading block itself is its
+  fit's input, and the fit is computed in float64 by design;
+- BUILT (2026-10-25): the superseded leading inverse is freed at the start of a re-fit (`refit_keeps()`,
+  `solve.md`); live arrays at the re-fit's peak 1.36 -> 1.05 GiB, 2-step peak 5.80 -> 5.58 GiB, now set
+  by the step program's first call (log, "Freeing the superseded split at the start of a re-fit");
+- `fit_simple_level`'s 993 MiB of temporaries (as large as the step program's): fit per level or per row
+  chunk.
+
+**The superseded-inverse design is BUILT** (2026-10-25, measured on `main` `1c5a1875`, before #829 changed
+the SIMPLE fit): the design, its safety guard and the pre-registered measurement now live in `solve.md`
+(the early-release bullet) and the log, "Freeing the superseded split at the start of a re-fit".
+
+### 14g. BUILT (2026-10-25) — `laplace_field` releases its per-call programs when it returns
+
+`laplace_field` compiles its solve as a function defined per call under `jax.jit`, so the program goes with
+it; it had handed per-call closures to a module-level `eqx.filter_jit(newton_step)`, which kept a program
+per call, with its closures, for the process. bfs3d: the cache a run holds at its end is 0.17 GiB smaller
+(two runs per arm); resident and peak move within the run-to-run spread, because the seed's last bits
+also change the first fit's coarsening (`flow-log.md`, "laplace_field's per-call programs"). The Laplace
+hierarchy's own `fit_levels` / `compiled_apply` / `_operator_spectral_estimate` entries (~0.01 GiB) stay.
+A global `jax.clear_caches()` after setup was measured first and is not the fix (log, "How much of the
+compiled-program cache a mid-run clear gives back").
+
+### 14h. Two small allocator-side ideas (proposals, not built, 2026-10-25)
+
+- **Collect the march's cycles when a solve returns.** After `staged_march` returns, its session and splits
+  are cyclic garbage until Python's collector reaches them: 1.60 GiB of device arrays on bfs3d on
+  `13fa17d4` (before #817--#825), 0.16 GiB on `39786723` (after #817--#819), each read by
+  `memory_residue.py`'s `RESIDUE_CLEAR=end` as a `gc.collect()` + `malloc_trim(0)` before the cache clear
+  (log, "What the resident memory holds beyond live arrays, on two meshes"). The resident drop at that step
+  (1.0--1.3 GiB) includes the trim's and is not separated from the collection's. It costs what runs next in
+  the same process (the adjoint, a second solve), never the march's own peak. Candidate: one `gc.collect()`
+  at the end of `solve_coupled` / `solve_flow_march`, before `root_adjoint` is attached; measure the
+  adjoint's peak with and without.
+- **Trim after the step program's first call.** That call leaves 0.68 GiB (bfs3d) / 0.38 (pitzDaily) of freed
+  memory in glibc's arenas (`memory_residue.py`, `RESIDUE_TRIM`, `13fa17d4`). The session already trims before
+  every re-fit (#818), so this would not lower a march's peak, only what a march holds between its first
+  step and its next re-fit. Worth doing only if a case's peak is ever set there, which bfs3d's is not.
+
+## 15. BUILT (2026-10-25) — a fused level product for the traced hierarchies
+
+Every padded-row product on the CPU is one fused, threaded Numba loop called from inside the compiled
+program (`precondition/fused_product.py`; rule: `solve-amg-multigrid.md`). Back to back on a 4-core Linux
+container: bfs3d 1853 → 1274 s, its step work outside the re-fits 1111 → 570 s; pitzDaily 265 → 220 s with an
+identical step table. The kernel bound that motivated it (`validation/spmv_kernel_probe.py`), the spikes and
+the measurements: `solve-amg-multigrid-log.md`, "The fused level product (2026-10-25)". Still unmeasured: the
+Mac, where Numba's pip wheels usually offer only the `workqueue` layer, which keeps XLA's form.
+
+## 16. A cheaper pressure probe on stretched meshes (bfs3d, 2026-10-26)
+
+bfs3d ships pressure at reach 3, the rest at 2 (291 seeds per fit). A reach-2 pressure probe (234 seeds)
+fails because its fit's COARSE levels go stale fast across the inner loop (`solve-refuted-directions.md`,
+the 2026-10-26 entries). Raced on three perturbed bfs3d draws per arm (log, "THE REACH-2 RACE"):
+- **c. BUILT, off by default, a wash on bfs3d — the strong couplings chosen from the Jacobian**
+  (`precondition.StrongCouplings`, `JacobianProbeSpec.strong_couplings`), the library form of the
+  raced geometric skeleton: 243 seeds, the same 17 steps on every draw, ~1 % of wall time (log,
+  "`StrongCouplings` (library, 2026-10-26)"). bfs3d stays on `[2, 2, 2, 3, 2, 2]`. Unmeasured: the
+  zero-shift adjoint under it, pitzDaily, other meshes.
+- **a. Re-fit inside the inner loop at reach 2 — the proxy LOST, the real thing is unmeasured.**
+  `refresh_on_cycles` 2 or 3 with every column at 2 took 25–51 steps and failed once. A real in-loop
+  re-fit (the session re-fitting between inner iterates without ending the step) needs the traced inner
+  loop broken on the host; not built.
+- **b. Exact coarse operators** through the frozen aggregates, the fine level from a reach-2 probe.
+  Unmeasured; the only direction aimed at the component that fails.
+Records: `validation/reach_research/option4_diagnostic.md`, `option1_audit.md`.
 
 ## Smaller housekeeping
 

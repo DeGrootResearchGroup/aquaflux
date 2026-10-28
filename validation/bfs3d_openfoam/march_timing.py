@@ -55,6 +55,13 @@ def main() -> None:
         flush=True,
     )
     print(f"per-step record: {log_path}", flush=True)
+    status = Path("/proc/self/status")
+    if status.exists():
+        # The process's resident high-water mark: on the CPU backend JAX's device buffers live in this
+        # process, so it is host and device together. Linux only; elsewhere nothing is printed.
+        for line in status.read_text().splitlines():
+            if line.startswith(("VmHWM:", "VmRSS:")):
+                print(f"{line.split()[0][:-1]} {int(line.split()[1]) / 2**20:.2f} GiB", flush=True)
 
 
 if __name__ == "__main__":

@@ -2,12 +2,15 @@
 
 Each test fits one level's pieces through a plan and checks them against the same quantities formed
 independently with scipy and numpy on the host: the approximate velocity inverse (Jacobi, Frobenius,
-SIMPLEC, and the per-cell block), the correction ``M G`` and the Schur complement ``C - D M G`` with its
-diagonal approximate inverse.
+SIMPLEC, and the per-cell block), the correction ``M G``, the pressure block ``C``, and the diagonal
+approximate inverse of the Schur complement ``C - D M G``, which the fit forms from ``S``'s rows without
+holding ``S``.
 """
 
 from __future__ import annotations
 
+import equinox as eqx
+import jax
 import numpy as np
 import pytest
 import scipy.sparse as sp
@@ -17,6 +20,7 @@ from aquaflux.precondition.padded_rows import _PaddedRowOperator
 from aquaflux.precondition.simple_fit import fit_simple_level, refuse_unusable, simple_plan
 
 N_CELLS, FIELDS = 30, 3
+DEFAULT_TERMS = simple_fit.TERMS_PER_CHUNK
 
 
 def _saddle(seed: int = 0, shape: str = "mixed") -> sp.csr_matrix:
@@ -75,10 +79,22 @@ def _saddle(seed: int = 0, shape: str = "mixed") -> sp.csr_matrix:
     return sp.csr_matrix((a.data[order], a.indices[order], a.indptr), shape=a.shape)
 
 
-def _fit(a: sp.csr_matrix, **splitting):
+def _fit(a: sp.csr_matrix, fit=fit_simple_level, **splitting):
     plan = simple_plan(SparsePattern.of(a.sorted_indices()), FIELDS + 1, **splitting)
-    values, checks = fit_simple_level(plan, _PaddedRowOperator.from_scipy(a).values)
+    values, checks = fit(plan, _PaddedRowOperator.from_scipy(a).values)
     return plan, values, checks
+
+
+def _compiled_afresh():
+    """The fit under a compilation cache of its own, so it is traced at the chunk size now set.
+
+    ``TERMS_PER_CHUNK`` is read when the fit is traced, so the shared compiled fit would run whatever
+    size it was first traced at; clearing every cache instead recompiles everything else a test uses.
+    """
+    traced = fit_simple_level.__wrapped__
+    # A function object of its own: equinox keys its compilation cache on the function, so jitting the
+    # same one again would reuse the shared trace.
+    return eqx.filter_jit(lambda plan, slot_values: traced(plan, slot_values))
 
 
 def _blocks(a: sp.csr_matrix):
@@ -122,7 +138,7 @@ def _host_velocity_inverse(f: sp.csr_matrix, frobenius: bool, block: bool) -> sp
     ],
     ids=["jacobi", "frobenius", "frobenius-block", "exact-block"],
 )
-@pytest.mark.parametrize("terms_per_chunk", [simple_fit.TERMS_PER_CHUNK, 7])
+@pytest.mark.parametrize("terms_per_chunk", [DEFAULT_TERMS, 7])
 @pytest.mark.parametrize(
     ("shape", "aligned_rows", "aligned_divergence"),
     [("mixed", False, True), ("aligned", True, True), ("ragged", False, False)],
@@ -134,11 +150,13 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
     gives the same pieces.
 
     The small chunk takes the products and the Gram matrices through many chunks and a ragged last one,
-    which the default size never reaches on a fixture this small.
+    which the default size never reaches on a fixture this small; it is traced afresh, since the shared
+    compiled fit keeps the size it was first traced at.
     """
     monkeypatch.setattr(simple_fit, "TERMS_PER_CHUNK", terms_per_chunk)
+    fit = fit_simple_level if terms_per_chunk == DEFAULT_TERMS else _compiled_afresh()
     a = _saddle(shape=shape)
-    plan, values, checks = _fit(a, **splitting)
+    plan, values, checks = _fit(a, fit, **splitting)
     assert plan.aligned_velocity_rows == aligned_rows
     assert bool(plan.divergence_run_width) == aligned_divergence
     refuse_unusable(checks)
@@ -148,15 +166,13 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
     correction = (m @ g).toarray()
     schur = (c - d @ (m @ g)).toarray()
 
-    def dense(layout, pair):
-        return layout.with_values(*pair).to_scipy().toarray()
+    def dense(layout, values):
+        return layout.with_values(values).to_scipy().toarray()
 
     np.testing.assert_allclose(
         dense(plan.correction_layout, values.correction), correction, rtol=1e-12, atol=1e-14
     )
-    np.testing.assert_allclose(
-        dense(plan.schur_layout, values.schur), schur, rtol=1e-12, atol=1e-14
-    )
+    np.testing.assert_array_equal(dense(plan.pressure_layout, values.pressure), c.toarray())
     if block:
         np.testing.assert_allclose(
             dense(plan.block_layout, values.block_inverse), m.toarray(), rtol=1e-11, atol=1e-14
@@ -168,11 +184,47 @@ def test_the_fitted_pieces_are_the_host_formed_ones(
         else 1.0 / schur_diagonal
     )
     np.testing.assert_allclose(np.asarray(values.schur_inverse), expected, rtol=1e-12)
-    # Both halves of the transpose are the same operator's.
-    schur_operator = plan.schur_layout.with_values(*values.schur)
+    # Both halves of each transpose are the same operator's.
     x = np.random.default_rng(3).standard_normal(N_CELLS)
-    np.testing.assert_allclose(
-        np.asarray(schur_operator.apply(x)), schur @ x, rtol=1e-12, atol=1e-13
+    for layout, pair, matrix in (
+        (plan.pressure_layout, values.pressure, c),
+        (plan.divergence_layout, values.divergence, d),
+    ):
+        operator = layout.with_values(pair).with_transpose()
+        y = np.random.default_rng(5).standard_normal(matrix.shape[0])
+        (transposed,) = jax.linear_transpose(operator.apply, np.zeros(matrix.shape[1]))(y)
+        np.testing.assert_allclose(np.asarray(transposed), matrix.T @ y, rtol=1e-12, atol=1e-13)
+    assert x.shape == (N_CELLS,)
+
+
+@pytest.mark.parametrize("shape", ["mixed", "ragged"])  # the two ways the rows of D are read
+def test_the_schur_rows_reduce_alike_in_any_chunking(monkeypatch, shape) -> None:
+    """``S``'s diagonal and row norms come out bit for bit the same however its rows are chunked.
+
+    Each chunk places its rows' terms in a buffer of its own and reads the diagonal at its rows' global
+    indices, so a chunk of several rows with a ragged last one -- padding rows past the level's end --
+    is where an off-by-one in either would show. Every size here is checked to give at least one such
+    chunking, against the fit in one chunk.
+    """
+    a = _saddle(shape=shape)
+    splitting = {"frobenius": True, "block_splitting": True, "schur_frobenius": True}
+    chunkings = []
+    in_chunks = simple_fit._in_chunks
+
+    def recording(n_rows, per_row):
+        rows, chunks = in_chunks(n_rows, per_row)
+        chunkings.append((n_rows, rows, chunks))
+        return rows, chunks
+
+    monkeypatch.setattr(simple_fit, "_in_chunks", recording)
+    monkeypatch.setattr(simple_fit, "TERMS_PER_CHUNK", 1 << 30)
+    whole = np.asarray(_fit(a, _compiled_afresh(), **splitting)[1].schur_inverse)
+    for terms in (76, 133):
+        monkeypatch.setattr(simple_fit, "TERMS_PER_CHUNK", terms)
+        chunked = _fit(a, _compiled_afresh(), **splitting)[1].schur_inverse
+        np.testing.assert_array_equal(np.asarray(chunked), whole)
+    assert any(n == N_CELLS and 1 < rows and rows * chunks > n for n, rows, chunks in chunkings), (
+        chunkings
     )
 
 
@@ -234,6 +286,8 @@ def test_a_level_storing_no_velocity_pressure_coupling_has_the_pressure_block_as
         plan, values, checks = _fit(a, **splitting)
         refuse_unusable(checks)
         c = _blocks(a)[3].toarray()
-        schur = plan.schur_layout.with_values(*values.schur).to_scipy().toarray()
-        np.testing.assert_array_equal(schur, c)
-        assert plan.correction_layout.with_values(*values.correction).to_scipy().nnz == 0
+        np.testing.assert_array_equal(
+            plan.pressure_layout.with_values(values.pressure).to_scipy().toarray(), c
+        )
+        np.testing.assert_allclose(np.asarray(values.schur_inverse), 1.0 / np.diag(c), rtol=1e-14)
+        assert plan.correction_layout.with_values(values.correction).to_scipy().nnz == 0

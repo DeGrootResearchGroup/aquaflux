@@ -1,15 +1,19 @@
 ---
 paths:
   - "aquaflux/precondition/sparse_jacobian.py"
+  - "aquaflux/precondition/probe_layout.py"
+  - "aquaflux/precondition/kronecker_pattern.py"
   - "aquaflux/precondition/host_preconditioner.py"
   - "aquaflux/precondition/materialized_preconditioner.py"
 ---
 
 # Rules — `aquaflux/precondition/` the frozen-host contract and Jacobian materialization (and the record of the deleted direct preconditioners)
 
-This file governs three live modules: the frozen-host contract (`host_preconditioner.py`), the shared
-materialized base (`materialized_preconditioner.py`) and the coloured-probe Jacobian
-(`sparse_jacobian.py`). Package-wide contracts are in `solve.md`. Dated measurements and the
+This file governs the frozen-host contract (`host_preconditioner.py`), the shared materialized base
+(`materialized_preconditioner.py`), the coloured-probe Jacobian (`sparse_jacobian.py`: colouring, plan,
+gather-map builders, seeds, materialize), the probe's stored layout and de-compression
+(`probe_layout.py`: `BlockLayout`, `ProbeGather`, `ProbedBlocks`, split out of `sparse_jacobian.py` at
+its size ratchet on 2026-10-24) and the cell-level pattern (`kronecker_pattern.py`). Package-wide contracts are in `solve.md`. Dated measurements and the
 investigation behind each entry are in `.claude/notes/solve-direct-preconditioners-log.md` (never
 auto-loads).
 
@@ -86,7 +90,7 @@ bare block inverse).
   `materialize_block_jacobian(matvec, plan)` (one `jax.jvp` per colour × column field). Both take a
   `ColumnProbePlan`: `ColumnProbePlan.uniform(colouring, n_fields)` for one reach, `column_probe_plan(owner,
   nb, n, column_reach, pattern_reach)` for a reach per column (built by `jacobian_probe.py`).
-  `block_stencil_gather_map(plan)` returns a `ProbeGather`. Field-major DOF layout `(cell i, field f) =
+  `block_stencil_gather_map(plan)` returns a `ProbeGather` (`probe_layout.py`). Field-major DOF layout `(cell i, field f) =
   f·n + i`. The coupled RANS residual reaches distance 3 on an unskewed mesh; `jacobian_relative_error`
   checks the reach covers it.
 - **The colouring is by saturation degree** (`_saturation_colouring`, vertex selection by a bucket queue,
@@ -98,12 +102,13 @@ bare block inverse).
 - **Every probe structure has a `BlockLayout`** (`block_stencil_gather_map(plan, leading_fields=)` ->
   `ProbeGather.layout`; `materialize_blocks` -> `ProbedBlocks`). A field split's is laid out by the
   split's blocks; with no `leading_fields` it is the one group (`leading_dofs == n_dofs`,
-  `BlockLayout.whole` its pattern, the other three blocks empty, `ProbeGather.indptr`/`indices` the very
-  arrays of that pattern), so a single block inverse is fitted by the same device path (2026-10-23).
+  `BlockLayout.whole` its pattern, the other three blocks empty, `ProbeGather.indptr`/`indices` read off
+  that pattern), so a single block inverse is fitted by the same device path (2026-10-23).
   The layout gives:
   one block-major value array **on the device** (2026-10-22), each block an `entry_map.DeviceMatrix` of
-  its slice over a host `SparsePattern` the layout owns (`SparsePattern.of_arrays`, so a hierarchy fitted
-  to that block shares it rather than holding a copy), the shift added at the stored diagonal by one
+  its slice over a host `SparsePattern` the layout owns (a `CellLevelPattern` on the cell path, below;
+  `SparsePattern.of_arrays` on the entry-by-entry one; either way a hierarchy fitted to that block shares
+  it rather than holding a copy), the shift added at the stored diagonal by one
   donated scatter (`_add_at`; refused if a diagonal entry is missing). `materialize_block_jacobian` (the
   public host-matrix form) refuses a split layout and reads a whole one back once; `refresh_in_place`
   takes the block path whenever a `structure` is given and calls `_refactor_blocks`:
@@ -113,6 +118,35 @@ bare block inverse).
   reads the fitted block(s) back once, since a factory coarsens on the host. A refit reads nothing back
   but the pivot floor's row set (`solve-field-split.md`, "Refresh"). Pinned for one group by
   `test_a_single_block_refit_probed_on_the_device_fits_what_the_whole_host_matrix_fits`.
+- **The probed pattern is a cell pattern over full blocks of field pairs, and the probe's index arrays are
+  held at cell level (2026-10-24, the first stage of `solve-open-directions.md` §14d).** Every pattern
+  entry keeps all its field pairs (`in_reach` zeros stay stored), and `active_rows` drops whole blocks, so
+  each block is `C ⊗ (r×c)`: `kronecker_pattern.KroneckerPattern(cells, row_fields, column_fields)`, with
+  `entry_position` the one formula placing entry `(a, cell entry, b)` in the degree-of-freedom CSR order
+  (`a·c·nnz_C + c·indptr[i] + b·len(i) + k`), so the **values keep exactly the order the dof pattern gives
+  them**. `block_stencil_gather_map` takes the cell path (`_cell_probe_gather`: `BlockLayout.of_cells`, the
+  dof block patterns expanded from `C` without a sort; `_CellEntries`, per distinct colouring the in-reach
+  cell entries grouped by column colour, plus each entry's row and `C`'s `indptr`; `_scatter_cell_chunk`
+  places a chunk for every stored row field) whenever `_stored_blocks` finds each of the four blocks kept
+  or dropped whole, else the entry-by-entry path (`_dof_probe_gather`, `_DofEntries` holding `_source` /
+  `_position`, two indices per stored entry). Pinned equal, layout array for array and values exactly, by
+  `test_the_cell_level_probe_order_lays_out_and_fills_what_the_entry_order_does`; the fallback by
+  `test_a_partition_keeping_part_of_a_block_is_probed_entry_by_entry`. On a 21952-cell lattice at 6
+  fields and reach 3 (45.5M entries) the structure retains 193 MB against 546 MB, the rest being the host
+  whole pattern's CSR arrays (`gather_map_memory.py --side 28 --reach 3 --fields 6`, 2026-10-24, 4-core
+  Linux, jax 0.12.0.1, before the block patterns below were held at cell level). The padded layouts,
+  Galerkin maps and SIMPLE cuts downstream are cell level too (`solve-amg-multigrid.md`,
+  `solve-flow-block.md`).
+  - **The layout's block patterns are `kronecker_pattern.CellLevelPattern`s (2026-10-24):** a
+    `SparsePattern` held as its `KroneckerPattern`, whose `indptr`/`indices` are formed on each read
+    (`KroneckerPattern.dof_arrays`) and never kept, whose `matches` is identity, then cell patterns, and
+    expands only against a pattern held as arrays. These were the session's host `SparsePattern`s (140
+    MiB on bfs3d, 22 → 4.9 MiB of live host patterns on pitzDaily). Every refit checks its blocks against
+    them by identity, so only the first fit's host read-back (`as_scipy`) and `SparsePattern.of` at
+    build expand them; `ProbeGather.indptr`/`indices` are properties for the same reason. ⚠️ A caller
+    reading both arrays should read them once (each read expands). Pinned by
+    `test_a_refit_never_expands_the_probe_s_cell_level_block_patterns` (a spy on the expansion) and
+    `test_a_cell_level_pattern_matches_exactly_the_patterns_storing_its_entries`.
 - **A materialize holds the matrix plus one chunk.** Seeds are formed one chunk at a time **on the
   device** (2026-10-23): `ColumnProbePlan.seed_block(start, stop, rows=)` (whole-state) and
   `field_seeds(start, stop, rows=, dtype=)` (one field's) are one jitted indicator, `_indicator_seeds`,
@@ -126,10 +160,10 @@ bare block inverse).
   a materialize makes up to `n_fields − 1` more calls than `ceil(n_probes / batch)`; `probe_batch_size=None`
   is one batch per field),
   and `ProbeGather` scatters each chunk's responses as they are computed, **on the device** (2026-10-22):
-  the probe-grouped order (`_source`, `_position`) lives there, `_ChunkProbe.responses` returns device
-  arrays, and `_scatter_chunk` (one jit, `donate_argnums=0`) places a chunk through `ProbeGather.width`
-  lanes (the most entries any chunk fills), so one program serves every chunk; a lane past the chunk's
-  end is dropped (`mode="drop"`). `ProbeGather.values(probing)` is the loop; the whole-matrix path reads
+  its entry order (above) lives there, `_ChunkProbe.responses` returns device arrays, and one jitted
+  kernel per order (`_scatter_cell_chunk` / `_scatter_chunk`, `donate_argnums=0`) places a chunk through
+  `ProbeGather.width` lanes (the most cell entries, or entries, any chunk reads), so one program serves
+  every chunk; a lane past the chunk's end is dropped (`mode="drop"`). `ProbeGather.values(probing)` is the loop; the whole-matrix path reads
   the values back once at its end. Out-of-reach entries need no sentinel. The gather map's one-time build (`_index_dtype`, COO→CSR grouping) runs at case construction
   and peaks above any single materialize. Measurements: log, "Chunked seeds and per-chunk
   de-compression" and "The gather map's build peak".
@@ -145,6 +179,13 @@ bare block inverse).
     Jacobian and the compiled step, not by building the case (0.84 GiB): 8.46 GiB over the shipped 17-step
     march against 12.25 GiB on `main` `1b68caf6`, identical step tables (2026-10-19, 4-core Linux, jax
     0.12.0): log, "bfs3d memory by owner" and "Where a run's memory goes".
+    After the device fit (#804–#808) the 2-step peak is 8.87 GiB in a later re-fit's leading block re-fit,
+    and the device holds 2.19 GiB of int32 pattern arrays against 0.66 GiB of float32 values (2026-10-24,
+    `7fe27d07`; log, "bfs3d memory by owner after the device fit, probe and seeds"). Current: 5.58 GiB
+    with the tracer, set by the step program's first call (2026-10-25, after #817--#825 and the early
+    release of the superseded split; `solve.md`); the whole shipped march peaks at 4.43 GiB `VmHWM`
+    against 8.81 GiB on `1290aa11`, same machine and step table (2026-10-25, `af118f90`; validation
+    log, "A week of memory and time work, paired on one machine").
   - **One program per column field (2026-10-20).** A problem whose assembler implements
     `residual_with_field(state, field, values)` (`FieldwiseResidual`) sets `probes_by_field = True`
     (`_CoupledProblem`, `_FlowProblem`); the session (`_probe_products`, used by both the fit and the
@@ -183,14 +224,31 @@ bare block inverse).
 - **Probe colouring reach is a per-case choice, set by measurement; the pattern stays at reach 3.**
   pitzDaily probes every column at reach 2 inside a reach-3 pattern (`column_reach: [2, 2, 2, 2, 2]`,
   2026-10-14: same 18 steps / 123 cycles / `x_r/h` 8.0686, probe per refit 4.3–5.8 → 2.5–3.4 s; at zero
-  shift 7 % more forward applies, none transposed). bfs3d keeps uniform reach 3 because the same colouring
-  cost it 34 % of its wall in one run per arm -- a single draw from a march whose step count spread 22–82 under last-bit perturbations (2026-10-17/18) (`validation.md`) -- (measured by the project owner, PR #722, `validation/bfs3d_openfoam/compare.py`
-  with `BFS3D_COLUMN_REACH=2,2,2,2,2,2`, shipped `case.yaml`, `77b03c18`, Apple M3 Pro, jax 0.10.2):
-
-  | probe colouring (pattern reach 3) | steps | restart cycles | final `\|R\|` | refit (probe / refactor) | solve |
-  |---|---|---|---|---|---|
-  | uniform reach 3 (shipped) | 18 | 137 | 5.1e-06 | 11.9–12.7 s (8.2–8.5 / 3.6–4.2) | 522 s |
-  | reach 2 | 21 | 216 | 5.0e-06 | 6.0–6.7 s (3.4–3.6 / 2.4–3.0) | 697 s |
+  shift 7 % more forward applies, none transposed). bfs3d probes pressure at reach 3 and every other
+  column at 2 (`column_reach: [2, 2, 2, 3, 2, 2]`, since 2026-10-26): three perturbed draws per arm
+  (`BFS3D_NU_PERTURBATION` 0 / ±1e-14, pivot floor, 4-core Linux, jax 0.12.0.1, `45a9059`) gave 17 steps
+  / 146 cycles every draw against uniform reach 3's 17 / 143, probe ~23 → ~10 s per fit, march
+  1068–1203 s against 1276–1467 s (10–18 % shorter), all to `x_r/h` 8.361. Every column at reach 2 took
+  21 / 23 / 40 steps, 194–384 cycles (2026-10-25). Tables: log, "Probe colouring reach 2 — pitzDaily and
+  bfs3d" and "bfs3d: pressure alone at reach 3". The zero-shift adjoint ties: 331 / 373 applications
+  (forward / transposed) to 1e-8 against uniform's 335 / 383 (`zero_shift_adjoint.py`, `state-00017`).
+  `JacobianProbeSpec.strong_couplings` (pressure at reach 2 plus the couplings beyond it the first fit
+  shows to be strong, 243 seeds) kept the 17 steps on three draws and saved ~1 %, a wash, so bfs3d
+  does not set it (log, "`StrongCouplings` (library, 2026-10-26)").
+- **`StrongCouplings` (`strong_couplings.py`; `JacobianProbeSpec.strong_couplings`, off when unset)
+  probes one column at its `column_reach` plus the couplings beyond it that the Jacobian shows to be
+  strong.** At the session's first fit (`MaterializedSession._with_strong_couplings`) the column is
+  probed once at the plan's `pattern_reach`; beyond its own reach a pair `(i, j)` is kept when its
+  magnitude, in some judged row field (`rows`, default the column's own), is at least `fraction` times
+  row `i`'s smallest **nonzero** face-neighbour coupling to the column. Every fit from then on probes the
+  column for that pattern (`ColumnProbePlan.with_column_pattern`, coloured collision-free for it); the
+  pattern is held for the session, like a frozen coarsening. It needs the plan to carry its cell graph
+  (`ColumnProbePlan.edges`, set by `column_probe_plan`) and refuses `column_reach` unset. The selection
+  is `MaterializedSession.coupling_selection` and is described to the `"probe"` report sink.
+  `JacobianProbeSpec.build_settings()` is what reaches a problem's `probe` (all but this field).
+  ⚠️ Judge the pressure column by its continuity rows (the default), not the momentum rows: a momentum
+  component's pressure coupling across a face parallel to that component is near zero without being
+  zero, so its weakest face coupling is a poor yardstick (the option 1 audit's static-bar failure).
 
   The shipped arm on a 4-core Linux container (Xeon 2.1 GHz, jax 0.11.2, `b1648725`, glibc defaults,
   cold cache, 2026-10-17): 29 steps / 173 cycles / 3.7e-06 / re-fit 56–64 s (probe 37.7–41.8 / refactor
@@ -201,9 +259,23 @@ bare block inverse).
   footprint (re-fit 48.7 → 39.7 s at `state-00032`; a cadence-5 march without the pivot floor 2439 → 2180 s, peak 12.63 → 12.15 GiB), the retaining allocators are not usable for a march
   in 15 GiB: `.claude/notes/validation-log.md`, "bfs3d on a 4-core Linux container" and the subsection after it.
 
-  What decides it is the far mass the colouring folds (`probe_reach_audit.py`: bfs3d's p carries 1.1e-3 of
-  its norm beyond reach 2, against ~4e-4 folded on pitzDaily). Untested: shortening only some of bfs3d's
-  columns. pitzDaily arms and the reach-4 pattern: log, "Probe colouring reach 2 — pitzDaily and bfs3d".
+  **What decides it is cell aspect ratio, through the pressure column** (2026-10-26, `validation/reach_folding.py`);
+  the distance-3 couplings exist at all because bfs3d is graded (the gradient's second pass, `schemes.md`).
+  Reach is graph distance; across a stretched cell the cell three faces away can couple more strongly
+  than the face neighbour along its long side, so dropping the distance-3 pressure couplings removes some
+  as large as couplings kept. bfs3d's largest dropped `|C_ij|` is 1.3x the row's weakest face coupling at
+  the median in cells whose spacing ratio exceeds 10:1 (41 % of its cells) and 0.23x in 2–10:1 ones (58 %);
+  pitzDaily's is 0.3–0.9 % in its 98.5 % of cells below 10:1 and 0.5x in its 183 stretched ones. Only p matters: probing p alone
+  at 2 reproduces bfs3d's failure, which is a stagnant solve at the harder inner iterates, not a slower
+  one; the drop alone stagnates it, the fold alone does not, and neither the coarsening nor float32 is
+  involved. A block-norm measure of the fold (bfs3d 2x pitzDaily) cannot predict this. Re-measure on
+  any case with strongly graded cells before shortening p. Why a short pressure probe fails only
+  in the march: a fit made from it is as good as reach 3's at the state it was fitted at, but loses
+  heavily one or two inner solves later, and the part that loses is its coarse levels (Galerkin sums
+  over pressure rows that nearly cancel), not the fine smoother; no fine-level smoother setting rescues
+  it (log, "Why a reach-2 pressure fit fails in the march"; `validation/reach_research/`). pitzDaily arms and the
+  reach-4 pattern: log, "Probe colouring reach 2 — pitzDaily and bfs3d"; the aspect-ratio measurements:
+  same section, "WHY bfs3d NEEDS REACH 3".
 - **Keep the materialized pattern at reach 3 even where a column is probed shorter.** A reach-2 pattern
   changes the aggregation's coarse space (3 levels / 480 coarse equations against 2 / 1296 on bfs3d) and
   diverged the then-shipped pattern-dependent smoother; positions, not values, were causal, and a stored
@@ -211,10 +283,12 @@ bare block inverse).
   before lowering it; ledger: `solve-refuted-directions.md`, reach-2 under "Low-β directions". Under the
   traced split, zeroing the VALUES beyond reach 2 (positions kept) costs 1.2–1.9× the applications on
   bfs3d, and beyond reach 1 does not converge at all (ledger, "TRUNCATING the Jacobian to reach 1").
-- ⚠️ **A short reach corrupts rather than truncates.** A colouring is collision-free only for the pattern
+- ⚠️ **A short reach both truncates and corrupts.** A colouring is collision-free only for the pattern
   it was built at, so two cells sharing a reach-2 colour can both couple to a row at distance 3; the
   response holds the sum and the de-compression charges it to the near entry. So pattern entries outside a
-  column's own reach are written as explicit zeros (`ColumnProbePlan.in_reach`), never gathered. Pinned by
+  column's own reach are written as explicit zeros (`ColumnProbePlan.in_reach`), never gathered: each far
+  coupling is removed from its own position AND added onto a near one. On bfs3d the removal is what
+  breaks the solve (above). Pinned by
   `test_a_short_probed_column_zeroes_its_out_of_reach_entries` and
   `test_per_column_plan_recovers_a_mixed_reach_matrix_exactly_and_more_cheaply`.
 - ⚠️ **The residual can reach past `stencil_reach`, and then every column aliases.** `CorrectedGreenGauss`

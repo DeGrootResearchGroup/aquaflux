@@ -66,7 +66,7 @@ def test_a_cube_layered_all_round_leaves_the_cube_shrunk_by_the_thickness():
     inner = grown.points[np.unique(grown.inner.triangles)]
     np.testing.assert_allclose(inner.min(axis=0), thickness, rtol=1e-12)
     np.testing.assert_allclose(inner.max(axis=0), 1.0 - thickness, rtol=1e-12)
-    assert grown.sides.shape == (0, 4)
+    assert grown.sides.n_faces == 0
 
 
 def test_layers_meeting_a_bare_face_slide_along_it():
@@ -76,9 +76,12 @@ def test_layers_meeting_a_bare_face_slide_along_it():
     top = np.all(np.isclose(points[triangles][:, :, 2], 1.0), axis=1)
     grown = LAYERS.extrude(points, Polygons(triangles), ~top)
     thickness = LAYERS.offsets()[-1]
-    side_points = grown.points[grown.sides]
+    assert grown.sides.triangles.size == 0  # no fan, so every side a quadrilateral
+    side_points = grown.points[grown.sides.quads]
     np.testing.assert_allclose(side_points[:, :, 2], 1.0, atol=1e-12)
-    assert len(grown.sides) == 4 * 3 * 4  # four edges of the top, three segments each, four layers
+    assert (
+        grown.sides.n_faces == 4 * 3 * 4
+    )  # four edges of the top, three segments each, four layers
     assert _shell_volume(grown) == pytest.approx(
         1.0 - (1.0 - 2 * thickness) ** 2 * (1.0 - thickness), rel=1e-12
     )
@@ -115,7 +118,7 @@ def test_layers_meeting_a_tilted_bare_face_turn_to_slide_along_its_plane():
     )
     top &= np.all(points[triangles][:, :, 2] > 0.5, axis=1)
     grown = LAYERS.extrude(points, Polygons(triangles), ~top)
-    sides = grown.points[grown.sides]
+    sides = grown.points[grown.sides.quads]
     np.testing.assert_allclose(sides[:, :, 2], 1.0 + 0.3 * sides[:, :, 0], atol=1e-12)
     drawn = grown.points[grown.walls.triangles[top]]
     np.testing.assert_allclose(drawn[:, :, 2], 1.0 + 0.3 * drawn[:, :, 0], atol=1e-12)
@@ -267,8 +270,9 @@ def test_quadrilateral_layers_meeting_a_bare_quadrilateral_face_slide_along_it()
     top = np.all(np.isclose(points[quads][:, :, 2], 1.0), axis=1)
     grown = LAYERS.extrude(points, Polygons(quads=quads), ~top)
     thickness = LAYERS.offsets()[-1]
-    np.testing.assert_allclose(grown.points[grown.sides][:, :, 2], 1.0, atol=1e-12)
-    assert len(grown.sides) == 4 * 3 * 4
+    assert grown.sides.triangles.size == 0
+    np.testing.assert_allclose(grown.points[grown.sides.quads][:, :, 2], 1.0, atol=1e-12)
+    assert grown.sides.n_faces == 4 * 3 * 4
     assert _cells_volume(grown).sum() == pytest.approx(
         1.0 - (1.0 - 2 * thickness) ** 2 * (1.0 - thickness), rel=1e-12
     )

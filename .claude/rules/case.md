@@ -48,9 +48,9 @@ its file alone.**
 | `spec.py` | `CaseSpec` (mesh, physics, boundaries, optional fluid and numerics, drive, pressure datum, sources, solver, initial, outputs), `Numerics`, the one `SettingsMapping` registry `_CASE_MAPPING`, `case_spec_from_mapping` / `_to_mapping`, `CaseSpec.check_against(mesh)` |
 | `case_file.py` | the YAML parse (`_CaseLoader`), `read_case` / `read_case_document` / `write_case`, `CaseFile`, `CheckedCase` |
 | `mesh_source.py` | `MeshSource.read(directory) -> Mesh` → `AquafluxMesh` (a `.aqmesh` file, read exactly; `io.md`) / `OpenFOAMMesh` |
-| `mesh_file.py` | `MeshSpec` and its one-form sections `Drawing`, `DrawingRegion`, `MeshSizes`, `MeshOutput`: a mesh file (below) |
+| `mesh_file.py` | `MeshSpec` and its one-form sections `Drawing`, `DrawingRegion`, `MeshSizes`, `MeshOutput`: a mesh file (below); `DrawingSections`, the parts the drawing view reads |
 | `mesh_run.py` | `make_mesh(path, overwrite, on_stage) -> MeshRecord`: `aquaflux mesh` |
-| `drawing_view.py` | `view_drawing(drawing, region, patches, others, directory, out) -> DrawingView`, `DRAWING_FILE`: `aquaflux drawing` |
+| `drawing_view.py` | `view_drawing(sections: DrawingSections, directory, out) -> DrawingView`, `DRAWING_FILE`: `aquaflux drawing` |
 | `drawing.py` | `CadPlacement`, shared by the mesh file and the radiation CAD sources |
 | `forcing.py` | `DriveSpec` → `BulkVelocity` (builds `flow.MassFlow`); `SourceSpec` → `BodyForce` (builds `flow.UniformBodyForce`) |
 | `fluid.py` | `Fluid` |
@@ -186,8 +186,9 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   (so a checkpoint's digest would not match) and costs minutes at scale, and nobody runs a real case on a
   box grid.
 - **A mesh file is the mesher's input** (`mesh_file.py`: `MeshSpec(drawing, region, sizes, patches,
-  others, layers, layered, mapped, pipes, pipe_core, pipe_grading, planarizer, core, periodic, output)`, the one-form sections
-  `drawing` / `region` / `sizes` / `output` written without `kind`), read by the case's own YAML parse
+  others, layers, layered, mapped, pipes, pipe_core, pipe_grading, ducts, duct_core, planarizer, core, refinements, periodic, output)`, the one-form sections
+  `drawing` / `region` / `sizes` / `output` written without `kind`; `region.baffles` names the drawing's
+  sheets standing in it, unset all, `[]` none -- `DrawingRegion` → `CadRegion`), read by the case's own YAML parse
   and registry (`read_mesh_file` / `write_mesh_file` in `case_file.py`, `mesh_spec_from_mapping` /
   `mesh_spec_to_mapping` / `mesh_schema` in `spec.py`, sharing `_with_kinds` / `_without_kinds` with
   the case). `sizes.feature_angle` is in radians, like `CadSurface.angle`.
@@ -248,7 +249,10 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   and the recorder's `on_refresh`, which is how `history.csv` counts refits. ⚠️ Before 2026-10-23 only
   `CoupledMarch` did: a laminar run's `history.csv` read `refits` 0 whatever it refitted. Pinned by
   `test_a_laminar_run_records_the_refits_its_materialized_preconditioner_makes`. A `point_setup`
-  may observe a ramp's anchor and is refused if it returns settings. `Segregated` takes no observers and only
+  may observe a ramp's anchor and is refused if it returns settings. With a ramp, `CoupledMarch.observers_for`
+  notes `ViscosityRamp.description` at the anchor (`viscosity ramp: x100 down to the case's own in 12
+  stations of 1 step each, scaling the flow's viscosity only`) and passes `on_station=logger.on_station`,
+  which is refused without a ramp (`solve_coupled` has no such keyword). `Segregated` takes no observers and only
   warns when it runs out of sweeps (#543).
 - ⚠️ **`station_step` and `jacobian_gradient_sweeps` are not file settings and not in `_owned()`**; the
   pitzDaily harness's study path passes them to the library itself. Passing them as "observers" would be a
@@ -276,10 +280,12 @@ missing required field by path, and re-raises a nested constructor's refusal wit
   `mesh_source_from_mapping`, from stdin JSON or from a case file, whose directory is then the base; writes
   `OUT/mesh.vtu`, with `--openfoam` also `OUT/constant/polyMesh`; prints cells, dim, patches with faces,
   groups, `polymesh` and `made`), and `aquaflux drawing OUT [--relative-to DIR]` (`{"mesh_file": ...}` on
-  stdin, read by `drawing_sections_from_mapping` — drawing required, region `None` until it names a
-  solid, patches and `others`; `view_drawing` writes `OUT/drawing.vtp` by `io.write_triangles`, each
+  stdin, read by `drawing_sections_from_mapping` into a `DrawingSections` (`mesh_file.py`) — drawing
+  required, region `None` until it names a solid, patches, `others`, and `feature_angle` from `sizes`,
+  `None` until a positive finite number (read leniently: the view shows an unfinished file); `view_drawing` writes `OUT/drawing.vtp` by `io.write_triangles`, each
   triangle's `face`, and prints `solids`, `faces` (kind, area, point), `patches` (by
-  `meshing.assign_patches`, the mesher's rule), `landed`, `pipes` (`find_pipes(rim_counts=False)`) and
+  `meshing.assign_patches`, the mesher's rule), `landed`, `pipes` (`find_pipes(rim_counts=False)`), `ducts` (`find_ducts(edge_counts=False)`'s
+  side faces at the file's feature angle; `None` without one) and
   `selections_error` — a refused selection is not the reply's `error`, so the drawing is still shown).
   The drawing is read once per (path, mtime, placement) and triangulated once per region (`lru_cache`s
   in the serve process): Sozzi 1.2 s cold, 16 ms after (2026-10-21, macOS arm64). Pinned by
@@ -314,7 +320,9 @@ missing required field by path, and re-raises a nested constructor's refusal wit
 - **Provenance**: the output's `case.yaml` is the spec as it ran (`solver_for(spec)` written out, every path
   re-based by `relocated`, `outputs.directory` `"."`); `run.yaml` records case path, version, commit and
   dirty flag, times, solver kind, convergence, steps, last residual, message, what was written, `initial`,
-  and for radiation `results`.
+  for radiation `results`, and `padded_products` (`precondition.padded_product_path()`: the form this
+  process's padded-row products took, fused or gathered, and why; absent when the run formed none), which
+  the log also states after the solve. It is decided at the first product, so it cannot head the log.
 - ⚠️ The two-cell slab fixture leaves the default `MultipleCorrectionGradient` underdetermined — tests on it
   state `CompactGreenGauss`.
 

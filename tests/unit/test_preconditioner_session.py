@@ -15,6 +15,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import pytest
+from aquaflux.allocator import GlibcTrim
 from aquaflux.flow.block_preconditioner import _characteristic_reference_state
 from aquaflux.precondition import (
     AirReduction,
@@ -25,6 +26,7 @@ from aquaflux.precondition import (
     MaterializedJacobian,
     MonolithicFactorShiftPolicy,
     SimpleSmoothed,
+    StrongCouplings,
 )
 from aquaflux.precondition.monolithic_policy import TracedFormShiftPolicy
 from aquaflux.precondition.traced_field_split import contains_host_callback
@@ -703,3 +705,154 @@ def test_a_bare_block_inverse_is_refused_for_a_problem_with_two_groups(case) -> 
     coupled, _ = case
     with pytest.raises(TypeError, match="single group"):
         open_session(MaterializedJacobian(SimpleSmoothed()), coupled)
+
+
+def test_a_session_gives_freed_memory_back_before_each_refit_by_default(case, monkeypatch) -> None:
+    """The shipped session trims glibc's arenas once per re-fit, and never on a step that re-fits nothing.
+
+    A default that stopped reaching the hook would let bfs3d's peak rise by half a gigabyte with every
+    value unchanged, which nothing else in the suite would see.
+    """
+    coupled, state = case
+    trims: list[int] = []
+    monkeypatch.setattr(GlibcTrim, "__call__", lambda self: trims.append(1))
+    session = open_session(MaterializedJacobian(_SPLIT), coupled)
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    session.refresh_preconditioner(active, state)  # the forced first re-fit
+    session.refresh_preconditioner(active, state)  # nothing to re-fit
+    session.refresh_preconditioner(active, state, due=True)
+    assert len(trims) == 2
+
+
+_FROZEN_SPLIT = FieldSplit(
+    SimpleSmoothed(frozen_coarsening=True), JacobiSmoothed(frozen_coarsening=True)
+)
+
+
+def _first_fit(session, state):
+    """The step a session builds and its forced first fit, as a march's first refresh makes it."""
+    step = session.build(state, dual_time=DualTimeLoop(inner_steps=3, refresh_on_cycles=3))
+    active = eqx.tree_at(lambda s: s.relaxation_schedule, step, ConstantRelaxation(0.5))
+    return session.refresh_preconditioner(active, state)(active)
+
+
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_a_re_fit_frees_the_outgoing_split_before_it_fits(case, precision) -> None:
+    """By the time a re-fit fits its leading block, the arrays of the split it replaces are already gone.
+
+    A re-fit computes every value of its new split and reuses only the structure the inverse names, so
+    the old split's other arrays are freed before the probe, not after the fit, and the superseded
+    inverse is never alive beside the one being fitted. The structure the re-fit reads is kept.
+    """
+    coupled, state = case
+    session = open_session(
+        MaterializedJacobian(dataclasses.replace(_FROZEN_SPLIT, precision=precision)), coupled
+    )
+    old = _first_fit(session, state)
+    inverse = session.preconditioner.inverse
+    kept = {id(leaf) for leaf in jax.tree.leaves(inverse.refit_keeps())}
+    outgoing = [
+        leaf for leaf in jax.tree.leaves(old.shift_policy.form) if isinstance(leaf, jax.Array)
+    ]
+    replaced = [leaf for leaf in outgoing if id(leaf) not in kept]
+    reused = [leaf for leaf in outgoing if id(leaf) in kept]
+    assert replaced and reused
+    seen = []
+    original = inverse.leading.refactor_block
+
+    def watching(block):
+        seen.append(
+            ([leaf.is_deleted() for leaf in replaced], [leaf.is_deleted() for leaf in reused])
+        )
+        return original(block)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(inverse.leading, "refactor_block", watching)
+        new = session.refresh_preconditioner(old, state * 1.05, due=True)(old)
+
+    ((deleted_replaced, deleted_reused),) = seen
+    assert all(deleted_replaced), "an array the re-fit replaces was still alive when it fitted"
+    assert not any(deleted_reused), "an array the re-fit reuses was freed"
+    r = jax.random.normal(jax.random.PRNGKey(2), (state.shape[0],))
+    assert bool(jnp.all(jnp.isfinite(new.shift_policy.form.apply(r))))
+
+
+@pytest.mark.parametrize("precision", ["float64", "float32"])
+def test_freeing_the_outgoing_split_early_changes_no_value_of_the_re_fit(case, precision) -> None:
+    """A re-fit after the early release holds exactly the split a re-fit without it holds."""
+    import numpy as np
+    from aquaflux.precondition import materialized_session
+
+    coupled, state = case
+    spec = MaterializedJacobian(dataclasses.replace(_FROZEN_SPLIT, precision=precision))
+
+    def re_fitted(release: bool):
+        session = open_session(spec, coupled)
+        old = _first_fit(session, state)
+        with pytest.MonkeyPatch.context() as patch:
+            if not release:
+                patch.setattr(
+                    materialized_session, "_release_outgoing", lambda form, inverse: False
+                )
+            new = session.refresh_preconditioner(old, state * 1.05, due=True)(old)
+        return [np.asarray(leaf) for leaf in jax.tree.leaves(new.shift_policy.form)]
+
+    early, late = re_fitted(True), re_fitted(False)
+    assert len(early) == len(late)
+    for a, b in zip(early, late, strict=True):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_a_re_fit_that_fails_after_the_early_release_leaves_the_session_to_fit_afresh(case) -> None:
+    """A re-fit raising after the outgoing split was freed leaves nothing that would glue deleted arrays.
+
+    The inverse is half re-fitted and the split freed, so the session drops both, and its next build fits
+    a new inverse whose step applies.
+    """
+    coupled, state = case
+    session = open_session(MaterializedJacobian(_FROZEN_SPLIT), coupled)
+    old = _first_fit(session, state)
+
+    def failing(block):
+        raise ValueError("a re-fit refused its operator")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(session.preconditioner.inverse.leading, "refactor_block", failing)
+        with pytest.raises(ValueError, match="refused its operator"):
+            session.refresh_preconditioner(old, state * 1.05, due=True)
+    assert session.preconditioner is None
+    rebuilt = session.build(state, dual_time=DualTimeLoop(inner_steps=3))
+    r = jax.random.normal(jax.random.PRNGKey(3), (state.shape[0],))
+    assert bool(jnp.all(jnp.isfinite(rebuilt.shift_policy.form.apply(r))))
+
+
+def test_a_coupled_session_chooses_its_pressure_pattern_at_the_first_fit_and_re_fits_with_it() -> (
+    None
+):
+    """The selection runs on the coupled residual's own products, the re-fit probes with the pattern it
+    chose rather than the case's short reach, and the ``probe`` report sink is told what it chose."""
+    mesh, coupled = _cavity()
+    state = _healthy_state(mesh, coupled)
+    n_fields = coupled.layout.n_fields
+    pressure = coupled.layout.field_offset("k") - 1  # the flow block's last field
+    lines = []
+    spec = MaterializedJacobian(
+        _SPLIT,
+        probe=JacobianProbeSpec(
+            column_reach=(2,) * n_fields,
+            strong_couplings=StrongCouplings(column=pressure, fraction=0.01),
+        ),
+    )
+    session = open_session(spec, coupled, reports={"probe": lines.append})
+    assert session.coupling_selection is None
+    _first_fit(session, state)
+    selection = session.coupling_selection
+    plan = session._probe.plan
+    assert selection.column == pressure
+    assert selection.reach_colours <= selection.colours == plan.n_colours[pressure]
+    assert selection.probes == plan.n_probes
+    assert session._refresh_hook()._probe is session._probe
+    assert len(lines) == 1 and lines[0].startswith(f"strong couplings: column {pressure} keeps")
+    with pytest.raises(TypeError, match="'leading' / 'trailing' / 'probe'"):
+        open_session(spec, coupled, reports={"bogus": lines.append})

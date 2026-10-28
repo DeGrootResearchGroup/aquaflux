@@ -8,7 +8,7 @@ settings values and the shift-policy contract; :mod:`aquaflux.solve` depends on 
 Newton march can be driven with any preconditioner, or none.
 
 **This module is the package's API boundary: other packages import from ``aquaflux.precondition``, not
-from its submodules.** A name absent from ``__all__`` is internal. The surface is five groups:
+from its submodules.** A name absent from ``__all__`` is internal. The surface is six groups:
 
 * **Frozen operators and algebraic multigrid** -- the operator description
   ``ConvectionDiffusionStencil``, which assembles itself and reports its diagonal (plus ``decouple_dof``
@@ -30,6 +30,8 @@ from its submodules.** A name absent from ``__all__`` is internal. The surface i
 * **Bordered systems** -- ``bordered_preconditioner`` extends any preconditioner to the same system
   bordered by one scalar unknown (a Lagrange multiplier), eliminating it through its 1x1 Schur
   complement; where the scalar sits is a ``ScalarBorder``'s to say.
+* **How the products ran** -- ``padded_product_path`` says whether this process's padded-row products
+  took the fused, threaded loop or XLA's gathered form, and why, for a run's record.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from .field_split import (
     field_split_inverse,
 )
 from .frozen_operator import ConvectionDiffusionStencil, decouple_dof
+from .fused_product import padded_product_path
 from .hierarchy_inverse import HierarchyBlockInverse
 from .host_preconditioner import (
     FrozenInverse,
@@ -53,7 +56,7 @@ from .host_preconditioner import (
 )
 from .jacobian_probe import JacobianProbe, jacobian_probe_plan
 from .materialized_preconditioner import MaterializedJacobianPreconditioner
-from .materialized_session import MaterializedProblem, MaterializedSession
+from .materialized_session import CouplingSelection, MaterializedProblem, MaterializedSession
 from .materialized_spec import (
     MATERIALIZED_MAPPING,
     FieldSplit,
@@ -64,6 +67,7 @@ from .materialized_spec import (
 )
 from .monolithic_policy import MonolithicFactorShiftPolicy
 from .pivot_floor import PivotFloor
+from .strong_couplings import StrongCouplings
 from .multigrid import (
     AirHierarchy,
     SmoothedHierarchy,
@@ -85,6 +89,7 @@ __all__ = [
     "AirReduction",
     "BlockInverse",
     "ConvectionDiffusionStencil",
+    "CouplingSelection",
     "FieldGroups",
     "FieldSplit",
     "FieldSplitInverse",
@@ -109,6 +114,7 @@ __all__ = [
     "SimpleSmoothed",
     "SimpleSmoothedInverse",
     "SmoothedHierarchy",
+    "StrongCouplings",
     "TracedCycle",
     "air_multigrid_cycles",
     "bordered_preconditioner",
@@ -122,6 +128,7 @@ __all__ = [
     "materialize_block_jacobian",
     "materialized_spec_from_mapping",
     "materialized_spec_to_mapping",
+    "padded_product_path",
     "refresh_air_hierarchy",
     "smoothed_multigrid_cycles",
 ]

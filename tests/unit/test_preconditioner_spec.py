@@ -13,6 +13,7 @@ from aquaflux.precondition import (
     JacobiSmoothed,
     MaterializedJacobian,
     SimpleSmoothed,
+    StrongCouplings,
 )
 from aquaflux.turbulence import (
     BlockDiagonal,
@@ -41,11 +42,22 @@ def test_the_block_diagonal_spec_names_the_flow_block_settings_and_the_scalar_bl
 
 
 def test_the_probe_spec_names_the_probe_builders_free_settings() -> None:
-    """The skipped blocks and the production-viscosity stand-in follow from other choices."""
+    """The skipped blocks and the production-viscosity stand-in follow from other choices.
+
+    ``strong_couplings`` is the one field the builder does not take: the session applies it at the
+    first fit, and :meth:`JacobianProbeSpec.build_settings` is what reaches the builder.
+    """
     expected = _parameters(coupled_jacobian_probe, inspect.Parameter.POSITIONAL_OR_KEYWORD) - {
         "coupled"
     }
-    assert _fields(JacobianProbeSpec) == expected
+    assert _fields(JacobianProbeSpec) == expected | {"strong_couplings"}
+    spec = JacobianProbeSpec(
+        stencil_reach=3,
+        column_reach=(2, 2, 2, 2, 2, 2),
+        gradient_sweeps=4,
+        strong_couplings=StrongCouplings(column=3, fraction=0.01),
+    )
+    assert set(spec.build_settings()) == expected
 
 
 def test_an_unset_scalar_block_resolves_to_the_two_level_default() -> None:

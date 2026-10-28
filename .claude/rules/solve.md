@@ -14,9 +14,9 @@ subsystem detail is in the files the Index names. Dated history: `.claude/notes/
 
 | File | `paths:` | Covers |
 |---|---|---|
-| `solve-direct-preconditioners.md` | `sparse_jacobian.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The frozen-host contract and the materialized Jacobian; traps from the deleted incomplete-/complete-LU preconditioners |
+| `solve-direct-preconditioners.md` | `sparse_jacobian.py`, `probe_layout.py`, `kronecker_pattern.py`, `host_preconditioner.py`, `materialized_preconditioner.py` | The frozen-host contract and the materialized Jacobian; traps from the deleted incomplete-/complete-LU preconditioners |
 | `.claude/notes/solve-direct-preconditioners-log.md` | *(never auto-loads)* | Dated investigation behind Jacobian materialization: probing reach, #191, materialize cost |
-| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py`, `level_fit.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
+| `solve-amg-multigrid.md` | `multigrid.py`, `hierarchy_inverse.py`, `entry_map.py`, `padded_rows.py`, `level_fit.py`, `kronecker_pattern.py` | Traced multigrid, smoothed aggregation, `multigrid.py`'s binding decisions, the entry maps a refit applies; traps from the deleted monolithic AMG |
 | `.claude/notes/solve-amg-multigrid-log.md` | *(never auto-loads)* | Dated investigation behind the traced multigrid and smoothed aggregation |
 | `solve-flow-block.md` | `saddle_multigrid.py`, `simple_fit.py`, `shift_basis.py` | Traced preconditioning of the `[u, v, w, p]` saddle |
 | `.claude/notes/solve-flow-block-log.md` | *(never auto-loads)* | Full dated flow-block investigation, including qualified/retracted findings |
@@ -46,7 +46,8 @@ Follow the root `CLAUDE.md` "Writing the design records". Solve-specific:
   `jacobian_probe`, `field_split`, `traced_field_split`, `traced_cycle`, `hierarchy_inverse`,
   `saddle_multigrid`, `host_preconditioner`, `block_inverse`, `block_preconditioner`,
   `materialized_preconditioner`, `materialized_spec`, `materialized_session`, `monolithic_policy`,
-  `bordered`, `phase_timer`, `entry_map`, `padded_rows`, `level_fit`, `simple_fit`). An older entry saying `solve/<one of those>.py` means the `precondition/`
+  `bordered`, `phase_timer`, `entry_map`, `padded_rows`, `fused_product`, `level_fit`, `simple_fit`, `probe_layout`,
+  `kronecker_pattern`). An older entry saying `solve/<one of those>.py` means the `precondition/`
   one. `precondition/` imports `solve/` and nothing else; `solve/` imports nothing outside itself (so
   every residual can run on it); every scipy/numba import is on the `precondition/` side. Pinned by
   `tests/unit/test_layering.py` (`BUILT_ON = {"precondition": ("solve",)}`). The engine holds a session
@@ -154,7 +155,7 @@ defect — fix it in the same change.
 | PC shift floor | `refit_beta_floor=0.0` | 0.0 (since #712) | `PC_BETA_FLOOR` |
 | inverse | none — `MaterializedJacobian.inverse` required | **`FieldSplit`** (case refuses others) | `compare.py` |
 | stencil reach | `stencil_reach=3` | 3 | — |
-| probe column reach | `column_reach=None` (uniform) | uniform (since #712) | `COLUMN_REACH` |
+| probe column reach | `column_reach=None` (uniform); `strong_couplings=None` | `[2, 2, 2, 3, 2, 2]` (since #839); no strong couplings | `COLUMN_REACH`, `STRONG_COUPLINGS` |
 | dual-time inner tol | `inner_tol=0.05` | **1e-2** | `INNER_TOL` |
 | flow (leading) inverse | none — `field_split=True` requires `leading_inverse` and `trailing_inverse` | **`SimpleSmoothedInverse`** (`FLOW_INVERSE="simplesmooth"`) | `compare.py` |
 | field split precision | `FieldSplit.precision="float64"` | **`float32`** (pitzDaily too; the adjoint's preconditioner stays float64) — ⚠️ breaks at near-zero pivots without the pivot floor (below), which both case files set | `SPLIT_PRECISION` |
@@ -327,6 +328,35 @@ defect — fix it in the same change.
     a stale preconditioner — apply the update the hook returns (`MarchReplay.refit`,
     `endgame_shift_probe.py`'s `refreshed`). Pinned by
     `test_a_re_fit_releases_the_arrays_only_the_superseded_split_held` (both precisions).
+  - **…and frees most of it before the fit, not after (2026-10-25).** `BetaTrackingRefresh(before_refit=)`
+    is called before each re-fit's probe (ahead of the trim); the session passes `_release_outgoing_form`,
+    which deletes every leaf of `_form` the inverse does not name in `refit_keeps()` (a frozen coarsening's
+    plan, the SIMPLE plans, the coupling's packing layouts; `solve-amg-multigrid.md`), so the superseded
+    split is not alive beside the one being fitted. An inverse that re-coarsens, or a block without
+    `refit_keeps`, answers `None` and nothing is freed early. Nothing applies the preconditioner between
+    the start of a re-fit and the update it returns, so no value moves (pinned bit for bit,
+    `test_freeing_the_outgoing_split_early_changes_no_value_of_the_re_fit`, and the timing,
+    `test_a_re_fit_frees_the_outgoing_split_before_it_fits`). ⚠️ **A re-fit that raises after the release
+    leaves the session with no preconditioner, form or hook**, so the next `build` fits afresh rather than
+    gluing deleted arrays (`test_a_re_fit_that_fails_after_the_early_release_leaves_the_session_to_fit_afresh`).
+    `_release_superseded` still runs after the fit, for whatever was kept. bfs3d (2 steps, `main`
+    `1c5a1875`, one run each, 2026-10-25): live arrays at the leading re-fit's peak 1.36 -> 1.05 GiB, peak
+    5.80 -> 5.58 GiB, now set by the step program's first call; every split leaf bit-identical
+    (`.claude/notes/solve-direct-preconditioners-log.md`, "Freeing the superseded split at the start of a
+    re-fit").
+  - **Every session gives glibc's freed memory back before each re-fit (default, the owner's decision of
+    2026-10-24).** `MaterializedSession(memory_trim=)` defaults to `GlibcTrim()` (`aquaflux/allocator.py`,
+    `malloc_trim(0)`, a no-op without glibc) and hands it to
+    `BetaTrackingRefresh`, which calls it once per re-fit, before the probe (the hook's own default is
+    `None`). `None` turns it off; a case file cannot reach it. It changes no value. **Why:** the step
+    program's first call leaves ~0.6 GiB of freed memory in XLA's worker-thread arenas, and the next re-fit's
+    transient landed on top of it: bfs3d 2-step peak 7.78 -> 7.30 GiB on `2e7949e8` (after #817; mean
+    of three runs each, spread 0.21 -> 0.06; there re-fit #2 set the peak, ~1 GiB above the step
+    program's first call, which sets it since the early release below), no cost in time; 9.04 -> 8.52 before #817
+    (`.claude/notes/solve-direct-preconditioners-log.md`, "A `malloc_trim(0)` before each re-fit"). Read its effect from the resident set, not `mallinfo2`'s free
+    bytes, which count trimmed pages as still free. Pinned by
+    `test_the_memory_trim_runs_once_before_each_refit_and_never_on_a_skipped_step` and
+    `test_a_session_gives_freed_memory_back_before_each_refit_by_default`.
   - **A re-pointed session re-fits the inverse and deliberately keeps the held step's shift (#701)** —
     the step control adapts the shift strength on the premise that the diagonal it scales is fixed, and
     every variant changing it mid-march lost (`.claude/notes/turbulence-log.md`, "#701 — the arms").
@@ -455,6 +485,11 @@ defect — fix it in the same change.
   may produce it. **It does not check that `root` is a root** — the caller owns the convergence test.
   `TransposedPreconditioner` and `stop_array_gradients` (filters by `eqx.is_array`; a callable leaf in
   `theta` is refused by the `custom_vjp`) live here.
+  - **`with_transposes(tree)` / `PacksTranspose` (2026-10-24) — the adjoint asks for transposes; nothing
+    else holds them.** The backward rule applies `with_transposes` to the adjoint preconditioner factory
+    before `jax.linear_transpose`, so every leaf with `with_transpose()` (a padded-row operator,
+    `solve-amg-multigrid.md`) packs its transpose for that transpose solve only. Generic, so every
+    residual reaches it; a factory must hold its operators as leaves, not close over them.
   - **`solve_coupled(adjoint_solver=…)` reaches the transpose solve** (also through
     `solve_reynolds_continuation`'s `**solve_kwargs`); `None` → `default_linear_solver()`. Build one with
     `relative_residual_gmres(rtol, restart=…, stagnation_iters=…, max_restarts=…)`. **Keep it separate
